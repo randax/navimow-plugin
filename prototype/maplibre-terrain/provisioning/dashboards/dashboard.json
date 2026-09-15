@@ -1,0 +1,60 @@
+{
+ "annotations": {
+  "list": [
+   {
+    "builtIn": 1,
+    "datasource": {
+     "type": "grafana",
+     "uid": "-- Grafana --"
+    },
+    "enable": true,
+    "hide": true,
+    "iconColor": "rgba(0, 211, 255, 1)",
+    "name": "Annotations & Alerts",
+    "type": "dashboard"
+   }
+  ]
+ },
+ "editable": true,
+ "fiscalYearStartMonth": 0,
+ "graphTooltip": 0,
+ "id": 1,
+ "links": [],
+ "liveNow": false,
+ "panels": [
+  {
+   "type": "randax-navimowterrainprototype-panel",
+   "title": "3D terrain",
+   "gridPos": {
+    "h": 20,
+    "w": 24,
+    "x": 0,
+    "y": 0
+   },
+   "id": 1,
+   "options": {
+    "terrain": true,
+    "exaggeration": 1.5,
+    "pitch": 60
+   },
+   "targets": [],
+   "datasource": null
+  }
+ ],
+ "refresh": "",
+ "schemaVersion": 39,
+ "tags": [],
+ "templating": {
+  "list": []
+ },
+ "time": {
+  "from": "now-6h",
+  "to": "now"
+ },
+ "timepicker": {},
+ "timezone": "",
+ "title": "Terrain prototype 3D",
+ "uid": "terrain-3d",
+ "version": 1,
+ "weekStart": ""
+}

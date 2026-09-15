@@ -1,0 +1,5 @@
+services:
+  grafana:
+    environment:
+      GF_SECURITY_CONTENT_SECURITY_POLICY: "true"
+      GF_SECURITY_CONTENT_SECURITY_POLICY_TEMPLATE: "script-src 'self' 'unsafe-eval' 'unsafe-inline' 'strict-dynamic' $$NONCE;object-src 'none';font-src 'self';style-src 'self' 'unsafe-inline' blob:;img-src * data:;base-uri 'self';connect-src 'self' grafana.com ws://$$ROOT_PATH wss://$$ROOT_PATH https://cache.kartverket.no https://tiles.mapterhorn.com;manifest-src 'self';media-src 'none';form-action 'self';"

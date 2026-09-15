@@ -1,0 +1,4 @@
+services:
+  grafana:
+    environment:
+      GF_SECURITY_CONTENT_SECURITY_POLICY: "true"
