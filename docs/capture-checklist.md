@@ -6,13 +6,21 @@ not on other people's mowers. Takes one mow plus five minutes of setup.
 
 ## Before the mow
 
-1. Python 3.10+ on any machine that will stay awake for the whole mow.
+This is written for whoever operates the mower; no repo clone is needed.
+
+1. Python 3.10+ on any machine that will stay awake for the whole mow (a laptop
+   on the same Wi-Fi is fine; the data comes from the cloud, not the mower).
    ```bash
+   mkdir navimow-capture && cd navimow-capture
    python3 -m venv .venv && source .venv/bin/activate
    pip install randax-navimow-sdk
+   curl -fsSLO https://raw.githubusercontent.com/randax/navimow-plugin/main/tools/capture.py
    ```
-2. Export your OpenAPI bearer token (the same one your Home Assistant integration
-   or earlier SDK scripts use). If your region is not Frankfurt, also set the API URL.
+   On Windows PowerShell, activate with `.venv\Scripts\Activate.ps1` and fetch the
+   script with `Invoke-WebRequest ... -OutFile capture.py`.
+2. Export the account's OpenAPI bearer token (the one the Home Assistant
+   integration or earlier SDK scripts use; the account owner supplies it). If the
+   region is not Frankfurt, also set the API URL.
    ```bash
    export NAVIMOW_TOKEN=...
    # export NAVIMOW_API_URL=https://navimow-fra.ninebot.com
@@ -21,9 +29,10 @@ not on other people's mowers. Takes one mow plus five minutes of setup.
    ten minutes before the scheduled start, so the capture contains docked
    heartbeats and the exact departure sequence:
    ```bash
-   python tools/capture.py capture
+   python capture.py capture
    ```
-   It prints the device list and writes `fixtures/raw-<date>.jsonl`.
+   It prints the device list and writes `fixtures/raw-<date>.jsonl` in the
+   current folder.
 
 ## During the mow
 
@@ -45,15 +54,15 @@ most valuable capture. A "mow all" Job is fine too.
 
 1. Leave it recording for **ten more minutes** after it docks, so the capture has
    the charging heartbeats and the REST snapshot after the Job. Then Ctrl-C.
-2. Redact and commit:
+2. Redact, then send the redacted file back to the project owner:
    ```bash
-   python tools/capture.py redact fixtures/raw-<date>.jsonl fixtures/job-<date>.jsonl
-   git add fixtures/job-<date>.jsonl && git commit -m "Add captured Job fixture"
+   python capture.py redact fixtures/raw-<date>.jsonl job-<date>.jsonl
    ```
-   Skim the redacted file for anything personal before committing. Positions
-   are metres relative to your dock, not coordinates, so they are safe.
-3. Tell the next `/wayfinder` session the capture is in; it will resolve the
-   ticket and record what the data showed.
+   Skim `job-<date>.jsonl` for anything personal first. Positions are metres
+   relative to the dock, not coordinates, so they are safe to share. Keep or
+   delete the raw file; do not send it.
+3. Project owner: commit the file as `fixtures/job-<date>.jsonl`, then run
+   `/wayfinder` naming the capture task; that session resolves it from the data.
 
 ## Troubleshooting
 
