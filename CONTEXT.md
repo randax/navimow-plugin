@@ -27,3 +27,21 @@ _Avoid_: Heatmap, mowed area, progress map
 **Boundary**:
 The user-drawn outline of the lawn and its Zones, as polygons.
 _Avoid_: Perimeter, fence, map, lawn shape
+
+## Map panel
+
+**Base map**:
+The raster tile layer drawn underneath everything else on the map panel.
+_Avoid_: Background, basemap tiles, map provider
+
+**Terrain**:
+The elevation tile source (raster-dem) that gives the map its 3D relief.
+_Avoid_: DEM, heightmap, elevation layer
+
+**Overlay**:
+An optional raster layer drawn between the Base map and the Trail, such as hillshade or orthophoto.
+_Avoid_: Layer, extra map
+
+**Preset**:
+A built-in, named configuration for a Base map, Terrain or Overlay source.
+_Avoid_: Provider, template, profile
