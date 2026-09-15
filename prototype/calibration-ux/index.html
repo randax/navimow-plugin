@@ -1,0 +1,133 @@
+<!doctype html>
+<!-- PROTOTYPE (throwaway): three variants of the Dock origin calibration + Boundary drawing drawer,
+     switchable via ?variant=A|B|C or the floating bar / arrow keys. Double-click this file to open. -->
+<html lang="en"><head><meta charset="utf-8"><title>Calibration UX prototype</title>
+<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<style>
+  :root{--bg:#111217;--panel:#181b1f;--border:#2c3235;--text:#ccccdc;--muted:#8e8e8e;--accent:#3d71d9;--ok:#73bf69;--warn:#ff9830}
+  *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font:13px/1.4 Inter,system-ui,sans-serif;height:100vh;display:flex;flex-direction:column;overflow:hidden}
+  header{height:44px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px;padding:0 16px;background:var(--panel)}
+  header b{color:#fff} header .crumb{color:var(--muted)} header .x{margin-left:auto;color:var(--muted)}
+  #app{flex:1;display:flex;min-height:0}
+  .map{flex:1;position:relative} .map .maplibregl-map{position:absolute;inset:0}
+  .side{width:340px;border-left:1px solid var(--border);background:var(--panel);padding:14px;overflow:auto;display:flex;flex-direction:column;gap:14px}
+  h3{margin:0 0 6px;font-size:13px;color:#fff;text-transform:uppercase;letter-spacing:.04em}
+  .field{display:flex;flex-direction:column;gap:4px} label{color:var(--muted);font-size:12px}
+  input[type=number],input[type=text]{background:#0b0c0e;border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:2px;width:100%}
+  input[type=range]{width:100%}
+  button{background:#22252b;border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:2px;cursor:pointer} button.primary{background:var(--accent);border-color:var(--accent);color:#fff} button.active{outline:2px solid var(--accent)} button:disabled{opacity:.4;cursor:default}
+  .row{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+  .hint{color:var(--muted);font-size:12px}
+  .zones div{display:flex;gap:6px;align-items:center;padding:4px 0;border-bottom:1px dashed var(--border)} .zones input{width:56px}
+  pre#state{margin:0;font-size:11px;color:#9fa7b3;background:#0b0c0e;border:1px solid var(--border);padding:8px;max-height:160px;overflow:auto;white-space:pre-wrap}
+  .float{position:absolute;z-index:5;background:rgba(24,27,31,.92);border:1px solid var(--border);border-radius:4px;padding:8px 10px;display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+  .steps{display:flex;gap:0;margin-bottom:6px} .steps div{flex:1;padding:8px;border-bottom:3px solid var(--border);color:var(--muted);text-align:center} .steps div.on{border-color:var(--accent);color:#fff}
+  #switcher{position:fixed;bottom:14px;left:50%;transform:translateX(-50%);z-index:99;background:#ffe14d;color:#111;border-radius:999px;padding:6px 14px;display:flex;gap:12px;align-items:center;font-weight:600;box-shadow:0 4px 16px rgba(0,0,0,.6)} #switcher button{background:#111;color:#ffe14d;border:none;border-radius:999px;width:28px;height:28px}
+  .maplibregl-marker.dock{width:18px;height:18px;border-radius:50%;background:var(--warn);border:2px solid #fff;cursor:grab}
+  .maplibregl-marker.handle{width:14px;height:14px;border-radius:50%;background:#fff;border:2px solid var(--accent);cursor:grab}
+  .chip{background:#0b0c0e;border:1px solid var(--border);border-radius:2px;padding:3px 8px;font-family:ui-monospace,monospace;font-size:11px}
+</style></head><body>
+<header><span class="crumb">Edit panel</span>›<b>Navimow Map</b>›<span class="crumb">Calibrate lawn</span><span class="x">✕</span></header>
+<div id="app"></div>
+<div id="switcher"><button id="prev">←</button><span id="vlabel"></span><button id="next">→</button></div>
+<script>
+// ---------- shared model ----------
+const VARIANTS={A:'Sidebar: drag + slider',B:'Direct manipulation, no sidebar',C:'Guided wizard'};
+const params=new URLSearchParams(location.search); let variant=VARIANTS[params.get('variant')]?params.get('variant'):'A';
+const state={dock:{lon:10.6720,lat:59.9640},rotDeg:20,lawn:null,zones:[]};   // rotation of mower +x axis, degrees clockwise from east... prototype convention
+const TRAIL_LOCAL=[];for(let l=0;l<30;l++){const y=l*1.5;for(const x of(l%2?[40,0]:[0,40]))TRAIL_LOCAL.push([x,y]);}
+function toLonLat([x,y]){const r=state.rotDeg*Math.PI/180;const e=x*Math.cos(r)-y*Math.sin(r),n=x*Math.sin(r)+y*Math.cos(r);
+  return [state.dock.lon+e/(111320*Math.cos(state.dock.lat*Math.PI/180)),state.dock.lat+n/111320];}
+function trailGeo(){return{type:'Feature',geometry:{type:'LineString',coordinates:TRAIL_LOCAL.map(toLonLat)}};}
+function ringsGeo(){const f=[];if(state.lawn)f.push({type:'Feature',properties:{kind:'lawn',name:'Lawn'},geometry:{type:'Polygon',coordinates:[state.lawn]}});
+  state.zones.forEach(z=>f.push({type:'Feature',properties:{kind:'zone',name:z.name,id:z.id},geometry:{type:'Polygon',coordinates:[z.ring]}}));return{type:'FeatureCollection',features:f};}
+const style={version:8,glyphs:'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf',sources:{kv:{type:'raster',tiles:['https://cache.kartverket.no/v1/wmts/1.0.0/topo/default/webmercator/{z}/{y}/{x}.png'],tileSize:256,maxzoom:18,attribution:'© Kartverket'},
+  trail:{type:'geojson',data:trailGeo()},rings:{type:'geojson',data:ringsGeo()},draft:{type:'geojson',data:{type:'FeatureCollection',features:[]}}},
+  layers:[{id:'kv',type:'raster',source:'kv'},
+    {id:'lawn-fill',type:'fill',source:'rings',filter:['==',['get','kind'],'lawn'],paint:{'fill-color':'#73bf69','fill-opacity':.12}},
+    {id:'zone-fill',type:'fill',source:'rings',filter:['==',['get','kind'],'zone'],paint:{'fill-color':'#3d71d9','fill-opacity':.18}},
+    {id:'ring-line',type:'line',source:'rings',paint:{'line-color':['case',['==',['get','kind'],'lawn'],'#73bf69','#3d71d9'],'line-width':2}},
+    {id:'ring-label',type:'symbol',source:'rings',layout:{'text-field':['get','name'],'text-size':12},paint:{'text-color':'#fff','text-halo-color':'#000','text-halo-width':1}},
+    {id:'trail',type:'line',source:'trail',paint:{'line-color':'#2ecc40','line-width':2.5,'line-opacity':.8}},
+    {id:'draft-line',type:'line',source:'draft',paint:{'line-color':'#ffe14d','line-width':2,'line-dasharray':[2,1]}},
+    {id:'draft-pt',type:'circle',source:'draft',filter:['==',['geometry-type'],'Point'],paint:{'circle-radius':4,'circle-color':'#ffe14d'}}]};
+let map,dockMarker,onChange=()=>{};
+function refresh(){if(map.getSource('trail')){map.getSource('trail').setData(trailGeo());map.getSource('rings').setData(ringsGeo());}dockMarker&&dockMarker.setLngLat([state.dock.lon,state.dock.lat]);onChange();renderState();}
+function renderState(){const el=document.getElementById('state');if(el)el.textContent=JSON.stringify({dock:{lat:+state.dock.lat.toFixed(6),lon:+state.dock.lon.toFixed(6)},rotationDeg:+state.rotDeg.toFixed(1),lawn:state.lawn?state.lawn.length-1+' vertices':null,zones:state.zones.map(z=>({id:z.id,name:z.name,vertices:z.ring.length-1}))},null,1);}
+function mountMap(container,{dockDraggable=true,onDockClick=null}={}){
+  map=new maplibregl.Map({container,style,center:toLonLat([20,22]),zoom:18.3,attributionControl:true});map.addControl(new maplibregl.NavigationControl(),'top-left');
+  const el=document.createElement('div');el.className='dock';dockMarker=new maplibregl.Marker({element:el,draggable:dockDraggable}).setLngLat([state.dock.lon,state.dock.lat]).addTo(map);
+  dockMarker.on('drag',()=>{const p=dockMarker.getLngLat();state.dock={lon:p.lng,lat:p.lat};refresh();});
+  if(onDockClick)map.on('click',e=>{if(!drawing)onDockClick(e.lngLat);});
+  map.on('load',renderState);}
+// ---------- shared polygon drawing (click = vertex, double-click = finish) ----------
+let drawing=null,draft=[];
+function startDraw(kind,done){drawing={kind,done};draft=[];map.getCanvas().style.cursor='crosshair';map.doubleClickZoom.disable();
+  const click=e=>{draft.push([e.lngLat.lng,e.lngLat.lat]);showDraft();};
+  const dbl=e=>{e.preventDefault();const pts=draft.filter((c,i)=>i===0||Math.hypot(c[0]-draft[i-1][0],c[1]-draft[i-1][1])>1e-7);if(pts.length>=3){finish([...pts,pts[0]]);}};
+  map.on('click',click);map.on('dblclick',dbl);
+  function finish(ring){map.off('click',click);map.off('dblclick',dbl);map.getCanvas().style.cursor='';map.doubleClickZoom.enable();drawing=null;draft=[];showDraft();done(ring);}
+  drawing.cancel=()=>finish(null);}
+function showDraft(){const f=[];if(draft.length>1)f.push({type:'Feature',geometry:{type:'LineString',coordinates:draft}});draft.forEach(c=>f.push({type:'Feature',geometry:{type:'Point',coordinates:c}}));map.getSource('draft').setData({type:'FeatureCollection',features:f});}
+function addZone(ring){const id=state.zones.length+1;state.zones.push({id,name:'Zone '+id,ring});refresh();}
+const app=document.getElementById('app');
+// ---------- Variant A: sidebar with drag + slider ----------
+function VariantA(){app.innerHTML=`<div class="map" id="m"></div><div class="side">
+  <div><h3>Dock origin</h3><div class="hint">Drag the orange marker to where the charging dock stands, or type coordinates.</div>
+   <div class="row"><div class="field"><label>Latitude</label><input id="lat" type="number" step="0.000001"></div><div class="field"><label>Longitude</label><input id="lon" type="number" step="0.000001"></div></div></div>
+  <div><h3>Rotation</h3><div class="hint">Turn until the green Trail lies on the lawn.</div><input id="rot" type="range" min="-180" max="180" step="0.5"><div class="row"><input id="rotn" type="number" step="0.5" style="width:90px"><span class="hint">° (mower x-axis from east)</span></div></div>
+  <div><h3>Boundary</h3><div class="row"><button id="lawn">Draw lawn</button><button id="zone">Add zone</button><button id="cancel" disabled>Cancel</button></div><div class="hint">Click to add corners, double-click to close.</div><div class="zones" id="zones"></div></div>
+  <div><h3>Saved to panel options</h3><pre id="state"></pre></div>
+  <div class="row" style="margin-top:auto"><button class="primary">Save</button><button>Discard</button></div></div>`;
+  mountMap('m');const lat=$('lat'),lon=$('lon'),rot=$('rot'),rotn=$('rotn');
+  onChange=()=>{lat.value=state.dock.lat.toFixed(6);lon.value=state.dock.lon.toFixed(6);rot.value=rotn.value=state.rotDeg;
+    $('zones').innerHTML=state.zones.map((z,i)=>`<div><span class="chip">id</span><input value="${z.id}" data-i="${i}" data-k="id" type="number"><input value="${z.name}" data-i="${i}" data-k="name" type="text" style="width:120px"><button data-del="${i}">✕</button></div>`).join('');
+    $('zones').querySelectorAll('input').forEach(i=>i.oninput=()=>{const z=state.zones[i.dataset.i];z[i.dataset.k]=i.dataset.k==='id'?+i.value:i.value;refresh();});
+    $('zones').querySelectorAll('[data-del]').forEach(b=>b.onclick=()=>{state.zones.splice(+b.dataset.del,1);refresh();});};
+  lat.oninput=()=>{state.dock.lat=+lat.value;refresh();};lon.oninput=()=>{state.dock.lon=+lon.value;refresh();};
+  rot.oninput=()=>{state.rotDeg=+rot.value;refresh();};rotn.oninput=()=>{state.rotDeg=+rotn.value;refresh();};
+  $('lawn').onclick=()=>{$('cancel').disabled=false;startDraw('lawn',r=>{if(r)state.lawn=r;$('cancel').disabled=true;refresh();});};
+  $('zone').onclick=()=>{$('cancel').disabled=false;startDraw('zone',r=>{if(r)addZone(r);$('cancel').disabled=true;});};
+  $('cancel').onclick=()=>drawing&&drawing.cancel();onChange();}
+// ---------- Variant B: direct manipulation, rotation handle, floating toolbar ----------
+function VariantB(){app.innerHTML=`<div class="map" id="m">
+  <div class="float" style="top:10px;left:50%;transform:translateX(-50%)"><b>Calibrate</b><span class="hint">Drag ● dock. Drag ○ to rotate. </span><button id="lawn">Draw lawn</button><button id="zone">Add zone</button><button id="undo">Undo last shape</button></div>
+  <div class="float" style="bottom:36px;left:10px;flex-direction:column;align-items:flex-start"><span class="chip" id="readout"></span><pre id="state" style="display:none"></pre></div>
+  <div class="float" style="bottom:36px;right:10px"><button class="primary">Save</button><button>Discard</button></div></div>`;
+  mountMap('m');
+  const hel=document.createElement('div');hel.className='handle';const handle=new maplibregl.Marker({element:hel,draggable:true}).setLngLat(toLonLat([40,0])).addTo(map);
+  map.on('load',()=>{map.addSource('axis',{type:'geojson',data:axis()});map.addLayer({id:'axis',type:'line',source:'axis',paint:{'line-color':'#fff','line-width':1.5,'line-dasharray':[1,1]}});});
+  function axis(){return{type:'Feature',geometry:{type:'LineString',coordinates:[[state.dock.lon,state.dock.lat],toLonLat([40,0])]}};}
+  handle.on('drag',()=>{const p=handle.getLngLat();const dx=(p.lng-state.dock.lon)*111320*Math.cos(state.dock.lat*Math.PI/180),dy=(p.lat-state.dock.lat)*111320;state.rotDeg=Math.atan2(dy,dx)*180/Math.PI;refresh();});
+  onChange=()=>{if(!drawing||true)handle.setLngLat(toLonLat([40,0]));map.getSource('axis')&&map.getSource('axis').setData(axis());
+    $('readout').textContent=`dock ${state.dock.lat.toFixed(5)}, ${state.dock.lon.toFixed(5)} · rotation ${state.rotDeg.toFixed(1)}° · lawn ${state.lawn?'✓':'–'} · zones ${state.zones.length}`;};
+  $('lawn').onclick=()=>startDraw('lawn',r=>{if(r)state.lawn=r;refresh();});$('zone').onclick=()=>startDraw('zone',r=>{if(r)addZone(r);});
+  $('undo').onclick=()=>{if(state.zones.length)state.zones.pop();else state.lawn=null;refresh();};onChange();}
+// ---------- Variant C: guided wizard ----------
+function VariantC(){let step=1;app.innerHTML=`<div class="map" id="m"></div><div class="side"><div class="steps"><div id="s1">1 · Place dock</div><div id="s2">2 · Align</div><div id="s3">3 · Draw</div></div><div id="body"></div><div class="row" style="margin-top:auto"><button id="back">Back</button><button id="nextb" class="primary">Next</button></div></div>`;
+  mountMap('m',{dockDraggable:false,onDockClick:p=>{if(step===1){state.dock={lon:p.lng,lat:p.lat};refresh();}}});
+  const body=$('body');
+  function render(){[1,2,3].forEach(i=>$('s'+i).classList.toggle('on',i===step));$('back').disabled=step===1;$('nextb').textContent=step===3?'Finish':'Next';
+    if(step===1)body.innerHTML=`<h3>Where is the charging dock?</h3><div class="hint">Click its position on the map. The mower's own coordinates are measured from here. Zoom in as far as you can first.</div><p class="chip">${state.dock.lat.toFixed(6)}, ${state.dock.lon.toFixed(6)}</p><div class="hint">Tip: the dock is usually against a wall or hedge; the Trail's first and last points end there.</div>`;
+    if(step===2)body.innerHTML=`<h3>Turn the Trail onto the lawn</h3><div class="hint">The green lanes are a real Job. Nudge until they lie on the grass.</div>
+      <div class="row"><button data-d="-10">⟲ 10°</button><button data-d="-1">⟲ 1°</button><span class="chip" id="deg"></span><button data-d="1">1° ⟳</button><button data-d="10">10° ⟳</button></div>
+      <div class="row"><button id="flip">Flip 180°</button></div>
+      <div class="field"><label>Or: compass bearing of the mower's first lane (degrees, from your phone)</label><div class="row"><input id="bearing" type="number" style="width:100px" placeholder="e.g. 92"><button id="applyb">Apply</button></div></div>
+      <pre id="state"></pre>`;
+    if(step===3)body.innerHTML=`<h3>Draw the lawn and its zones</h3><div class="hint">Trace the lawn edge first, then each zone. Zone ids must match the mower app's zone numbers.</div>
+      <div class="row"><button id="lawn">${state.lawn?'Redraw lawn':'Draw lawn'}</button><button id="zone">Add zone</button></div><div class="zones" id="zones"></div><pre id="state"></pre>`;
+    wire();renderState();}
+  function wire(){body.querySelectorAll('[data-d]').forEach(b=>b.onclick=()=>{state.rotDeg+=+b.dataset.d;refresh();});
+    const f=$('flip');if(f)f.onclick=()=>{state.rotDeg+=180;refresh();};const ab=$('applyb');if(ab)ab.onclick=()=>{state.rotDeg=90-+$('bearing').value;refresh();};
+    const l=$('lawn');if(l)l.onclick=()=>startDraw('lawn',r=>{if(r)state.lawn=r;refresh();render();});const z=$('zone');if(z)z.onclick=()=>startDraw('zone',r=>{if(r)addZone(r);render();});
+    const zs=$('zones');if(zs){zs.innerHTML=state.zones.map((z,i)=>`<div><span class="chip">id</span><input value="${z.id}" data-i="${i}" type="number"><span>${z.name}</span></div>`).join('');zs.querySelectorAll('input').forEach(i=>i.oninput=()=>{state.zones[i.dataset.i].id=+i.value;refresh();});}}
+  onChange=()=>{const d=$('deg');if(d)d.textContent=state.rotDeg.toFixed(1)+'°';if(step===1)render();};
+  $('back').onclick=()=>{step=Math.max(1,step-1);render();};$('nextb').onclick=()=>{if(step<3){step++;render();}else alert('Saved to panel options (prototype)');};render();}
+// ---------- switcher ----------
+function $(id){return document.getElementById(id);}
+const keys=Object.keys(VARIANTS);function go(k){const u=new URL(location);u.searchParams.set('variant',k);location.href=u;}
+$('prev').onclick=()=>go(keys[(keys.indexOf(variant)+keys.length-1)%keys.length]);$('next').onclick=()=>go(keys[(keys.indexOf(variant)+1)%keys.length]);
+document.addEventListener('keydown',e=>{if(['INPUT','TEXTAREA'].includes(document.activeElement.tagName))return;if(e.key==='ArrowLeft')$('prev').click();if(e.key==='ArrowRight')$('next').click();});
+$('vlabel').textContent=`${variant} (${VARIANTS[variant]})`;({A:VariantA,B:VariantB,C:VariantC})[variant]();
+</script></body></html>
