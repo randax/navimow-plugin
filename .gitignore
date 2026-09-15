@@ -1,0 +1,4 @@
+fixtures/raw-*.jsonl
+navimow_tokens.json
+.venv/
+__pycache__/
