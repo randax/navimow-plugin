@@ -3,3 +3,7 @@ navimow_tokens.json
 .venv/
 __pycache__/
 .claude/worktrees/
+prototype/*/node_modules/
+prototype/*/dist/
+prototype/*/.eslintcache
+prototype/*/test-results/
