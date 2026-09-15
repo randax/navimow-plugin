@@ -2,3 +2,4 @@ fixtures/raw-*.jsonl
 navimow_tokens.json
 .venv/
 __pycache__/
+.claude/worktrees/
