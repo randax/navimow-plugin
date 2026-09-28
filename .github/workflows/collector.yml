@@ -1,0 +1,37 @@
+name: Collector
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.13"]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          # No password: a throwaway service reachable only from this job.
+          POSTGRES_HOST_AUTH_METHOD: trust
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    env:
+      NAVIMOW_TEST_POSTGRES_DSN: postgresql://postgres@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - run: pip install -e 'collector[dev]'
+      - run: ruff check collector
+      - run: ruff format --check collector
+      - run: mypy
+        working-directory: collector
+      - run: pytest collector

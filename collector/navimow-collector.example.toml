@@ -1,0 +1,5 @@
+[storage]
+backend = "postgres"
+# dsn = "postgresql://user:password@localhost/navimow"
+dsn_file = "/run/secrets/navimow-postgres-dsn"
+migrate = true

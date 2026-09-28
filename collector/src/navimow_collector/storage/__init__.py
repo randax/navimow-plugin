@@ -1,0 +1,25 @@
+"""Storage boundary and backend selection for collector ingestion."""
+
+from __future__ import annotations
+
+from ..config import StorageConfig
+from .base import SchemaError, Storage, StorageError
+from .postgres import PostgresStorage
+
+__all__ = ["STORAGE_BACKENDS", "SchemaError", "Storage", "StorageError", "open_storage"]
+
+STORAGE_BACKENDS = {"postgres": PostgresStorage}
+
+
+def open_storage(config: StorageConfig) -> Storage:
+    """Open the configured backend with its schema migrated, or checked when migration is off."""
+    storage: Storage = STORAGE_BACKENDS[config.backend](config)
+    try:
+        if config.migrate:
+            storage.migrate()
+        else:
+            storage.check_schema()
+    except BaseException:
+        storage.close()
+        raise
+    return storage
