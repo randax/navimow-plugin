@@ -10,16 +10,17 @@ import webbrowser
 from collections.abc import Callable
 from dataclasses import fields
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 from mower_sdk.http import HTTPSession, UrllibSession
 
 from .auth import (
     MANUAL_REDIRECT_URI,
+    LoopbackListener,
     TokenClient,
     TokenRequestError,
     TokenStore,
     authorization_url,
-    loopback_listener,
 )
 from .config import Config, ConfigError, Secret, load_config
 from .ingest import Ingestor, read_capture
@@ -101,51 +102,45 @@ def _login(
     config: Config, args: argparse.Namespace, session_factory: Callable[[], HTTPSession]
 ) -> int:
     """Complete exactly one authorization-code flow; automatic refresh happens at runtime."""
-    secret = config.auth.client_secret
-    store = TokenStore(config.auth.state_file)
-    if args.code:
-        _exchange_and_store(
-            session_factory(),
-            config.auth.client_id,
-            secret.reveal(),
-            store,
-            args.code,
-            MANUAL_REDIRECT_URI,
-        )
-        print(f"Navimow login complete; credentials saved to {store.path}")
-        return 0
-
-    state = secrets.token_urlsafe(32)
+    client_id = config.auth.client_id
     if args.no_browser:
-        print(authorization_url(config.auth.client_id, MANUAL_REDIRECT_URI, state))
+        print(authorization_url(client_id, MANUAL_REDIRECT_URI, secrets.token_urlsafe(32)))
         print("After signing in, run navimow-collector login --code '<code-or-redirect-url>'.")
         return 0
+    if args.code:
+        code, redirect_uri = _pasted_code(args.code), MANUAL_REDIRECT_URI
+    else:
+        code, redirect_uri = _browser_code(client_id, args.timeout)
 
-    with loopback_listener(state) as listener:
-        url = authorization_url(config.auth.client_id, listener.redirect_uri, state)
-        print(url)
-        webbrowser.open(url)
-        code = listener.wait(args.timeout)
-        _exchange_and_store(
-            session_factory(),
-            config.auth.client_id,
-            secret.reveal(),
-            store,
-            code,
-            listener.redirect_uri,
-        )
+    client = TokenClient(session_factory(), client_id, config.auth.client_secret.reveal())
+    store = TokenStore(config.auth.state_file)
+    store.save(asyncio.run(client.exchange(code, redirect_uri)))
     print(f"Navimow login complete; credentials saved to {store.path}")
     return 0
 
 
-def _exchange_and_store(
-    session: HTTPSession,
-    client_id: str,
-    client_secret: str,
-    store: TokenStore,
-    code: str,
-    redirect_uri: str,
-) -> None:
-    client = TokenClient(session, client_id, client_secret)
-    credential = asyncio.run(client.exchange(code, redirect_uri))
-    store.save(credential)
+def _browser_code(client_id: str, timeout: float) -> tuple[str, str]:
+    """Capture the redirect on a temporary loopback listener; the code is bound to its URI."""
+    state = secrets.token_urlsafe(32)
+    with LoopbackListener(state) as listener:
+        url = authorization_url(client_id, listener.redirect_uri, state)
+        print(url)
+        webbrowser.open(url)
+        try:
+            return listener.wait(timeout), listener.redirect_uri
+        except TimeoutError as error:
+            raise TimeoutError(
+                f"{error}; without a local browser, use `navimow-collector login --no-browser`"
+            ) from error
+
+
+def _pasted_code(value: str) -> str:
+    """Accept either a copied code or the complete redirect URL from a failed browser load."""
+    parsed = urlparse(value.strip())
+    if parsed.scheme and parsed.netloc:
+        code = parse_qs(parsed.query).get("code", [""])[0]
+    else:
+        code = value.strip()
+    if not code:
+        raise ValueError("login code is missing")
+    return code

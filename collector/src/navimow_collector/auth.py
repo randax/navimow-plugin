@@ -8,8 +8,7 @@ import logging
 import os
 import tempfile
 import threading
-from collections.abc import Awaitable, Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -29,7 +28,8 @@ MQTT_OAUTH_ERROR = "CODE_OAUTH_INFO_ILLEGAL"
 RELOGIN_POLL_SECONDS = 60
 
 _LOGGER = logging.getLogger(__name__)
-_DETERMINISTIC_WORDS = ("401", "403", "invalid", "expired", "unauthorized", "forbidden")
+# Vendor prose meaning the grant itself is dead, so only a new login helps.
+_RELOGIN_WORDS = ("401", "403", "invalid", "expired", "unauthorized", "forbidden")
 
 
 @dataclass(frozen=True)
@@ -126,7 +126,7 @@ class TokenClient:
         return await self._request(
             {
                 "grant_type": "authorization_code",
-                "code": authorization_code(code),
+                "code": code,
                 "client_id": self._client_id,
                 "client_secret": self._client_secret,
                 "redirect_uri": redirect_uri,
@@ -136,7 +136,7 @@ class TokenClient:
 
     async def refresh(self, credential: Credential, *, now: float) -> Credential:
         """Request a new access token and retain the existing refresh token if omitted."""
-        refreshed = await self._request(
+        return await self._request(
             {
                 "grant_type": "refresh_token",
                 "refresh_token": credential.refresh_token,
@@ -144,15 +144,12 @@ class TokenClient:
                 "client_secret": self._client_secret,
             },
             now,
-        )
-        return Credential(
-            access_token=refreshed.access_token,
-            refresh_token=refreshed.refresh_token or credential.refresh_token,
-            expires_in=refreshed.expires_in,
-            obtained_at=refreshed.obtained_at,
+            previous_refresh_token=credential.refresh_token,
         )
 
-    async def _request(self, form: dict[str, str], now: float) -> Credential:
+    async def _request(
+        self, form: dict[str, str], now: float, *, previous_refresh_token: str | None = None
+    ) -> Credential:
         async with self._session.request("POST", TOKEN_URL, data=form) as response:
             body = await response.text()
         if response.status < 200 or response.status >= 300:
@@ -161,15 +158,19 @@ class TokenClient:
             parsed = json.loads(body)
             if not isinstance(parsed, dict):
                 raise ValueError("token response is not an object")
+            # A refresh response may omit the refresh token; the previous one then still holds.
+            refresh_token = parsed.get("refresh_token") or previous_refresh_token
+            if not isinstance(refresh_token, str):
+                raise ValueError("refresh_token must be a non-empty string")
             return Credential(
                 access_token=_required_string(parsed, "access_token"),
-                refresh_token=_optional_string(parsed, "refresh_token"),
+                refresh_token=refresh_token,
                 expires_in=_required_int(parsed, "expires_in"),
                 obtained_at=now,
             )
         except (TypeError, ValueError, json.JSONDecodeError) as error:
             # Vendor errors can arrive with status 200, so classification needs their prose;
-            # the wording here must not itself match a deterministic word, and must not log
+            # the wording here must not itself match a re-login word, and must not log
             # a token from a half-formed credential.
             detail = "malformed credential" if "access_token" in body else body
             raise TokenRequestError(f"unexpected token response: {detail}") from error
@@ -204,6 +205,7 @@ class TokenManager:
         self.state = AuthState.FRESH if self._credential is not None else AuthState.RELOGIN_REQUIRED
         self.next_attempt_at: float | None = None
         self._failures = 0
+        self._last_rejected: Credential | None = None
 
     async def access_token(self) -> str | None:
         """Return the current token, proactively refreshing once it reaches its margin."""
@@ -212,7 +214,7 @@ class TokenManager:
             if self._credential is not None and self.state is not AuthState.RELOGIN_REQUIRED:
                 if self._credential.refresh_at() <= now and self._may_attempt(now):
                     await self._refresh(now)
-            return self._current()
+            return self._token_adopting_new_login()
 
     async def on_unauthorized(self) -> str | None:
         """Refresh after a REST HTTP 401 response."""
@@ -237,18 +239,20 @@ class TokenManager:
     async def _refresh_on_rejection(self, rejected: Credential | None) -> str | None:
         async with self._lock:
             now = self._clock()
-            # Another caller may already have replaced the rejected token, and a retry
-            # already scheduled must not be brought forward by a burst of rejections.
+            # Another caller may already have replaced the rejected token. A token newly known
+            # to be dead earns one attempt at once; after that a burst of rejections waits for
+            # the retry ladder rather than hammering the endpoint.
             if (
                 rejected is not None
                 and rejected is self._credential
                 and self.state is not AuthState.RELOGIN_REQUIRED
-                and self._may_attempt(now)
+                and (rejected is not self._last_rejected or self._may_attempt(now))
             ):
+                self._last_rejected = rejected
                 await self._refresh(now)
-            return self._current()
+            return self._token_adopting_new_login()
 
-    def _current(self) -> str | None:
+    def _token_adopting_new_login(self) -> str | None:
         if self.state is AuthState.RELOGIN_REQUIRED:
             self._adopt_new_login()
         return self._credential.access_token if self._credential else None
@@ -275,10 +279,10 @@ class TokenManager:
         try:
             refreshed = await self._client.refresh(self._credential, now=now)
         except TokenRequestError as error:
-            self._record_failure(str(error), now, deterministic=_is_deterministic(str(error)))
+            self._record_failure(str(error), now, relogin=_means_relogin(str(error)))
             return
         except Exception as error:  # Transport errors, whatever their wording, are transient.
-            self._record_failure(str(error), now, deterministic=False)
+            self._record_failure(str(error), now, relogin=False)
             return
         # Adopt before saving: the old refresh token may already be spent, so the new pair
         # must keep serving even if the disk refuses it.
@@ -291,8 +295,8 @@ class TokenManager:
         except OSError as error:
             _LOGGER.error("Could not save refreshed Navimow credentials: %s", error)
 
-    def _record_failure(self, detail: str, now: float, *, deterministic: bool) -> None:
-        if deterministic:
+    def _record_failure(self, detail: str, now: float, *, relogin: bool) -> None:
+        if relogin:
             self.state = AuthState.RELOGIN_REQUIRED
             self.next_attempt_at = None
             _LOGGER.error(
@@ -317,18 +321,6 @@ def authorization_url(client_id: str, redirect_uri: str, state: str) -> str:
     return f"{AUTHORIZE_URL}&{urlencode(parameters)}"
 
 
-def authorization_code(value: str) -> str:
-    """Accept either a copied code or the complete redirect URL from a failed browser load."""
-    parsed = urlparse(value.strip())
-    if parsed.scheme and parsed.netloc:
-        code = parse_qs(parsed.query).get("code", [""])[0]
-    else:
-        code = value.strip()
-    if not code:
-        raise ValueError("login code is missing")
-    return code
-
-
 class LoopbackListener:
     """A short-lived local callback server which rejects a redirect with the wrong state."""
 
@@ -340,18 +332,9 @@ class LoopbackListener:
 
         class CallbackHandler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:  # noqa: N802 - required by BaseHTTPRequestHandler
-                parsed = urlparse(self.path)
-                parameters = parse_qs(parsed.query)
-                valid_state = parameters.get("state", [None])[0] == listener._state
-                if parsed.path != "/callback" or not valid_state:
-                    self.send_error(400, "invalid OAuth callback")
+                if not listener._accept(self.path):
+                    self.send_error(400, "invalid Navimow login callback")
                     return
-                code = parameters.get("code", [""])[0]
-                if not code:
-                    self.send_error(400, "missing OAuth code")
-                    return
-                listener._code = code
-                listener._received.set()
                 body = b"Login complete. You can close this tab."
                 self.send_response(200)
                 self.send_header("Content-Type", "text/plain; charset=utf-8")
@@ -367,7 +350,19 @@ class LoopbackListener:
 
     @property
     def redirect_uri(self) -> str:
-        return f"http://127.0.0.1:{self._server.server_port}/callback"
+        # `localhost`, not 127.0.0.1: the vendor's redirect validation is undocumented, and
+        # the only loopback form known to be accepted is http://localhost:1/callback.
+        return f"http://localhost:{self._server.server_port}/callback"
+
+    def _accept(self, path: str) -> bool:
+        parsed = urlparse(path)
+        parameters = parse_qs(parsed.query)
+        code = parameters.get("code", [""])[0]
+        if parsed.path != "/callback" or parameters.get("state") != [self._state] or not code:
+            return False
+        self._code = code
+        self._received.set()
+        return True
 
     def __enter__(self) -> LoopbackListener:
         self._thread.start()
@@ -386,13 +381,6 @@ class LoopbackListener:
         return self._code
 
 
-@contextmanager
-def loopback_listener(state: str, port: int = 0) -> Iterator[LoopbackListener]:
-    """Make listener lifetime explicit at the CLI boundary and easy to exercise in tests."""
-    with LoopbackListener(state, port) as listener:
-        yield listener
-
-
 async def maintain(
     manager: TokenManager, sleep: Callable[[float], Awaitable[object]] = asyncio.sleep
 ) -> None:
@@ -406,15 +394,6 @@ def _required_string(value: dict[str, Any], name: str) -> str:
     result = value.get(name)
     if not isinstance(result, str) or not result:
         raise ValueError(f"{name} must be a non-empty string")
-    return result
-
-
-def _optional_string(value: dict[str, Any], name: str) -> str:
-    result = value.get(name, "")
-    if result is None:
-        return ""
-    if not isinstance(result, str):
-        raise ValueError(f"{name} must be a string")
     return result
 
 
@@ -432,8 +411,8 @@ def _required_number(value: dict[str, Any], name: str) -> float:
     return float(result)
 
 
-def _is_deterministic(detail: str) -> bool:
-    return any(word in detail.lower() for word in _DETERMINISTIC_WORDS)
+def _means_relogin(detail: str) -> bool:
+    return any(word in detail.lower() for word in _RELOGIN_WORDS)
 
 
 def _fsync_directory(path: Path) -> None:
