@@ -1,6 +1,12 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { Component, useEffect, useRef, type ReactNode } from 'react';
 import { css } from '@emotion/css';
-import { Map, setWorkerUrl, type RasterSourceSpecification, type StyleSpecification } from 'maplibre-gl';
+import {
+  GPUInitializationError,
+  Map,
+  setWorkerUrl,
+  type RasterSourceSpecification,
+  type StyleSpecification,
+} from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { PanelMessage } from './PanelMessage';
 
@@ -22,15 +28,6 @@ const NO_WEBGL =
   'The map needs WebGL, which this browser has turned off or does not support. ' +
   'Turn on hardware acceleration in the browser settings and reload the page.';
 
-// Probed before constructing the map, so a machine without hardware acceleration gets a message
-// rather than a blank panel. The probe's context is released at once: browsers cap live contexts.
-const hasWebGL = (): boolean => {
-  const gl =
-    document.createElement('canvas').getContext('webgl2') ?? document.createElement('canvas').getContext('webgl');
-  gl?.getExtension('WEBGL_lose_context')?.loseContext();
-  return gl !== null;
-};
-
 const styleFor = (baseMap: RasterSourceSpecification): StyleSpecification => ({
   version: 8,
   sources: { base: baseMap },
@@ -44,17 +41,43 @@ interface Props {
 }
 
 /** Thin adapter over MapLibre: owns exactly one map instance and draws what it is given. */
-export const MapView: React.FC<Props> = ({ baseMap, width, height }) => {
+export const MapView: React.FC<Props> = (props) => (
+  <WebGLBoundary width={props.width} height={props.height}>
+    <MapCanvas {...props} />
+  </WebGLBoundary>
+);
+
+/**
+ * MapLibre 6 needs WebGL 2 and throws GPUInitializationError from its constructor when it cannot get
+ * a context: no hardware acceleration, WebGL 2 disabled, or too many live contexts. That becomes a
+ * readable message instead of Grafana's generic panel error; anything else still propagates.
+ */
+class WebGLBoundary extends Component<{ width: number; height: number; children: ReactNode }, { error?: Error }> {
+  state: { error?: Error } = {};
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  render() {
+    const { error } = this.state;
+    if (!error) {
+      return this.props.children;
+    }
+    if (error instanceof GPUInitializationError) {
+      return <PanelMessage width={this.props.width} height={this.props.height} text={NO_WEBGL} />;
+    }
+    throw error;
+  }
+}
+
+const MapCanvas: React.FC<Props> = ({ baseMap, width, height }) => {
   const element = useRef<HTMLDivElement>(null);
   const map = useRef<Map | null>(null);
-  const [webgl] = useState(hasWebGL);
 
   // Create the map on first draw, then restyle it in place: a second style set before the first
   // has loaded makes MapLibre rebuild from scratch.
   useEffect(() => {
-    if (!webgl) {
-      return;
-    }
     if (map.current) {
       map.current.setStyle(styleFor(baseMap));
       return;
@@ -67,7 +90,9 @@ export const MapView: React.FC<Props> = ({ baseMap, width, height }) => {
       attributionControl: { compact: false },
     });
     map.current.on('error', (e) => console.error('[navimow-map]', e.error?.message ?? e));
-  }, [webgl, baseMap]);
+    // Marks a fully drawn map, so browser tests can wait for rendering to finish.
+    map.current.on('idle', () => element.current?.setAttribute('data-map-idle', ''));
+  }, [baseMap]);
 
   // Browsers keep only about eight WebGL contexts, so release this one with the panel.
   useEffect(
@@ -78,9 +103,6 @@ export const MapView: React.FC<Props> = ({ baseMap, width, height }) => {
     []
   );
 
-  if (!webgl) {
-    return <PanelMessage width={width} height={height} text={NO_WEBGL} />;
-  }
   // MapLibre follows container size changes itself (trackResize), so the panel's size is all it needs.
   return <div ref={element} className={container} style={{ width, height }} data-testid="navimow-map" />;
 };

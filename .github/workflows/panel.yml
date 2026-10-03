@@ -36,6 +36,9 @@ jobs:
       - name: Wait for Grafana
         run: timeout 120 bash -c 'until curl -sf localhost:3000/api/health; do sleep 2; done'
       - run: pnpm run e2e
+        env:
+          # Pull requests use fixture tiles; only the nightly run loads the real tile services.
+          LIVE_TILES: ${{ github.event_name == 'schedule' && '1' || '' }}
       - if: failure()
         uses: actions/upload-artifact@v4
         with:

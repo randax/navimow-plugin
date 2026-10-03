@@ -1,4 +1,4 @@
-import { resolveBaseMap } from './baseMap';
+import { resolveBaseMap, type BaseMapOptions } from './baseMap';
 
 describe('resolveBaseMap', () => {
   test('Kartverket topo orders its tile path row before column', () => {
@@ -37,6 +37,16 @@ describe('resolveBaseMap', () => {
     });
   });
 
+  test('a panel saved without Base map options gets the default', () => {
+    expect(resolveBaseMap(undefined)).toEqual(resolveBaseMap({ preset: 'kartverket-topo' }));
+  });
+
+  test('a preset id this version does not know is refused rather than crashing the panel', () => {
+    expect(resolveBaseMap({ preset: 'kartverket-retired' } as unknown as BaseMapOptions)).toEqual({
+      problem: 'Unknown Base map "kartverket-retired". Choose another under Base map in the panel options.',
+    });
+  });
+
   describe('custom', () => {
     const custom = (fields: object) => resolveBaseMap({ preset: 'custom', custom: { attribution: '© Me', ...fields } });
 
@@ -72,6 +82,10 @@ describe('resolveBaseMap', () => {
           attribution: '<img src=x onerror="alert(1)"> Tom & Jerry',
         })
       ).toMatchObject({ source: { attribution: '&lt;img src=x onerror=&quot;alert(1)&quot;&gt; Tom &amp; Jerry' } });
+    });
+
+    test('the URL scheme is case-insensitive', () => {
+      expect(custom({ url: 'HTTPS://tiles.example.com/{z}/{x}/{y}.png' })).toHaveProperty('source');
     });
 
     test('a WMS bounding-box template is accepted as is, for MapLibre to fill per tile', () => {

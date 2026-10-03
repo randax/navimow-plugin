@@ -1,56 +1,81 @@
+import path from 'node:path';
 import type { Locator, Page } from '@playwright/test';
 import { test as base, expect } from '@grafana/plugin-e2e';
 import type { Dashboard } from '@grafana/plugin-e2e';
 
 const PLUGIN_ID = 'randax-navimowmap-panel';
+const TILE_HOSTS = /^https:\/\/(cache\.kartverket\.no|tile\.openstreetmap\.org|wms\.geonorge\.no)\//;
 
-const test = base.extend<{ mapDashboard: Dashboard; openMap: (title: string) => Promise<Locator> }>({
+const test = base.extend<{
+  tiles: void;
+  pluginErrors: string[];
+  mapDashboard: Dashboard;
+  openMap: (title: string) => Promise<Locator>;
+}>({
+  // Pull requests must not depend on, or load, third-party tile services: tiles come from a fixture.
+  // The nightly run sets LIVE_TILES=1 to exercise the real hosts.
+  tiles: [
+    async ({ page }, use) => {
+      if (!process.env.LIVE_TILES) {
+        await page.route(TILE_HOSTS, (route) =>
+          route.fulfill({
+            path: path.join(__dirname, 'fixtures/tile.png'),
+            contentType: 'image/png',
+            headers: { 'access-control-allow-origin': '*' },
+          })
+        );
+      }
+      await use();
+    },
+    { auto: true },
+  ],
+  // Console errors, warnings and uncaught exceptions from this plugin (MapLibre included), collected
+  // for the whole test and checked when it ends, so late failures are not missed.
+  pluginErrors: [
+    async ({ page }, use) => {
+      const errors: string[] = [];
+      page.on('console', (m) => {
+        const fromPlugin = m.text().includes('[navimow-map]') || m.location().url.includes(PLUGIN_ID);
+        if (['error', 'warning'].includes(m.type()) && fromPlugin) {
+          errors.push(m.text());
+        }
+      });
+      page.on('pageerror', (e) => {
+        if (e.stack?.includes(PLUGIN_ID)) {
+          errors.push(e.message);
+        }
+      });
+      await use(errors);
+      expect(errors, 'errors or warnings logged by the plugin').toEqual([]);
+    },
+    { auto: true },
+  ],
   mapDashboard: async ({ readProvisionedDashboard }, use) =>
     use(await readProvisionedDashboard({ fileName: 'navimow-map.json' })),
   openMap: async ({ gotoDashboardPage, mapDashboard }, use) =>
     use(async (title) => (await gotoDashboardPage(mapDashboard)).getPanelByTitle(title).locator),
 });
 
-/** Console errors, warnings and uncaught exceptions from this plugin (MapLibre included), not from Grafana. */
-function collectPluginErrors(page: Page): string[] {
-  const errors: string[] = [];
-  page.on('console', (m) => {
-    const fromPlugin = m.text().includes('[navimow-map]') || m.location().url.includes(PLUGIN_ID);
-    if (['error', 'warning'].includes(m.type()) && fromPlugin) {
-      errors.push(m.text());
-    }
-  });
-  page.on('pageerror', (e) => {
-    if (e.stack?.includes(PLUGIN_ID)) {
-      errors.push(e.message);
-    }
-  });
-  return errors;
-}
+/** Waits for an image tile from the host; a 200 carrying an error document does not count. */
+const tileFrom = (page: Page, host: string) =>
+  page.waitForResponse(
+    (r) => new URL(r.url()).host === host && r.status() === 200 && /^image\//.test(r.headers()['content-type'] ?? '')
+  );
 
-const tileResponse = (page: Page, host: string) =>
-  page.waitForResponse((r) => new URL(r.url()).host === host && r.status() === 200);
+/** The map has loaded and drawn every visible tile. */
+const expectDrawn = (panel: Locator) => expect(panel.getByTestId('navimow-map')).toHaveAttribute('data-map-idle');
 
-test('draws the default Kartverket Base map with its attribution and no errors of its own', async ({
-  openMap,
-  page,
-}) => {
-  const errors = collectPluginErrors(page);
-  const tile = tileResponse(page, 'cache.kartverket.no');
-  const panel = await openMap('Kartverket topo');
-
-  await expect(panel.locator('canvas.maplibregl-canvas')).toBeVisible();
-  await tile;
+test('draws the default Kartverket Base map with its attribution, uncollapsed', async ({ openMap, page }) => {
+  const [panel] = await Promise.all([openMap('Kartverket topo'), tileFrom(page, 'cache.kartverket.no')]);
+  await expectDrawn(panel);
   const attribution = panel.locator('.maplibregl-ctrl-attrib');
   await expect(attribution).toContainText('© Kartverket');
   await expect(attribution).not.toHaveClass(/maplibregl-compact/);
-  expect(errors).toEqual([]);
 });
 
 test('OpenStreetMap credits its contributors', async ({ openMap, page }) => {
-  const tile = tileResponse(page, 'tile.openstreetmap.org');
-  const panel = await openMap('OpenStreetMap');
-  await tile;
+  const [panel] = await Promise.all([openMap('OpenStreetMap'), tileFrom(page, 'tile.openstreetmap.org')]);
+  await expectDrawn(panel);
   const attribution = panel.locator('.maplibregl-ctrl-attrib');
   await expect(attribution).toContainText('© OpenStreetMap contributors');
   // Plain-text credit must stay dark on the light attribution strip, whatever Grafana's theme.
@@ -58,9 +83,8 @@ test('OpenStreetMap credits its contributors', async ({ openMap, page }) => {
 });
 
 test('a custom WMS bounding-box template draws tiles from its own host', async ({ openMap, page }) => {
-  const tile = tileResponse(page, 'wms.geonorge.no');
-  const panel = await openMap('Custom WMS');
-  await tile;
+  const [panel] = await Promise.all([openMap('Custom WMS'), tileFrom(page, 'wms.geonorge.no')]);
+  await expectDrawn(panel);
   await expect(panel.locator('.maplibregl-ctrl-attrib')).toContainText('© Kartverket');
 });
 
@@ -88,17 +112,15 @@ test('the Base map picker offers the presets and switches the map', async ({
   ]);
   await page.keyboard.press('Escape');
 
-  const tile = tileResponse(page, 'tile.openstreetmap.org');
-  await picker.selectOption('OpenStreetMap');
-  await tile;
+  await Promise.all([picker.selectOption('OpenStreetMap'), tileFrom(page, 'tile.openstreetmap.org')]);
   await expect(panelEditPage.panel.locator.locator('.maplibregl-ctrl-attrib')).toContainText('OpenStreetMap');
 });
 
-test('a browser without WebGL gets a readable message instead of a blank panel', async ({ openMap, page }) => {
+test('a browser without WebGL 2 gets a readable message instead of a blank panel', async ({ openMap, page }) => {
   await page.addInitScript(() => {
     const getContext = HTMLCanvasElement.prototype.getContext;
     HTMLCanvasElement.prototype.getContext = function (this: HTMLCanvasElement, type: string, ...rest: unknown[]) {
-      return type.startsWith('webgl') ? null : getContext.call(this, type, ...(rest as []));
+      return type === 'webgl2' ? null : getContext.call(this, type, ...(rest as []));
     } as typeof getContext;
   });
   const panel = await openMap('Kartverket topo');

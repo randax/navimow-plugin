@@ -25,7 +25,8 @@ Provisioned dashboards (`provisioning/`, development only):
 pnpm run typecheck && pnpm run lint
 pnpm run test:ci                       # model functions (Jest, no browser)
 pnpm exec playwright install chromium  # once
-pnpm run e2e                           # against the running Grafana
+pnpm run e2e                           # against the running Grafana, fixture tiles
+LIVE_TILES=1 pnpm run e2e              # the same against the real tile services (nightly in CI)
 ```
 
 Two seams only. Geometry and source resolution live in `src/model/` as pure functions that never
@@ -43,5 +44,13 @@ the plugin's own origin. The copy uses absolute source paths: relative ones reso
 ## Tile hosts
 
 Tiles load directly from the browser, so every tile host must allow cross-origin requests. If
-Grafana's content security policy is enabled, add the tile hosts to its `connect-src`, for example
-`https://cache.kartverket.no https://tile.openstreetmap.org`.
+Grafana's content security policy is enabled, add the hosts of the Base maps in use to its
+`connect-src`:
+
+| Base map                          | Host                             |
+| --------------------------------- | -------------------------------- |
+| Kartverket topo, gråtone, turkart | `https://cache.kartverket.no`    |
+| OpenStreetMap                     | `https://tile.openstreetmap.org` |
+| Custom                            | the host in its URL template     |
+
+Nothing else needs a policy change: the MapLibre worker is served from the plugin's own origin.

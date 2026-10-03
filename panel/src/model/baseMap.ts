@@ -58,13 +58,17 @@ const escapeHtml = (text: string): string =>
 
 // MapLibre fills both kinds of template itself: {z}/{x}/{y} for tile services, {bbox-epsg-3857} for WMS.
 const isTileTemplate = (url: string): boolean =>
-  /^https?:\/\//.test(url) && (['{z}', '{x}', '{y}'].every((p) => url.includes(p)) || url.includes('{bbox-epsg-3857}'));
+  /^https?:\/\//i.test(url) && (['{z}', '{x}', '{y}'].every((p) => url.includes(p)) || url.includes('{bbox-epsg-3857}'));
 
-export function resolveBaseMap(options: BaseMapOptions): ResolvedBaseMap {
-  if (options.preset !== 'custom') {
-    return { source: BASE_MAP_PRESETS[options.preset].source };
+// Saved panels can outlive a preset, or predate these options entirely.
+export function resolveBaseMap({ preset, custom }: BaseMapOptions = { preset: 'kartverket-topo' }): ResolvedBaseMap {
+  if (preset !== 'custom') {
+    const known = Object.hasOwn(BASE_MAP_PRESETS, preset) ? BASE_MAP_PRESETS[preset] : undefined;
+    return known
+      ? { source: known.source }
+      : { problem: `Unknown Base map "${preset}". Choose another under Base map in the panel options.` };
   }
-  const { url = '', tileSize = 256, maxzoom = 18, attribution = '' } = options.custom ?? {};
+  const { url = '', tileSize = 256, maxzoom = 18, attribution = '' } = custom ?? {};
   if (!isTileTemplate(url.trim())) {
     return {
       problem:
