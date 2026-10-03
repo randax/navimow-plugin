@@ -1,18 +1,34 @@
-"""Command-line operations for replaying Navimow captures."""
+"""Command-line operations for replaying captures and establishing OAuth access."""
 
 from __future__ import annotations
 
 import argparse
+import asyncio
+import secrets
 import sys
+import webbrowser
+from collections.abc import Callable
 from dataclasses import fields
 from pathlib import Path
 
+from mower_sdk.http import HTTPSession, UrllibSession
+
+from .auth import (
+    MANUAL_REDIRECT_URI,
+    TokenClient,
+    TokenRequestError,
+    TokenStore,
+    authorization_url,
+    loopback_listener,
+)
 from .config import Config, ConfigError, Secret, load_config
 from .ingest import Ingestor, read_capture
 from .storage import StorageError, open_storage
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(
+    argv: list[str] | None = None, *, session_factory: Callable[[], HTTPSession] = UrllibSession
+) -> int:
     """Run the collector command and return a shell-compatible status code."""
     parser = _parser()
     try:
@@ -21,19 +37,32 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "config":
             print(_format_config(config))
             return 0
+        if args.command == "login":
+            return _login(config, args, session_factory)
         return _replay(config, args.capture)
-    except (ConfigError, StorageError, OSError, ValueError) as error:
+    except (ConfigError, StorageError, TokenRequestError, OSError, ValueError) as error:
         print(str(error), file=sys.stderr)
         return 2
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Replay Navimow captures into storage.")
+    parser = argparse.ArgumentParser(description="Collect Navimow data and establish OAuth access.")
     parser.add_argument("--config", type=Path, help="TOML configuration file")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("config", help="print resolved configuration")
     replay = commands.add_parser("replay", help="replay one JSONL capture")
     replay.add_argument("capture", type=Path)
+    login = commands.add_parser("login", help="sign in once and store rotating OAuth credentials")
+    source = login.add_mutually_exclusive_group()
+    source.add_argument("--code", help="authorization code or the complete redirect URL")
+    source.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="print the manual login URL instead of opening a local callback listener",
+    )
+    login.add_argument(
+        "--timeout", type=float, default=300, help="loopback callback timeout in seconds"
+    )
     return parser
 
 
@@ -66,3 +95,57 @@ def _replay(config: Config, capture: Path) -> int:
         f"placeholders discarded: {ingestor.placeholders_discarded}"
     )
     return 0
+
+
+def _login(
+    config: Config, args: argparse.Namespace, session_factory: Callable[[], HTTPSession]
+) -> int:
+    """Complete exactly one authorization-code flow; automatic refresh happens at runtime."""
+    secret = config.auth.client_secret
+    store = TokenStore(config.auth.state_file)
+    if args.code:
+        _exchange_and_store(
+            session_factory(),
+            config.auth.client_id,
+            secret.reveal(),
+            store,
+            args.code,
+            MANUAL_REDIRECT_URI,
+        )
+        print(f"Navimow login complete; credentials saved to {store.path}")
+        return 0
+
+    state = secrets.token_urlsafe(32)
+    if args.no_browser:
+        print(authorization_url(config.auth.client_id, MANUAL_REDIRECT_URI, state))
+        print("After signing in, run navimow-collector login --code '<code-or-redirect-url>'.")
+        return 0
+
+    with loopback_listener(state) as listener:
+        url = authorization_url(config.auth.client_id, listener.redirect_uri, state)
+        print(url)
+        webbrowser.open(url)
+        code = listener.wait(args.timeout)
+        _exchange_and_store(
+            session_factory(),
+            config.auth.client_id,
+            secret.reveal(),
+            store,
+            code,
+            listener.redirect_uri,
+        )
+    print(f"Navimow login complete; credentials saved to {store.path}")
+    return 0
+
+
+def _exchange_and_store(
+    session: HTTPSession,
+    client_id: str,
+    client_secret: str,
+    store: TokenStore,
+    code: str,
+    redirect_uri: str,
+) -> None:
+    client = TokenClient(session, client_id, client_secret)
+    credential = asyncio.run(client.exchange(code, redirect_uri))
+    store.save(credential)

@@ -104,3 +104,13 @@ def test_the_environment_overrides_a_secret_file_given_in_the_file(
     out = show(capsys, "--config", str(write(tmp_path, f'[storage]\ndsn_file = "{secret}"\n')))
     assert str(secret) not in out  # the inline env value won
     assert "<redacted>" in out
+
+
+def test_auth_defaults_are_visible_but_its_client_secret_is_redacted(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    out = show(capsys, "--config", str(write(tmp_path, '[auth]\nclient_id = "mine"\n')))
+    assert "[auth]" in out
+    assert 'client_id = "mine"' in out
+    assert "57056e15" not in out
+    assert "state_file" in out

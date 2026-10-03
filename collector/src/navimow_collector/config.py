@@ -43,9 +43,23 @@ class StorageConfig:
     migrate: bool = True
 
 
+PUBLIC_CLIENT_ID = "homeassistant"
+PUBLIC_CLIENT_SECRET = "57056e15-722e-42be-bbaa-b0cbfb208a52"
+
+
+@dataclass(frozen=True)
+class AuthConfig:
+    """Operator-controlled OAuth values; the public default needs no registration."""
+
+    client_id: str = PUBLIC_CLIENT_ID
+    client_secret: Secret = Secret(PUBLIC_CLIENT_SECRET)
+    state_file: str = "~/.local/state/navimow-collector/tokens.json"
+
+
 @dataclass(frozen=True)
 class Config:
     storage: StorageConfig = StorageConfig()
+    auth: AuthConfig = AuthConfig()
 
 
 def load_config(config_path: Path | None = None) -> Config:
@@ -124,7 +138,9 @@ def _load_section(
     for field in section_fields:
         annotation = hints[field.name]
         if _is_secret(annotation):
-            resolved[field.name] = _resolve_secret(section_name, field.name, values)
+            resolved[field.name] = _resolve_secret(
+                section_name, field.name, values, _default(field)
+            )
         else:
             raw = _environment_value(
                 section_name, field.name, values.get(field.name, _default(field))
@@ -144,7 +160,9 @@ def _environment_value(section: str, key: str, fallback: object) -> object:
     return os.environ.get(f"NAVIMOW_{section}_{key}".upper(), fallback)
 
 
-def _resolve_secret(section: str, key: str, values: dict[str, object]) -> Secret | None:
+def _resolve_secret(
+    section: str, key: str, values: dict[str, object], fallback: object
+) -> Secret | None:
     # The environment is one layer and the file another: a value from either form in
     # the environment replaces both forms in the file, rather than clashing with them.
     env_name = f"NAVIMOW_{section}_{key}".upper()
@@ -166,7 +184,9 @@ def _resolve_secret(section: str, key: str, values: dict[str, object]) -> Secret
         except OSError as error:
             raise ConfigError(f"could not read {label}_file {path}: {error}") from error
     if inline is None:
-        return None
+        if fallback is None or isinstance(fallback, Secret):
+            return fallback
+        raise TypeError(f"configuration secret field has invalid default: {label}")
     if not isinstance(inline, str):
         raise ConfigError(f"{label} must be a string")
     return Secret(inline)

@@ -9,7 +9,13 @@ description = "Capture replay collector for Navimow mower Trails"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "GPL-3.0-only" }
-dependencies = ["psycopg[binary]>=3.2,<4"]
+dependencies = [
+  "psycopg[binary]>=3.2,<4",
+  "randax-navimow-sdk @ git+https://github.com/randax/navimow-sdk@v0.5.0",
+]
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [project.optional-dependencies]
 dev = ["pytest", "ruff", "mypy"]
@@ -31,3 +37,7 @@ select = ["E", "F", "I", "UP", "B"]
 files = ["src", "tests"]
 strict = true
 warn_unused_configs = true
+
+[[tool.mypy.overrides]]
+module = ["mower_sdk.*"]
+ignore_missing_imports = true
