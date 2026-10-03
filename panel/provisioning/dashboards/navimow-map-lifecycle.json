@@ -1,0 +1,37 @@
+{
+  "uid": "navimow-map-lifecycle",
+  "title": "Navimow map lifecycle",
+  "editable": true,
+  "schemaVersion": 41,
+  "panels": [
+    {
+      "id": 10,
+      "type": "row",
+      "title": "Map row",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": []
+    },
+    {
+      "id": 11,
+      "type": "randax-navimowmap-panel",
+      "title": "Map in a row",
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 0,
+        "y": 1
+      },
+      "options": {
+        "baseMap": {
+          "preset": "kartverket-topo"
+        }
+      }
+    }
+  ]
+}

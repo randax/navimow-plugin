@@ -1,0 +1,25 @@
+{
+  "$schema": "https://raw.githubusercontent.com/grafana/grafana/main/docs/sources/developers/plugins/plugin.schema.json",
+  "type": "panel",
+  "name": "Navimow Map",
+  "id": "randax-navimowmap-panel",
+  "info": {
+    "keywords": ["panel", "map", "navimow", "maplibre"],
+    "description": "Draws a Navimow mower Trail on a real map of the lawn",
+    "author": {
+      "name": "Randax"
+    },
+    "logos": {
+      "small": "img/logo.svg",
+      "large": "img/logo.svg"
+    },
+    "links": [],
+    "screenshots": [],
+    "version": "%VERSION%",
+    "updated": "%TODAY%"
+  },
+  "dependencies": {
+    "grafanaDependency": ">=12.4.0",
+    "plugins": []
+  }
+}
