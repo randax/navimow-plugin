@@ -1,5 +1,6 @@
+import { createDataFrame, FieldType } from '@grafana/data';
 import { toLonLat, type DockOrigin } from './dockOrigin';
-import { drawTrails, TRAIL_COLOURS } from './trail';
+import { drawTrails, trailScene, TRAIL_COLOURS } from './trail';
 import type { Trail, TrailPoint } from './trailFrame';
 
 const ORIGIN: DockOrigin = { lat: 59.964, lon: 10.672, rotation: 20 };
@@ -85,5 +86,35 @@ describe('drawTrails', () => {
 
   test('an empty range draws nothing', () => {
     expect(drawTrails([], ORIGIN, NOW)).toEqual({ lines: { type: 'FeatureCollection', features: [] } });
+  });
+});
+
+describe('trailScene', () => {
+  const frame = createDataFrame({
+    fields: [
+      { name: 'time', type: FieldType.time, values: [NOW - 2 * MIN, NOW - MIN] },
+      { name: 'x', type: FieldType.number, values: [0, 1] },
+      { name: 'y', type: FieldType.number, values: [0, 1] },
+    ],
+  });
+
+  test('frames become a scene placed by the Dock origin', () => {
+    expect(trailScene([frame], {}, ORIGIN, NOW)).toEqual({
+      scene: drawTrails([{ points: [at(2, 0, 0), at(1, 1, 1)] }], ORIGIN, NOW),
+    });
+  });
+
+  test('a Trail without a Dock origin asks for one instead of drawing in the wrong place', () => {
+    expect(trailScene([frame], {}, {}, NOW)).toEqual({ problem: expect.stringMatching(/Dock origin/) });
+  });
+
+  test('an empty range needs no Dock origin, so the map still shows', () => {
+    expect(trailScene([], {}, {}, NOW)).toEqual({ scene: { lines: { type: 'FeatureCollection', features: [] } } });
+  });
+
+  test('a frame missing required columns explains itself', () => {
+    expect(trailScene([frame], { y: 'postureY' }, ORIGIN, NOW)).toEqual({
+      problem: expect.stringMatching(/"postureY"/),
+    });
   });
 });

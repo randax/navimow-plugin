@@ -1,7 +1,8 @@
+import type { DataFrame } from '@grafana/data';
 import type { FeatureCollection, LineString } from 'geojson';
-import { headingBearing, toLonLat, type DockOrigin } from './dockOrigin';
+import { headingBearing, resolveDockOrigin, toLonLat, type DockOrigin, type DockOriginOptions } from './dockOrigin';
 import { recency, type Recency } from './recency';
-import type { Trail } from './trailFrame';
+import { readTrails, type Trail, type TrailColumns } from './trailFrame';
 
 // Strong hues that stand apart from each other and from the greens, whites and water blues of a
 // topographic Base map.
@@ -68,4 +69,25 @@ export function drawTrails(trails: Trail[], origin: DockOrigin, now: number): Tr
     ...recency(last.time, now),
   };
   return scene;
+}
+
+/**
+ * The panel's whole Trail pipeline, from query frames and options to what the map draws, or to the
+ * problem to show instead. With nothing to draw, a missing Dock origin is not a problem yet.
+ */
+export function trailScene(
+  frames: DataFrame[],
+  columns: Partial<TrailColumns> | undefined,
+  dockOrigin: DockOriginOptions | undefined,
+  now: number
+): { scene: TrailScene } | { problem: string } {
+  const read = readTrails(frames, columns);
+  if ('problem' in read) {
+    return read;
+  }
+  if (read.trails.length === 0) {
+    return { scene: { lines: { type: 'FeatureCollection', features: [] } } };
+  }
+  const resolved = resolveDockOrigin(dockOrigin);
+  return 'problem' in resolved ? resolved : { scene: drawTrails(read.trails, resolved.origin, now) };
 }

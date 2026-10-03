@@ -1,12 +1,24 @@
 import { PanelPlugin } from '@grafana/data';
 import { MapPanel } from './components/MapPanel';
 import { BASE_MAP_PRESETS, MAX_ZOOM, TILE_SIZE, type BaseMapPreset } from './model/baseMap';
+import { DEFAULT_TRAIL_COLUMNS, type TrailColumns } from './model/trailFrame';
 import type { MapPanelOptions } from './types';
 
 const category = ['Base map'];
 const isCustom = (options: MapPanelOptions) => options.baseMap?.preset === 'custom';
 
-export const plugin = new PanelPlugin<MapPanelOptions>(MapPanel).setPanelOptions((builder) =>
+const TRAIL_COLUMNS: Array<[keyof TrailColumns, string, string]> = [
+  ['time', 'Time', 'When each position was recorded.'],
+  ['x', 'X', "Metres from the dock along the mower's x-axis."],
+  ['y', 'Y', "Metres from the dock along the mower's y-axis."],
+  ['heading', 'Heading', 'Optional. Radians counter-clockwise from the x-axis; points the mower marker.'],
+  ['job', 'Job', 'Optional. Each Job is drawn as its own line, in its own colour.'],
+  ['zone', 'Zone', 'Optional.'],
+  ['status', 'Status', 'Optional.'],
+  ['mower', 'Mower', "Optional. The mower's identifier."],
+];
+
+export const plugin = new PanelPlugin<MapPanelOptions>(MapPanel).setPanelOptions((builder) => {
   builder
     .addSelect({
       path: 'baseMap.preset',
@@ -55,4 +67,38 @@ export const plugin = new PanelPlugin<MapPanelOptions>(MapPanel).setPanelOptions
       settings: { ...MAX_ZOOM, integer: true },
       showIf: isCustom,
     })
-);
+    .addNumberInput({
+      path: 'dockOrigin.lat',
+      name: 'Latitude',
+      description: 'Of the charging dock, in decimal degrees.',
+      category: ['Dock origin'],
+      settings: { min: -85, max: 85 },
+    })
+    .addNumberInput({
+      path: 'dockOrigin.lon',
+      name: 'Longitude',
+      description: 'Of the charging dock, in decimal degrees.',
+      category: ['Dock origin'],
+      settings: { min: -180, max: 180 },
+    })
+    .addNumberInput({
+      path: 'dockOrigin.rotation',
+      name: 'Rotation',
+      description:
+        "Compass bearing of the mower's x-axis, in degrees clockwise from north. Turn it until the Trail lies on the lawn.",
+      category: ['Dock origin'],
+      defaultValue: 0,
+    });
+  // Blank means the default name, shown as the placeholder, so a database that names things the
+  // collector's way needs no settings at all.
+  for (const [key, name, description] of TRAIL_COLUMNS) {
+    builder.addTextInput({
+      path: `trailColumns.${key}`,
+      name,
+      description,
+      category: ['Trail columns'],
+      settings: { placeholder: DEFAULT_TRAIL_COLUMNS[key] },
+    });
+  }
+  return builder;
+});
