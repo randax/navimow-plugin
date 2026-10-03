@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "navimow-collector"
+version = "0.1.0"
+description = "Capture replay collector for Navimow mower Trails"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "GPL-3.0-only" }
+dependencies = ["psycopg[binary]>=3.2,<4"]
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff", "mypy"]
+
+[project.scripts]
+navimow-collector = "navimow_collector.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/navimow_collector"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+files = ["src", "tests"]
+strict = true
+warn_unused_configs = true
