@@ -11,6 +11,7 @@ const test = base.extend<{
   pluginErrors: string[];
   mapDashboard: Dashboard;
   openMap: (title: string) => Promise<Locator>;
+  openTrail: (title: string) => Promise<Locator>;
 }>({
   // Pull requests must not depend on, or load, third-party tile services: tiles come from a fixture.
   // The nightly run sets LIVE_TILES=1 to exercise the real hosts.
@@ -54,6 +55,12 @@ const test = base.extend<{
     use(await readProvisionedDashboard({ fileName: 'navimow-map.json' })),
   openMap: async ({ gotoDashboardPage, mapDashboard }, use) =>
     use(async (title) => (await gotoDashboardPage(mapDashboard)).getPanelByTitle(title).locator),
+  // Panels fed by TestData with a slice of the real Trail fixture, fixtures/trail-2026-09-21.csv.
+  openTrail: async ({ gotoDashboardPage, readProvisionedDashboard }, use) =>
+    use(async (title) => {
+      const dashboard = await readProvisionedDashboard({ fileName: 'navimow-trail.json' });
+      return (await gotoDashboardPage(dashboard)).getPanelByTitle(title).locator;
+    }),
 });
 
 /** Waits for an image tile from the host; a 200 carrying an error document does not count. */
@@ -144,6 +151,19 @@ test('the map resizes with the panel', async ({ openMap, page }) => {
 
   await page.setViewportSize({ width: 1000, height: 1000 });
   await expect.poll(async () => (await canvas.boundingBox())!.width).toBeLessThan(before * 0.8);
+});
+
+test('a provisioned real Trail is drawn, with the mower faded and its age stated', async ({ openTrail }) => {
+  const panel = await openTrail('Real Trail');
+  await expect(panel.getByTestId('navimow-map')).toHaveAttribute('data-trails-drawn', '1');
+  // The fixture is from September 2026, so its last position is days old by now.
+  await expect(panel.getByText(/^Last seen \d+ d ago$/)).toBeVisible();
+  await expect(panel.getByRole('img', { name: /^Mower, last seen/ })).toBeVisible();
+});
+
+test('a frame without the Trail columns names the missing ones instead of drawing', async ({ openTrail }) => {
+  const panel = await openTrail('Unmatched columns');
+  await expect(panel.getByTestId('navimow-map-message')).toContainText('No "x" and "y" columns');
 });
 
 test('each panel releases its map when it unmounts', async ({

@@ -16,6 +16,8 @@ Provisioned dashboards (`provisioning/`, development only):
 - `/d/navimow-map`: every Base map kind side by side, including a custom WMS template and a
   custom source without attribution.
 - `/d/navimow-map-lifecycle`: one map inside a collapsible row, used to check maps are released.
+- `/d/navimow-trail`: a slice of the real Trail in `fixtures/trail-2026-09-21.csv` (from 13:30 UTC,
+  in delivery order) fed through TestData, and the same data without matching column names.
 
 `plugin.json` changes need a Grafana restart: `docker compose restart`.
 
@@ -30,7 +32,7 @@ LIVE_TILES=1 pnpm run e2e              # the same against the real tile services
 ```
 
 Two seams only. Geometry and source resolution live in `src/model/` as pure functions that never
-load MapLibre, and are tested with Jest. Everything visual is tested in a real browser against the
+load MapLibre (ESLint enforces it), and are tested with Jest. Everything visual is tested in a real browser against the
 provisioned dashboards. Headless Chromium draws WebGL through SwiftShader (see
 `playwright.config.ts`), so the first frame is slow.
 
