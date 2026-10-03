@@ -58,7 +58,8 @@ const escapeHtml = (text: string): string =>
 
 // MapLibre fills both kinds of template itself: {z}/{x}/{y} for tile services, {bbox-epsg-3857} for WMS.
 const isTileTemplate = (url: string): boolean =>
-  /^https?:\/\//i.test(url) && (['{z}', '{x}', '{y}'].every((p) => url.includes(p)) || url.includes('{bbox-epsg-3857}'));
+  /^https?:\/\//i.test(url) &&
+  (['{z}', '{x}', '{y}'].every((p) => url.includes(p)) || url.includes('{bbox-epsg-3857}'));
 
 // Saved panels can outlive a preset, or predate these options entirely.
 export function resolveBaseMap({ preset, custom }: BaseMapOptions = { preset: 'kartverket-topo' }): ResolvedBaseMap {
