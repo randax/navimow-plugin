@@ -36,4 +36,22 @@ export default defineConfig([
     ],
   },
   ...baseConfig,
+  {
+    // The model is the panel's mathematics, tested without a browser; it must never load the map library.
+    files: ['src/model/**/*.ts'],
+    rules: {
+      '@typescript-eslint/no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['maplibre-gl', 'maplibre-gl/*'],
+              allowTypeImports: true,
+              message: 'src/model/ must stay free of the map library; draw in src/components/ instead.',
+            },
+          ],
+        },
+      ],
+    },
+  },
 ]);
