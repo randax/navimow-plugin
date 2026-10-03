@@ -1,0 +1,87 @@
+{
+  "uid": "navimow-map",
+  "title": "Navimow map",
+  "editable": true,
+  "schemaVersion": 41,
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "randax-navimowmap-panel",
+      "title": "Kartverket topo",
+      "gridPos": {
+        "h": 11,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "options": {
+        "baseMap": {
+          "preset": "kartverket-topo"
+        }
+      }
+    },
+    {
+      "id": 2,
+      "type": "randax-navimowmap-panel",
+      "title": "OpenStreetMap",
+      "gridPos": {
+        "h": 11,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "options": {
+        "baseMap": {
+          "preset": "osm"
+        }
+      }
+    },
+    {
+      "id": 3,
+      "type": "randax-navimowmap-panel",
+      "title": "Custom WMS",
+      "gridPos": {
+        "h": 11,
+        "w": 12,
+        "x": 0,
+        "y": 11
+      },
+      "options": {
+        "baseMap": {
+          "preset": "custom",
+          "custom": {
+            "url": "https://wms.geonorge.no/skwms1/wms.hoyde-dtm?SERVICE=WMS&REQUEST=GetMap&VERSION=1.3.0&LAYERS=DTM:skyggerelieff&STYLES=&CRS=EPSG:3857&BBOX={bbox-epsg-3857}&WIDTH=256&HEIGHT=256&FORMAT=image/png",
+            "attribution": "© Kartverket",
+            "tileSize": 256,
+            "maxzoom": 18
+          }
+        }
+      }
+    },
+    {
+      "id": 4,
+      "type": "randax-navimowmap-panel",
+      "title": "Custom without attribution",
+      "gridPos": {
+        "h": 11,
+        "w": 12,
+        "x": 12,
+        "y": 11
+      },
+      "options": {
+        "baseMap": {
+          "preset": "custom",
+          "custom": {
+            "url": "https://tiles.example.com/{z}/{x}/{y}.png",
+            "tileSize": 256,
+            "maxzoom": 18
+          }
+        }
+      }
+    }
+  ]
+}

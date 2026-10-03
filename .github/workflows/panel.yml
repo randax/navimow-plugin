@@ -1,0 +1,48 @@
+name: Panel
+
+on:
+  # Branches are covered by their pull request; pushing to one would run everything twice.
+  push:
+    branches: [main]
+    paths: ['panel/**', '.github/workflows/panel.yml']
+  pull_request:
+    paths: ['panel/**', '.github/workflows/panel.yml']
+  # Nightly, because tile services can change or fail without any change in this repository.
+  schedule:
+    - cron: '0 3 * * *'
+
+defaults:
+  run:
+    working-directory: panel
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: panel/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: panel/.nvmrc
+          cache: pnpm
+          cache-dependency-path: panel/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run typecheck
+      - run: pnpm run lint
+      - run: pnpm run test:ci
+      - run: pnpm run build
+      - run: docker compose up -d --build
+      - run: pnpm exec playwright install --with-deps chromium
+      - name: Wait for Grafana
+        run: timeout 120 bash -c 'until curl -sf localhost:3000/api/health; do sleep 2; done'
+      - run: pnpm run e2e
+        env:
+          # Pull requests use fixture tiles; only the nightly run loads the real tile services.
+          LIVE_TILES: ${{ github.event_name == 'schedule' && '1' || '' }}
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: panel/playwright-report/
