@@ -1,7 +1,9 @@
 name: Panel
 
 on:
+  # Branches are covered by their pull request; pushing to one would run everything twice.
   push:
+    branches: [main]
     paths: ['panel/**', '.github/workflows/panel.yml']
   pull_request:
     paths: ['panel/**', '.github/workflows/panel.yml']

@@ -8,5 +8,6 @@ export default defineConfig<PluginOptions>(baseConfig, {
     launchOptions: { args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'] },
   },
   // Software rendering makes the first frame slow.
+  timeout: 60_000,
   expect: { timeout: 20_000 },
 });

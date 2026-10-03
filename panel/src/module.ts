@@ -1,6 +1,6 @@
 import { PanelPlugin } from '@grafana/data';
 import { MapPanel } from './components/MapPanel';
-import { BASE_MAP_PRESETS, type BaseMapPreset } from './model/baseMap';
+import { BASE_MAP_PRESETS, MAX_ZOOM, TILE_SIZE, type BaseMapPreset } from './model/baseMap';
 import type { MapPanelOptions } from './types';
 
 const category = ['Base map'];
@@ -43,7 +43,7 @@ export const plugin = new PanelPlugin<MapPanelOptions>(MapPanel).setPanelOptions
       name: 'Tile size',
       category,
       defaultValue: 256,
-      settings: { min: 64, integer: true },
+      settings: { ...TILE_SIZE, integer: true },
       showIf: isCustom,
     })
     .addNumberInput({
@@ -52,7 +52,7 @@ export const plugin = new PanelPlugin<MapPanelOptions>(MapPanel).setPanelOptions
       description: 'Highest zoom the service provides; the map enlarges tiles beyond it.',
       category,
       defaultValue: 18,
-      settings: { min: 0, max: 24, integer: true },
+      settings: { ...MAX_ZOOM, integer: true },
       showIf: isCustom,
     })
 );

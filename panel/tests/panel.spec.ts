@@ -57,9 +57,13 @@ const test = base.extend<{
 });
 
 /** Waits for an image tile from the host; a 200 carrying an error document does not count. */
-const tileFrom = (page: Page, host: string) =>
+const tileFrom = (page: Page, host: string, url: RegExp = /./) =>
   page.waitForResponse(
-    (r) => new URL(r.url()).host === host && r.status() === 200 && /^image\//.test(r.headers()['content-type'] ?? '')
+    (r) =>
+      new URL(r.url()).host === host &&
+      url.test(r.url()) &&
+      r.status() === 200 &&
+      /^image\//.test(r.headers()['content-type'] ?? '')
   );
 
 /** The map has loaded and drawn every visible tile. */
@@ -83,7 +87,11 @@ test('OpenStreetMap credits its contributors', async ({ openMap, page }) => {
 });
 
 test('a custom WMS bounding-box template draws tiles from its own host', async ({ openMap, page }) => {
-  const [panel] = await Promise.all([openMap('Custom WMS'), tileFrom(page, 'wms.geonorge.no')]);
+  const [panel] = await Promise.all([
+    openMap('Custom WMS'),
+    // MapLibre must have filled in the template, not sent it literally.
+    tileFrom(page, 'wms.geonorge.no', /BBOX=-?\d/),
+  ]);
   await expectDrawn(panel);
   await expect(panel.locator('.maplibregl-ctrl-attrib')).toContainText('© Kartverket');
 });
@@ -113,6 +121,7 @@ test('the Base map picker offers the presets and switches the map', async ({
   await page.keyboard.press('Escape');
 
   await Promise.all([picker.selectOption('OpenStreetMap'), tileFrom(page, 'tile.openstreetmap.org')]);
+  await expectDrawn(panelEditPage.panel.locator);
   await expect(panelEditPage.panel.locator.locator('.maplibregl-ctrl-attrib')).toContainText('OpenStreetMap');
 });
 

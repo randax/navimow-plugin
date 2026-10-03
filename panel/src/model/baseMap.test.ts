@@ -84,6 +84,18 @@ describe('resolveBaseMap', () => {
       ).toMatchObject({ source: { attribution: '&lt;img src=x onerror=&quot;alert(1)&quot;&gt; Tom &amp; Jerry' } });
     });
 
+    test.each([
+      [{ tileSize: 0 }, 'Tile size'],
+      [{ tileSize: 100.5 }, 'Tile size'],
+      [{ tileSize: Number.NaN }, 'Tile size'],
+      [{ maxzoom: -1 }, 'Max zoom'],
+      [{ maxzoom: 30 }, 'Max zoom'],
+    ])('is refused when %p is out of range, since panel JSON bypasses the editor', (fields, field) => {
+      expect(custom({ url: 'https://tiles.example.com/{z}/{x}/{y}.png', ...fields })).toEqual({
+        problem: expect.stringContaining(field),
+      });
+    });
+
     test('the URL scheme is case-insensitive', () => {
       expect(custom({ url: 'HTTPS://tiles.example.com/{z}/{x}/{y}.png' })).toHaveProperty('source');
     });

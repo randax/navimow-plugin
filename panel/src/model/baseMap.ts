@@ -61,6 +61,13 @@ const isTileTemplate = (url: string): boolean =>
   /^https?:\/\//i.test(url) &&
   (['{z}', '{x}', '{y}'].every((p) => url.includes(p)) || url.includes('{bbox-epsg-3857}'));
 
+/** Ranges for the custom slot's numbers, shared with the option editor. */
+export const TILE_SIZE = { min: 64, max: 1024 };
+export const MAX_ZOOM = { min: 0, max: 24 };
+
+const inRange = (value: number, { min, max }: { min: number; max: number }): boolean =>
+  Number.isInteger(value) && value >= min && value <= max;
+
 // Saved panels can outlive a preset, or predate these options entirely.
 export function resolveBaseMap({ preset, custom }: BaseMapOptions = { preset: 'kartverket-topo' }): ResolvedBaseMap {
   if (preset !== 'custom') {
@@ -78,6 +85,13 @@ export function resolveBaseMap({ preset, custom }: BaseMapOptions = { preset: 'k
   }
   if (!attribution.trim()) {
     return { problem: 'A custom Base map needs an attribution. Enter the credit line its provider requires.' };
+  }
+  // The editor clamps these, but panel JSON does not; a tile size of 0 would request every tile at max zoom.
+  if (!inRange(tileSize, TILE_SIZE)) {
+    return { problem: `Tile size must be a whole number of pixels from ${TILE_SIZE.min} to ${TILE_SIZE.max}.` };
+  }
+  if (!inRange(maxzoom, MAX_ZOOM)) {
+    return { problem: `Max zoom must be a whole number from ${MAX_ZOOM.min} to ${MAX_ZOOM.max}.` };
   }
   return {
     source: { type: 'raster', tiles: [url.trim()], tileSize, maxzoom, attribution: escapeHtml(attribution.trim()) },

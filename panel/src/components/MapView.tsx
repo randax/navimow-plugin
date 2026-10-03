@@ -79,6 +79,8 @@ const MapCanvas: React.FC<Props> = ({ baseMap, width, height }) => {
   // has loaded makes MapLibre rebuild from scratch.
   useEffect(() => {
     if (map.current) {
+      // Not drawn again until the new style's tiles are in.
+      element.current?.removeAttribute('data-map-idle');
       map.current.setStyle(styleFor(baseMap));
       return;
     }
