@@ -8,11 +8,11 @@ import { PanelMessage } from './PanelMessage';
 
 export const MapPanel: React.FC<PanelProps<MapPanelOptions>> = ({ options, data, width, height }) => {
   const resolved = useMemo(() => resolveBaseMap(options.baseMap), [options.baseMap]);
-  // Ages are measured from when the data was fetched, which is "now" for everything on screen.
-  const now = data.request?.startTime ?? data.timeRange.to.valueOf();
+  const { trailColumns, dockOrigin } = options;
   const trail = useMemo(
-    () => trailScene(data.series, options.trailColumns, options.dockOrigin, now),
-    [data.series, options.trailColumns, options.dockOrigin, now]
+    // Ages are measured from when the data was fetched, which is "now" for everything on screen.
+    () => trailScene(data.series, { trailColumns, dockOrigin }, data.request?.startTime),
+    [data.series, data.request?.startTime, trailColumns, dockOrigin]
   );
 
   if ('problem' in resolved) {

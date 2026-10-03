@@ -106,6 +106,9 @@ class WebGLBoundary extends Component<{ width: number; height: number; children:
   }
 }
 
+/** Clears the drawn mark until the map next goes idle with the new style or data in. */
+const redrawing = (element: HTMLElement | null) => element?.removeAttribute('data-map-idle');
+
 const MapCanvas: React.FC<Props> = ({ baseMap, trail, width, height }) => {
   const { mower } = trail;
   const element = useRef<HTMLDivElement>(null);
@@ -119,7 +122,7 @@ const MapCanvas: React.FC<Props> = ({ baseMap, trail, width, height }) => {
     lines.current = trail.lines;
     const source = map.current?.getSource<GeoJSONSource>('trail');
     if (source) {
-      element.current?.removeAttribute('data-map-idle');
+      redrawing(element.current);
       source.setData(trail.lines);
     }
   }, [trail.lines]);
@@ -128,8 +131,7 @@ const MapCanvas: React.FC<Props> = ({ baseMap, trail, width, height }) => {
   // has loaded makes MapLibre rebuild from scratch.
   useEffect(() => {
     if (map.current) {
-      // Not drawn again until the new style's tiles are in.
-      element.current?.removeAttribute('data-map-idle');
+      redrawing(element.current);
       map.current.setStyle(styleFor(baseMap, lines.current));
       return;
     }

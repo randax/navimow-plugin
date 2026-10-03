@@ -8,6 +8,12 @@ import { readTrails, type Trail, type TrailColumns } from './trailFrame';
 // topographic Base map.
 export const TRAIL_COLOURS = ['#E02F44', '#1F60C4', '#FF780A', '#8F3BB8', '#D6338E', '#37474F'];
 
+// A Job's colour comes from its identifier, so it keeps it as older Jobs leave the range. The hash is
+// taken modulo the palette at every step, so identifiers that differ by one in their last character,
+// as sequential ones do, land on neighbouring colours rather than clashing.
+const colourOf = (job: string): string =>
+  TRAIL_COLOURS[[...job].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % TRAIL_COLOURS.length, 0)];
+
 export type Bounds = [[number, number], [number, number]];
 
 export type MowerMarker = {
@@ -23,8 +29,17 @@ export interface TrailScene {
   bounds?: Bounds;
 }
 
+export const EMPTY_SCENE: TrailScene = { lines: { type: 'FeatureCollection', features: [] } };
+
+/** The panel options the Trail depends on. */
+export interface TrailOptions {
+  dockOrigin?: DockOriginOptions;
+  /** Blank or absent means the default column name. */
+  trailColumns?: Partial<TrailColumns>;
+}
+
 /** Places Trails on the map: one coloured line per Job, and the mower where it was last seen. */
-export function drawTrails(trails: Trail[], origin: DockOrigin, now: number): TrailScene {
+export function placeTrails(trails: Trail[], origin: DockOrigin, now: number): TrailScene {
   const placed = trails.map((t) => t.points.map((p) => toLonLat(origin, p.x, p.y)));
   const scene: TrailScene = {
     lines: {
@@ -38,7 +53,11 @@ export function drawTrails(trails: Trail[], origin: DockOrigin, now: number): Tr
                 type: 'Feature',
                 // A numeric id survives into rendered features, so drawn Trails can be counted across tiles.
                 id: i,
-                properties: { job: trail.job ?? null, colour: TRAIL_COLOURS[i % TRAIL_COLOURS.length] },
+                properties: {
+                  job: trail.job ?? null,
+                  // Without a Job column there is no identifier; such Trails are told apart by position.
+                  colour: trail.job === undefined ? TRAIL_COLOURS[i % TRAIL_COLOURS.length] : colourOf(trail.job),
+                },
                 geometry: { type: 'LineString', coordinates: placed[i] },
               },
             ]
@@ -48,7 +67,7 @@ export function drawTrails(trails: Trail[], origin: DockOrigin, now: number): Tr
 
   const all = placed.flat();
   if (all.length === 0) {
-    return scene;
+    return EMPTY_SCENE;
   }
   // Reduced rather than spread into Math.min: a week of Trail is more points than a call takes as arguments.
   scene.bounds = all.reduce<Bounds>(
@@ -65,7 +84,7 @@ export function drawTrails(trails: Trail[], origin: DockOrigin, now: number): Tr
   const last = trails.flatMap((t) => t.points).reduce((a, b) => (b.time > a.time ? b : a));
   scene.mower = {
     position: toLonLat(origin, last.x, last.y),
-    ...(last.heading === undefined ? {} : { bearing: headingBearing(origin, last.heading) }),
+    bearing: last.heading === undefined ? undefined : headingBearing(origin, last.heading),
     ...recency(last.time, now),
   };
   return scene;
@@ -74,20 +93,20 @@ export function drawTrails(trails: Trail[], origin: DockOrigin, now: number): Tr
 /**
  * The panel's whole Trail pipeline, from query frames and options to what the map draws, or to the
  * problem to show instead. With nothing to draw, a missing Dock origin is not a problem yet.
+ * `now` is when the data was fetched; without it, the wall clock (see recency).
  */
 export function trailScene(
   frames: DataFrame[],
-  columns: Partial<TrailColumns> | undefined,
-  dockOrigin: DockOriginOptions | undefined,
-  now: number
+  { trailColumns, dockOrigin }: TrailOptions,
+  now = Date.now()
 ): { scene: TrailScene } | { problem: string } {
-  const read = readTrails(frames, columns);
+  const read = readTrails(frames, trailColumns);
   if ('problem' in read) {
     return read;
   }
   if (read.trails.length === 0) {
-    return { scene: { lines: { type: 'FeatureCollection', features: [] } } };
+    return { scene: EMPTY_SCENE };
   }
   const resolved = resolveDockOrigin(dockOrigin);
-  return 'problem' in resolved ? resolved : { scene: drawTrails(read.trails, resolved.origin, now) };
+  return 'problem' in resolved ? resolved : { scene: placeTrails(read.trails, resolved.origin, now) };
 }

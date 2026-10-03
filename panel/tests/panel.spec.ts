@@ -11,6 +11,7 @@ const test = base.extend<{
   pluginErrors: string[];
   mapDashboard: Dashboard;
   openMap: (title: string) => Promise<Locator>;
+  trailDashboard: Dashboard;
   openTrail: (title: string) => Promise<Locator>;
 }>({
   // Pull requests must not depend on, or load, third-party tile services: tiles come from a fixture.
@@ -56,11 +57,10 @@ const test = base.extend<{
   openMap: async ({ gotoDashboardPage, mapDashboard }, use) =>
     use(async (title) => (await gotoDashboardPage(mapDashboard)).getPanelByTitle(title).locator),
   // Panels fed by TestData with a slice of the real Trail fixture, fixtures/trail-2026-09-21.csv.
-  openTrail: async ({ gotoDashboardPage, readProvisionedDashboard }, use) =>
-    use(async (title) => {
-      const dashboard = await readProvisionedDashboard({ fileName: 'navimow-trail.json' });
-      return (await gotoDashboardPage(dashboard)).getPanelByTitle(title).locator;
-    }),
+  trailDashboard: async ({ readProvisionedDashboard }, use) =>
+    use(await readProvisionedDashboard({ fileName: 'navimow-trail.json' })),
+  openTrail: async ({ gotoDashboardPage, trailDashboard }, use) =>
+    use(async (title) => (await gotoDashboardPage(trailDashboard)).getPanelByTitle(title).locator),
 });
 
 /** Waits for an image tile from the host; a 200 carrying an error document does not count. */

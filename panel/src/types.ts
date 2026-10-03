@@ -1,10 +1,6 @@
 import type { BaseMapOptions } from './model/baseMap';
-import type { DockOriginOptions } from './model/dockOrigin';
-import type { TrailColumns } from './model/trailFrame';
+import type { TrailOptions } from './model/trail';
 
-export interface MapPanelOptions {
+export interface MapPanelOptions extends TrailOptions {
   baseMap: BaseMapOptions;
-  dockOrigin?: DockOriginOptions;
-  /** Blank or absent means the default column name. */
-  trailColumns?: Partial<TrailColumns>;
 }

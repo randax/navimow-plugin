@@ -7,15 +7,35 @@ import type { MapPanelOptions } from './types';
 const category = ['Base map'];
 const isCustom = (options: MapPanelOptions) => options.baseMap?.preset === 'custom';
 
-const TRAIL_COLUMNS: Array<[keyof TrailColumns, string, string]> = [
-  ['time', 'Time', 'When each position was recorded.'],
-  ['x', 'X', "Metres from the dock along the mower's x-axis."],
-  ['y', 'Y', "Metres from the dock along the mower's y-axis."],
-  ['heading', 'Heading', 'Optional. Radians counter-clockwise from the x-axis; points the mower marker.'],
-  ['job', 'Job', 'Optional. Each Job is drawn as its own line, in its own colour.'],
-  ['zone', 'Zone', 'Optional.'],
-  ['status', 'Status', 'Optional.'],
-  ['mower', 'Mower', "Optional. The mower's identifier."],
+// Option editors for each Trail column, in the order the options pane shows them.
+const TRAIL_COLUMN_EDITORS: Array<{ key: keyof TrailColumns; name: string; description: string }> = [
+  { key: 'time', name: 'Time', description: 'When each position was recorded.' },
+  { key: 'x', name: 'X', description: "Metres from the dock along the mower's x-axis." },
+  { key: 'y', name: 'Y', description: "Metres from the dock along the mower's y-axis." },
+  {
+    key: 'heading',
+    name: 'Heading',
+    description: 'Optional. Radians counter-clockwise from the x-axis; points the mower marker.',
+  },
+  { key: 'job', name: 'Job', description: 'Optional. Each Job is drawn as its own line, in its own colour.' },
+  {
+    key: 'zone',
+    name: 'Zone',
+    description:
+      'Optional. The Zone each position was mowed in. Read now, shown when hovering the Trail in an upcoming release.',
+  },
+  {
+    key: 'status',
+    name: 'Status',
+    description:
+      "Optional. The mower's state at each position, such as mowing or returning. Read now, shown when hovering the Trail in an upcoming release.",
+  },
+  {
+    key: 'mower',
+    name: 'Mower',
+    description:
+      'Optional. Which mower reported each position. Read now, used to warn about data from more than one mower in an upcoming release.',
+  },
 ];
 
 export const plugin = new PanelPlugin<MapPanelOptions>(MapPanel).setPanelOptions((builder) => {
@@ -91,7 +111,7 @@ export const plugin = new PanelPlugin<MapPanelOptions>(MapPanel).setPanelOptions
     });
   // Blank means the default name, shown as the placeholder, so a database that names things the
   // collector's way needs no settings at all.
-  for (const [key, name, description] of TRAIL_COLUMNS) {
+  for (const { key, name, description } of TRAIL_COLUMN_EDITORS) {
     builder.addTextInput({
       path: `trailColumns.${key}`,
       name,

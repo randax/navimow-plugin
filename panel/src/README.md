@@ -6,15 +6,15 @@ Draws a Navimow robotic mower's Trail on a real map of the lawn.
 
 The panel reads one query with a row per mower position:
 
-| Column  | Default name | Required | Meaning                                                |
-| ------- | ------------ | -------- | ------------------------------------------------------ |
-| Time    | `time`       | yes      | When the position was recorded                         |
-| X, Y    | `x`, `y`     | yes      | Metres from the charging dock, on the mower's own axes |
-| Heading | `theta`      | no       | Radians counter-clockwise from the x-axis              |
-| Job     | `job_id`     | no       | Each Job is drawn as its own line, in its own colour   |
-| Zone    | `zone`       | no       |                                                        |
-| Status  | `status`     | no       |                                                        |
-| Mower   | `device_id`  | no       |                                                        |
+| Column  | Default name | Required | Meaning                                                                                                    |
+| ------- | ------------ | -------- | ---------------------------------------------------------------------------------------------------------- |
+| Time    | `time`       | yes      | When the position was recorded                                                                             |
+| X, Y    | `x`, `y`     | yes      | Metres from the charging dock, on the mower's own axes                                                     |
+| Heading | `theta`      | no       | Radians counter-clockwise from the x-axis                                                                  |
+| Job     | `job_id`     | no       | Each Job is drawn as its own line, in its own colour                                                       |
+| Zone    | `zone`       | no       | The Zone the position was mowed in; shown when hovering the Trail in an upcoming release                   |
+| Status  | `status`     | no       | The mower's state, such as mowing or returning; shown when hovering the Trail in an upcoming release       |
+| Mower   | `device_id`  | no       | Which mower reported the position; used to warn about data from more than one mower in an upcoming release |
 
 If your columns are named differently, set their names under **Trail columns** in the panel
 options. A missing optional column means less is drawn. Without a Job column, each query result is
