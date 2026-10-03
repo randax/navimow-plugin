@@ -49,8 +49,14 @@ export const MapView: React.FC<Props> = ({ baseMap, width, height }) => {
   const map = useRef<Map | null>(null);
   const [webgl] = useState(hasWebGL);
 
+  // Create the map on first draw, then restyle it in place: a second style set before the first
+  // has loaded makes MapLibre rebuild from scratch.
   useEffect(() => {
     if (!webgl) {
+      return;
+    }
+    if (map.current) {
+      map.current.setStyle(styleFor(baseMap));
       return;
     }
     map.current = new Map({
@@ -61,18 +67,16 @@ export const MapView: React.FC<Props> = ({ baseMap, width, height }) => {
       attributionControl: { compact: false },
     });
     map.current.on('error', (e) => console.error('[navimow-map]', e.error?.message ?? e));
-    return () => {
-      // Browsers keep only about eight WebGL contexts, so release this one with the panel.
+  }, [webgl, baseMap]);
+
+  // Browsers keep only about eight WebGL contexts, so release this one with the panel.
+  useEffect(
+    () => () => {
       map.current?.remove();
       map.current = null;
-    };
-    // Created once per mount; later base map changes go through setStyle below.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  useEffect(() => {
-    map.current?.setStyle(styleFor(baseMap));
-  }, [baseMap]);
+    },
+    []
+  );
 
   if (!webgl) {
     return <PanelMessage width={width} height={height} text={NO_WEBGL} />;

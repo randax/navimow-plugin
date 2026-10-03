@@ -5,6 +5,9 @@ on:
     paths: ['panel/**', '.github/workflows/panel.yml']
   pull_request:
     paths: ['panel/**', '.github/workflows/panel.yml']
+  # Nightly, because tile services can change or fail without any change in this repository.
+  schedule:
+    - cron: '0 3 * * *'
 
 defaults:
   run:
