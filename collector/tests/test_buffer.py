@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import socket
+import threading
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import psycopg
+import pytest
 
 from navimow_collector.config import Secret, StorageConfig
 from navimow_collector.records import Gap, TrailPoint
-from navimow_collector.storage import Storage, StorageError, open_storage
+from navimow_collector.storage import Storage, StorageError, open_storage, postgres
 from navimow_collector.storage.buffered import RETRY_SECONDS, BufferedStorage
 
 START = datetime(2026, 9, 30, 12, tzinfo=UTC)
@@ -68,6 +72,53 @@ def points(*seconds: int) -> list[TrailPoint]:
 
 def buffered(db: Database, tmp_path: Path, clock: Clock, **limits: int) -> BufferedStorage:
     return BufferedStorage(db.open, tmp_path / "buffer.jsonl", clock=clock, **limits)
+
+
+def finishes(work: Callable[[], object], within: float) -> bool:
+    """Whether `work` returns in time; work that stalls is left behind on its thread."""
+    thread = threading.Thread(target=work, daemon=True)
+    thread.start()
+    thread.join(within)
+    return not thread.is_alive()
+
+
+def test_a_locked_table_delays_rows_rather_than_stalling_the_collector(
+    database: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(postgres, "STATEMENT_TIMEOUT_MS", 200)
+    db, clock = Database(database), Clock()
+    storage = buffered(db, tmp_path, clock)
+    storage.write_trail(points(1))
+
+    with psycopg.connect(database) as maintenance:
+        maintenance.execute("LOCK TABLE trail_point IN ACCESS EXCLUSIVE MODE")
+        assert finishes(lambda: storage.write_trail(points(2)), within=5)
+        assert storage.buffered == 1
+
+    clock.now += RETRY_SECONDS
+    storage.flush()
+    assert db.trail() == [1, 2]
+
+
+def test_a_database_host_that_never_answers_is_given_up_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(postgres, "CONNECT_TIMEOUT_SECONDS", 2)  # the shortest libpq honours
+    errors: list[StorageError] = []
+
+    def connect() -> None:
+        try:
+            open_storage(StorageConfig(dsn=Secret(f"postgresql://nobody@127.0.0.1:{port}/none")))
+        except StorageError as error:
+            errors.append(error)
+
+    with socket.socket() as silent:  # accepts the connection, then says nothing
+        silent.bind(("127.0.0.1", 0))
+        silent.listen()
+        port = silent.getsockname()[1]
+        assert finishes(connect, within=8)
+
+    assert "timeout" in str(errors[0])
 
 
 def test_rows_written_during_an_outage_arrive_when_the_database_returns(

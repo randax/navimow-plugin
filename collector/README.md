@@ -104,9 +104,13 @@ record, so a capture that contains it replays to the same row:
 After that, rows it cannot take are held in memory (1,000 rows), then appended
 to `buffer.jsonl` in the state directory (up to 64 MiB; beyond that, or if the
 file cannot be written, the newest rows are dropped and an error is logged),
-and written when the database returns, by this process or the next. Put a
-`connect_timeout` in the DSN: without one, a database host that has vanished
-from the network can stall the collector on every retry.
+and written when the database returns, by this process or the next.
+
+A slow database counts as an outage too. The collector gives a connection
+attempt 5 seconds and a statement 5 seconds (a lock held by maintenance
+included), and uses TCP keep-alives to notice a server that vanished, so no
+database problem holds collection up for longer than that. A `connect_timeout`
+or keep-alive setting in the DSN replaces the collector's own.
 
 ```toml
 [collector]

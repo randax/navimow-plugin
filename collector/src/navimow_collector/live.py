@@ -226,14 +226,16 @@ class Collector:
         self._fetches = 0
         self._mark(now)
         _LOGGER.info("Broker connected")
-        if gap_start is not None and gap_start < now:
+        if gap_start is not None:
+            # Written even when no time is seen to pass: a stalled loop runs the drop and
+            # the reconnection back to back, and messages were lost all the same.
             for mower in self._mowers:
                 self._feed(
                     {
                         "recv_ms": round(now * 1000),
                         "kind": "gap",
                         "mower_id": mower,
-                        "start_ms": round(gap_start * 1000),
+                        "start_ms": round(min(gap_start, now) * 1000),
                         "reason": self._gap_reason,
                     }
                 )

@@ -306,6 +306,19 @@ def test_a_gap_starts_when_the_connection_was_lost_not_at_a_failed_attempt_to_re
     assert gaps(live) == [("DEVICE_1", at(NOW + 100), at(NOW + 340), "reconnect")]
 
 
+def test_a_reconnection_is_recorded_even_when_no_time_is_seen_to_pass(live: Live) -> None:
+    # A stalled process sees the drop and the reconnection in the same instant.
+    async def scenario() -> None:
+        await live.connected()
+        live.clock.now = NOW + 100
+        await live.broker.drop()
+        await live.broker.accept()
+
+    asyncio.run(scenario())
+
+    assert gaps(live) == [("DEVICE_1", at(NOW + 100), at(NOW + 100), "reconnect")]
+
+
 def test_a_restart_writes_a_gap_from_when_the_stream_last_flowed(live: Live) -> None:
     async def scenario() -> None:
         collector = await live.connected()

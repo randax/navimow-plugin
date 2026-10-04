@@ -6,10 +6,23 @@ from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 
 import psycopg
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from ..config import StorageConfig
 from ..records import Gap, TrailPoint
 from .base import SchemaError, StorageError
+
+# Live collection writes from its event loop, so no database call may wait for long: a
+# connection attempt, a statement held up by a lock and a server that vanished mid-statement
+# each fail within seconds, which the live buffer then treats as an outage.
+CONNECT_TIMEOUT_SECONDS = 5
+STATEMENT_TIMEOUT_MS = 5000
+_DEAD_PEER = {
+    "keepalives_idle": 5,
+    "keepalives_interval": 2,
+    "keepalives_count": 3,
+    "tcp_user_timeout": 10000,  # milliseconds; libpq ignores it where the system lacks it
+}
 
 
 @contextmanager
@@ -59,7 +72,13 @@ class PostgresStorage:
         if config.dsn is None:
             raise StorageError("storage.dsn is required for the postgres backend")
         with _translated():
-            self._connection = psycopg.connect(config.dsn.reveal(), autocommit=True)
+            deadlines = {"connect_timeout": CONNECT_TIMEOUT_SECONDS, **_DEAD_PEER}
+            # The operator's DSN wins wherever it sets one of these itself.
+            parameters = {**deadlines, **conninfo_to_dict(config.dsn.reveal())}
+            self._connection = psycopg.connect(make_conninfo("", **parameters), autocommit=True)
+            self._connection.execute(
+                "SELECT set_config('statement_timeout', %s, false)", (str(STATEMENT_TIMEOUT_MS),)
+            )
 
     def __enter__(self) -> PostgresStorage:
         return self
