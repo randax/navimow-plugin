@@ -502,3 +502,30 @@ def test_a_login_written_during_a_refresh_is_not_overwritten(tmp_path: Path) -> 
 
     assert run(tokens.access_token()) == "relogged"
     assert stored(store).access_token == "relogged"
+
+
+def test_tokens_rejected_on_first_use_go_onto_the_retry_ladder(tmp_path: Path) -> None:
+    session = FakeSession([Response(200, token(f"minted-{n}")) for n in range(5)])
+    tokens = TokenManager(
+        TokenClient(session, "id", "secret"), logged_in(tmp_path), clock=lambda: 1
+    )
+
+    current = "access"
+    for _ in range(5):  # REST rejects every token the token endpoint mints
+        current = run(tokens.on_unauthorized(current))
+
+    assert len(session.forms) == 1
+    assert tokens.state is AuthState.RETRY_PENDING
+
+
+def test_a_login_written_just_before_a_refresh_is_saved_is_kept(tmp_path: Path) -> None:
+    class LoginBeforeSave(TokenStore):
+        def replace(self, expected: Credential | None, credential: Credential) -> bool:
+            TokenStore(self.path).save(Credential("relogged", "refresh", 3600, 3300))
+            return super().replace(expected, credential)
+
+    store = LoginBeforeSave(logged_in(tmp_path).path)
+    tokens = manager(store, Response(200, token("refreshed-old-grant")))
+
+    assert run(tokens.access_token()) == "relogged"
+    assert stored(store).access_token == "relogged"

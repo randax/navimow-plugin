@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import json
 import logging
 import os
 import re
 import tempfile
 import threading
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import StrEnum
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -83,7 +85,30 @@ class TokenStore:
 
     def save(self, credential: Credential) -> None:
         """Replace the state file only after its complete, private contents hit disk."""
+        with self._locked():
+            self._write(credential)
+
+    def replace(self, expected: Credential | None, credential: Credential) -> bool:
+        """Save `credential` only if the file still holds `expected`, so that a login written
+        by `navimow-collector login` meanwhile is never overwritten by a refresh."""
+        with self._locked():
+            try:
+                current = self.load()
+            except ValueError:
+                current = expected  # a corrupt file holds nothing worth keeping
+            if current != expected:
+                return False
+            self._write(credential)
+            return True
+
+    @contextmanager
+    def _locked(self) -> Iterator[None]:
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with open(self.path.with_name(f".{self.path.name}.lock"), "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            yield
+
+    def _write(self, credential: Credential) -> None:
         temporary_name: str | None = None
         try:
             with tempfile.NamedTemporaryFile(
@@ -224,6 +249,9 @@ class TokenManager:
         self._failures = 0
         # The access token a caller has reported as rejected, until a refresh replaces it.
         self._rejected: str | None = None
+        # The token a rejection-triggered refresh produced: if that is rejected too, refreshing
+        # on every 401 will not help, so the retry ladder takes over.
+        self._minted_for_rejection: str | None = None
 
     async def access_token(self) -> str | None:
         """Return the current token, refreshing once it is due."""
@@ -267,8 +295,13 @@ class TokenManager:
             ):
                 newly_rejected = self._rejected != rejected_token
                 self._rejected = rejected_token
-                if newly_rejected or self._may_attempt(now):
-                    await self._refresh(now)
+                if rejected_token == self._minted_for_rejection:
+                    self._minted_for_rejection = None
+                    self._record_failure(
+                        "a freshly refreshed access token was rejected too", now, relogin=False
+                    )
+                elif newly_rejected or self._may_attempt(now):
+                    await self._refresh(now, after_rejection=True)
             return self._token()
 
     def _due(self, now: float) -> bool:
@@ -307,7 +340,7 @@ class TokenManager:
     def _may_attempt(self, now: float) -> bool:
         return self.next_attempt_at is None or now >= self.next_attempt_at
 
-    async def _refresh(self, now: float) -> None:
+    async def _refresh(self, now: float, *, after_rejection: bool = False) -> None:
         assert self._credential is not None
         self.state = AuthState.REFRESHING
         try:
@@ -318,29 +351,25 @@ class TokenManager:
         except Exception as error:  # Transport errors, whatever their wording, are transient.
             self._record_failure(str(error), now, relogin=False)
             return
-        # A login the operator wrote while the request was in flight is newer intent than the
-        # grant it refreshed: keep that login rather than overwrite it.
-        if self._adopt_new_login():
-            return
         # Adopt before saving: the old refresh token may already be spent, so the new pair
         # must keep serving even if the disk refuses it.
         self._credential = refreshed
-        try:
-            self._store.save(refreshed)
-        except OSError as error:
-            _LOGGER.error("Could not save refreshed Navimow credentials: %s", error)
-        else:
-            self._on_disk = refreshed
-        if refreshed.access_token == self._rejected:
-            # The same dead token back is no recovery; back off rather than refresh per 401.
-            self._record_failure(
-                "the refresh returned the rejected access token", now, relogin=False
-            )
-            return
         self._rejected = None
+        self._minted_for_rejection = refreshed.access_token if after_rejection else None
         self._failures = 0
         self.next_attempt_at = None
         self.state = AuthState.FRESH
+        try:
+            saved = self._store.replace(self._on_disk, refreshed)
+        except OSError as error:
+            _LOGGER.error("Could not save refreshed Navimow credentials: %s", error)
+            return
+        if saved:
+            self._on_disk = refreshed
+        else:
+            # The operator logged in while the request was in flight: that is newer intent
+            # than the grant just refreshed, so it wins.
+            self._adopt_new_login()
 
     def _record_failure(self, detail: str, now: float, *, relogin: bool) -> None:
         if relogin:
