@@ -149,6 +149,8 @@ def _pasted_login(value: str) -> tuple[str, str]:
     value = value.strip()
     code, redirect_uri = value, MANUAL_REDIRECT_URI
     if "code=" in value:
+        if "://" not in value and "/" in value.partition("?")[0]:
+            value = f"http://{value}"  # an address bar dropped the scheme, keep host and port
         url = urlparse(value)
         code = parse_qs(url.query or value.partition("?")[2] or value).get("code", [""])[0]
         if url.scheme in ("http", "https") and url.netloc:

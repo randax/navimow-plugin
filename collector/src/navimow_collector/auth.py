@@ -208,7 +208,7 @@ class TokenClient:
             # Vendor errors can arrive with status 200, so classification needs their prose;
             # the wording here must not itself match a re-login word, and must not log
             # a token from a half-formed credential.
-            detail = "malformed credential" if "access_token" in body else body
+            detail = f"malformed credential ({error})" if "access_token" in body else body
             raise TokenRequestError(f"unexpected token response: {detail}") from error
 
 

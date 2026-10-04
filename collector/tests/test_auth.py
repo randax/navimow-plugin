@@ -18,6 +18,7 @@ from navimow_collector.auth import (
     LoopbackListener,
     TokenClient,
     TokenManager,
+    TokenRequestError,
     TokenStore,
     maintain,
 )
@@ -634,11 +635,19 @@ def test_first_use_rejections_climb_the_ladder_whatever_the_caller_cadence(
     assert len(session.forms) == 1
 
 
-def test_a_pasted_loopback_redirect_is_exchanged_with_its_own_redirect_uri(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "pasted",
+    [
+        "http://localhost:54321/callback?code=abc&state=x",  # after the browser flow timed out
+        "localhost:54321/callback?code=abc&state=x",  # the same, copied without its scheme
+    ],
+)
+def test_a_pasted_loopback_redirect_is_exchanged_with_its_own_redirect_uri(
+    tmp_path: Path, pasted: str
+) -> None:
     config = tmp_path / "collector.toml"
     config.write_text(f'[auth]\nstate_file = "{tmp_path / "tokens.json"}"\n')
     session = FakeSession([Response(200, token())])
-    pasted = "http://localhost:54321/callback?code=abc&state=x"  # after the browser flow timed out
 
     assert (
         main(["--config", str(config), "login", "--code", pasted], session_factory=lambda: session)
@@ -647,3 +656,13 @@ def test_a_pasted_loopback_redirect_is_exchanged_with_its_own_redirect_uri(tmp_p
 
     assert session.forms[0] is not None
     assert session.forms[0]["redirect_uri"] == "http://localhost:54321/callback"
+
+
+def test_an_exchange_without_a_refresh_token_names_the_missing_field() -> None:
+    body = json.dumps({"access_token": "secret-access", "expires_in": 3600})
+    client = TokenClient(FakeSession([Response(200, body)]), "id", "secret")
+
+    with pytest.raises(TokenRequestError, match="refresh_token") as raised:
+        run(client.exchange("code", "http://localhost:1/callback"))
+
+    assert "secret-access" not in str(raised.value)
