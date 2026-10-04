@@ -730,9 +730,11 @@ def test_vendor_prose_never_logs_a_token(tmp_path: Path, caplog: pytest.LogCaptu
     assert "SECRET" not in logged
 
 
-@pytest.mark.parametrize("expires_in", ["3600", None])
+@pytest.mark.parametrize(
+    ("expires_in", "lifetime"), [("7200", 7200), (7200.0, 7200), (None, 3600), ("soon", 3600)]
+)
 def test_a_usable_credential_with_an_odd_lifetime_is_kept(
-    tmp_path: Path, expires_in: str | None
+    tmp_path: Path, expires_in: str | float | None, lifetime: int
 ) -> None:
     body: dict[str, Any] = {"access_token": "new", "refresh_token": "rotated"}
     if expires_in is not None:
@@ -740,4 +742,50 @@ def test_a_usable_credential_with_an_odd_lifetime_is_kept(
     store = logged_in(tmp_path)
 
     assert run(manager(store, Response(200, json.dumps(body))).access_token()) == "new"
-    assert stored(store) == Credential("new", "rotated", 3600, 3300)
+    assert stored(store) == Credential("new", "rotated", lifetime, 3300)
+
+
+def test_a_transient_failure_while_probing_is_not_reported_as_a_rejection(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    clock = Clock(3300)
+    session = FakeSession([Response(400, REJECTED_REFRESH), Response(503, CIRCUIT_BREAKER)])
+    tokens = TokenManager(TokenClient(session, "id", "secret"), logged_in(tmp_path), clock=clock)
+    run(tokens.access_token())
+    caplog.clear()
+
+    clock.now += 3600
+    run(tokens.access_token())
+
+    assert tokens.state is AuthState.RELOGIN_REQUIRED
+    assert len(session.forms) == 2
+    assert not any("rejected the stored login" in r.getMessage() for r in caplog.records)
+
+
+def test_the_hourly_rung_of_the_ladder_is_logged_as_an_error(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    clock = Clock(3300)
+    session = FakeSession([Response(503, CIRCUIT_BREAKER) for _ in range(4)])
+    tokens = TokenManager(TokenClient(session, "id", "secret"), logged_in(tmp_path), clock=clock)
+
+    levels = []
+    for _ in range(4):
+        caplog.clear()
+        run(tokens.access_token())
+        levels.append(caplog.records[-1].levelname)
+        assert tokens.next_attempt_at is not None
+        clock.now = tokens.next_attempt_at
+
+    assert levels == ["WARNING", "WARNING", "WARNING", "ERROR"]
+
+
+def test_a_plain_text_body_echoing_the_refresh_token_is_redacted(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    store = TokenStore(tmp_path / "token.json")
+    store.save(Credential("access", "REFRESH-SECRET", 3600, 0))
+
+    run(manager(store, Response(200, "bad refresh_token REFRESH-SECRET")).access_token())
+
+    assert "REFRESH-SECRET" not in " ".join(r.getMessage() for r in caplog.records)

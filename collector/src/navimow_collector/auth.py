@@ -410,10 +410,10 @@ class TokenManager:
         try:
             refreshed = await self._client.refresh(self._credential, now=now)
         except TokenRequestError as error:
-            self._record_failure(str(error), now, relogin=error.relogin or probing)
+            self._record_failure(str(error), now, relogin=error.relogin, probing=probing)
             return
         except Exception as error:  # Transport errors, whatever their wording, are transient.
-            self._record_failure(str(error), now, relogin=probing)
+            self._record_failure(str(error), now, relogin=False, probing=probing)
             return
         # Adopt before saving: the old refresh token may already be spent, so the new pair
         # must keep serving even if the disk refuses it.
@@ -437,7 +437,16 @@ class TokenManager:
             # than the grant just refreshed, so it wins.
             self._adopt_new_login()
 
-    def _record_failure(self, detail: str, now: float, *, relogin: bool) -> None:
+    def _record_failure(
+        self, detail: str, now: float, *, relogin: bool, probing: bool = False
+    ) -> None:
+        if probing and not relogin:
+            # The hourly probe of a rejected login failed for some other reason: still no
+            # evidence the login works, so the state stands, but nothing was rejected.
+            self.state = AuthState.RELOGIN_REQUIRED
+            self.next_attempt_at = now + RETRY_DELAYS[-1]
+            _LOGGER.warning("Navimow login still unverified; hourly probe failed: %s", detail)
+            return
         if relogin:
             self.state = AuthState.RELOGIN_REQUIRED
             # Still probed hourly: a gateway's 401/403 page can look like a dead grant.
@@ -559,7 +568,11 @@ def _lifetime(value: dict[str, Any]) -> int:
     rotated refresh token. An odd or missing value falls back to the documented hour."""
     raw = value.get("expires_in")
     try:
-        lifetime = int(raw) if isinstance(raw, int | str) and not isinstance(raw, bool) else 0
+        lifetime = 0
+        if isinstance(raw, float) and raw.is_integer():
+            lifetime = int(raw)
+        elif isinstance(raw, int | str) and not isinstance(raw, bool):
+            lifetime = int(raw)
     except ValueError:
         lifetime = 0
     if lifetime > 0:
