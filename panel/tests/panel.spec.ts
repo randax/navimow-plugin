@@ -134,7 +134,9 @@ const pixelsOf = async (page: Page, panel: Locator) => {
     const context = canvas.getContext('2d')!;
     context.drawImage(image, 0, 0);
     const { data } = context.getImageData(0, 0, image.width, image.height);
-    const count = { baseMap: 0, overlay: 0, trail: 0 };
+    // The colour near the top right corner as well, clear of the Trail, the mower and the controls.
+    const corner = 4 * (30 * image.width + image.width - 30);
+    const count = { baseMap: 0, overlay: 0, trail: 0, corner: [...data.slice(corner, corner + 3)] };
     for (let i = 0; i < data.length; i += 4) {
       const [r, g, b] = [data[i], data[i + 1], data[i + 2]];
       if (r > 150 && g < 110) {
@@ -325,12 +327,14 @@ test('a panel can start in terrain, and its camera tilts and turns', async ({ op
   expect(turned.pitch).toBeLessThan(55);
 });
 
-test('a Trail drawn on Terrain follows the ground', async ({ openTerrain, page }) => {
+// Not proof that the Trail bends over relief: the fixture ground is level, and MapLibre has no way to
+// draw a line layer off the ground that a test could tell apart. That the Trail is a line layer, laid
+// over the Terrain, is the style's claim (style.test.ts); this shows it on screen once the ground is up.
+test('the Trail is drawn in the terrain view, on ground 400 m up', async ({ openTerrain, page }) => {
   test.skip(LIVE_TILES, NEEDS_FIXTURE_TILES);
   const panel = await openTerrain('Starts in terrain');
   await cameraAtRest(panel, (camera) => Math.round(camera.groundElevation) === 400);
   await expectDrawn(panel);
-  // The camera looks at ground 400 m up. A Trail left at sea level would be far out of this view.
   expect((await pixelsOf(page, panel)).trail).toBeGreaterThan(100);
 });
 
@@ -358,6 +362,46 @@ test('the Overlay is drawn over the Base map and under the Trail', async ({
   }).toPass({ timeout: 20_000 });
   // Without Terrain there is nothing to switch between.
   await expect(panel.getByTestId('navimow-map-view')).toHaveCount(0);
+});
+
+test('a Base map switch keeps the Overlay and the Trail, and the Overlay fades with its opacity', async ({
+  gotoPanelEditPage,
+  readProvisionedDashboard,
+  page,
+}) => {
+  test.skip(LIVE_TILES, NEEDS_FIXTURE_TILES);
+  const dashboard = await readProvisionedDashboard({ fileName: 'navimow-overlay.json' });
+  const panelEditPage = await gotoPanelEditPage({ dashboard, id: '1' });
+  const panel = panelEditPage.panel.locator;
+  await expectDrawn(panel);
+  const canvas = await panel.locator('canvas.maplibregl-canvas').elementHandle();
+
+  await Promise.all([
+    panelEditPage.getCustomOptions('Base map').getSelect('Base map').selectOption('OpenStreetMap'),
+    tileFrom(page, 'tile.openstreetmap.org'),
+  ]);
+  // The new style is in, on the same map, and has been drawn.
+  await expect(panel.locator('.maplibregl-ctrl-attrib')).toContainText('© OpenStreetMap contributors');
+  await expectDrawn(panel);
+  expect(await canvas?.evaluate((element) => element.isConnected)).toBe(true);
+  // The Overlay, at full opacity, still hides the Base map under it, and the Trail still shows on top.
+  await expect(async () => {
+    const pixels = await pixelsOf(page, panel);
+    expect(pixels.baseMap).toBe(0);
+    expect(pixels.overlay).toBeGreaterThan(10_000);
+    expect(pixels.trail).toBeGreaterThan(100);
+  }).toPass({ timeout: 20_000 });
+
+  // At a quarter opacity it tints the Base map: three parts fixture green (122, 184, 107) to one
+  // part fixture blue (0, 0, 255).
+  await panelEditPage.getCustomOptions('Overlay').getSliderInput('Opacity').fill('0.25');
+  await page.keyboard.press('Tab');
+  await expect(async () => {
+    const [red, green, blue] = (await pixelsOf(page, panel)).corner;
+    expect(Math.abs(red - 92)).toBeLessThan(10);
+    expect(Math.abs(green - 138)).toBeLessThan(10);
+    expect(Math.abs(blue - 144)).toBeLessThan(10);
+  }).toPass({ timeout: 20_000 });
 });
 
 test('Terrain is off until enabled, then defaults to Mapterhorn with any Base map', async ({
