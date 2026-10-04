@@ -9,3 +9,7 @@ migrate = true
 client_id = "homeassistant"
 # client_secret_file = "/run/secrets/navimow-oauth-client-secret"
 # state_file = "/var/lib/navimow-collector/tokens.json"
+
+[collector]
+# Holds the outage buffer and the note of when the stream last flowed.
+# state_dir = "/var/lib/navimow-collector"
