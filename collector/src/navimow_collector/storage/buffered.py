@@ -71,6 +71,7 @@ class BufferedStorage:
         self._retry_at = 0.0
         self._away = False  # whether the database has been reported unreachable
         self._dropping = False  # whether this outage's loss has been reported yet
+        self.written = 0  # rows the database stored, backlog included
         self.dropped = 0
         self.rejected = 0
         # Rows rejected in an attempt an outage then interrupted: its rows will be tried
@@ -159,6 +160,7 @@ class BufferedStorage:
     def _send(self, rows: Sequence[Row]) -> int:
         """Write rows now, raising StorageError only when the database cannot be reached."""
         written = self._attempt(rows)
+        self.written += written
         self._refused.difference_update(rows)  # done with: these will not be tried again
         return written
 

@@ -119,7 +119,7 @@ def to_prometheus(snapshot: Snapshot) -> str:
             _metric(
                 "database_reachable",
                 "gauge",
-                "Whether the database took the last write.",
+                "Whether the database answered the last attempt to reach it.",
                 [("", snapshot.database_reachable)],
             ),
             _metric(

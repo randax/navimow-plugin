@@ -12,6 +12,7 @@ import sys
 import tempfile
 import webbrowser
 from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import fields
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -27,11 +28,15 @@ from .auth import (
     TokenStore,
     authorization_url,
 )
-from .config import Config, ConfigError, Secret, load_config
+from .config import Config, ConfigError, HealthConfig, Secret, load_config
+from .health import HealthServer, Probe
 from .ingest import Ingestor, read_capture
 from .live import Collector
+from .logs import JsonFormatter
 from .storage import StorageError, open_storage
 from .storage.buffered import BufferedStorage
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def main(
@@ -48,7 +53,7 @@ def main(
         if args.command == "login":
             return _login(config, args, session_factory)
         if args.command == "collect":
-            return _collect(config, session_factory)
+            return _collect(config, session_factory, _login_command(args.config))
         return _replay(config, args.capture)
     except (ConfigError, StorageError, TokenRequestError, OSError, ValueError) as error:
         print(str(error), file=sys.stderr)
@@ -108,9 +113,20 @@ def _replay(config: Config, capture: Path) -> int:
     return 0
 
 
-def _collect(config: Config, session_factory: Callable[[], HTTPSession]) -> int:
+def _login_command(config_path: Path | None) -> str:
+    """The login an operator should run, pointed at the configuration this one was given.
+
+    The path is made absolute: the operator reading a service's log is not in its directory.
+    """
+    config_option = f"--config {shlex.quote(str(config_path.absolute()))} " if config_path else ""
+    return f"navimow-collector {config_option}login"
+
+
+def _collect(config: Config, session_factory: Callable[[], HTTPSession], login_command: str) -> int:
     """Collect live until SIGINT or SIGTERM; only what is missing at startup is fatal."""
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    handler = logging.StreamHandler()
+    handler.setFormatter(JsonFormatter())
+    logging.basicConfig(level=logging.INFO, handlers=[handler])
     state_dir = Path(config.collector.state_dir).expanduser()
     # Unable to note there when the stream last flowed, a later restart would record a gap
     # across Trail that was in fact collected.
@@ -123,23 +139,44 @@ def _collect(config: Config, session_factory: Callable[[], HTTPSession]) -> int:
     storage = BufferedStorage(lambda: open_storage(config.storage), state_dir / "buffer.jsonl")
     storage.connect()
     try:
-        asyncio.run(_until_signalled(config, session_factory(), storage, state_dir))
+        asyncio.run(_until_signalled(config, session_factory(), storage, state_dir, login_command))
     finally:
         storage.close()
     return 0
 
 
 async def _until_signalled(
-    config: Config, session: HTTPSession, storage: BufferedStorage, state_dir: Path
+    config: Config,
+    session: HTTPSession,
+    storage: BufferedStorage,
+    state_dir: Path,
+    login_command: str,
 ) -> None:
     tokens = TokenManager(
         TokenClient(session, config.auth.client_id, config.auth.client_secret.reveal()),
         TokenStore(config.auth.state_file),
+        login_command=login_command,
     )
     stop = asyncio.Event()
     for signum in (signal.SIGINT, signal.SIGTERM):
         asyncio.get_running_loop().add_signal_handler(signum, stop.set)
-    await Collector(session, tokens, storage, state_dir).collect(stop)
+    collector = Collector(session, tokens, storage, state_dir)
+    with _serving_health(config.health, collector.snapshot):
+        await collector.collect(stop)
+
+
+def _serving_health(config: HealthConfig, probe: Probe) -> AbstractContextManager[object]:
+    """Bind the health endpoint now: an address that cannot be had is a startup error, as
+    the operator relying on it would want, rather than a check that silently never answers."""
+    address = config.address()
+    if address is None:
+        return nullcontext()
+    try:
+        server = HealthServer(probe, *address)
+    except OSError as error:
+        raise ConfigError(f"health.listen {config.listen} cannot be used: {error}") from error
+    _LOGGER.info("Serving /health and /metrics on %s port %d", *server.address)
+    return server
 
 
 def _login(
@@ -149,10 +186,8 @@ def _login(
     client_id = config.auth.client_id
     if args.no_browser:
         print(authorization_url(client_id, MANUAL_REDIRECT_URI, secrets.token_urlsafe(32)))
-        config_option = f"--config {shlex.quote(str(args.config))} " if args.config else ""
         print(
-            f"After signing in, run navimow-collector {config_option}"
-            "login --code '<code-or-redirect-url>'."
+            f"After signing in, run {_login_command(args.config)} --code '<code-or-redirect-url>'."
         )
         return 0
     if args.code:

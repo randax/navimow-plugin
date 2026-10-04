@@ -103,7 +103,8 @@ def test_metrics_expose_the_same_signals_in_the_scrape_format() -> None:
         "# TYPE navimow_collector_last_message_age_seconds gauge\n"
         'navimow_collector_last_message_age_seconds{mower_id="DEVICE_1"} 12.0\n'
         'navimow_collector_last_message_age_seconds{mower_id="DEVICE_2"} NaN\n'
-        "# HELP navimow_collector_database_reachable Whether the database took the last write.\n"
+        "# HELP navimow_collector_database_reachable Whether the database answered the last"
+        " attempt to reach it.\n"
         "# TYPE navimow_collector_database_reachable gauge\n"
         "navimow_collector_database_reachable 1\n"
         "# HELP navimow_collector_buffered_rows Rows waiting for the database.\n"
