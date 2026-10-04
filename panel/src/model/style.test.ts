@@ -1,6 +1,6 @@
 import { resolveBaseMap } from './baseMap';
 import { resolveOverlay } from './overlay';
-import { mapStyle, resolveSources } from './style';
+import { mapStyle } from './style';
 import { resolveTerrain } from './terrain';
 import { EMPTY_SCENE } from './trail';
 
@@ -15,36 +15,6 @@ const terrain = source(resolveTerrain({ enabled: true }));
 const hillshade = resolveOverlay({ preset: 'kartverket-hillshade', opacity: 0.3 });
 const overlay = 'overlay' in hillshade ? hillshade.overlay : undefined;
 const { lines } = EMPTY_SCENE;
-
-describe('resolveSources', () => {
-  test('the three pickers are independent: any Base map combines with any Terrain and Overlay', () => {
-    expect(
-      resolveSources({
-        baseMap: { preset: 'osm' },
-        terrain: { enabled: true, preset: 'aws-terrarium' },
-        overlay: { preset: 'kartverket-hillshade', opacity: 0.3 },
-      })
-    ).toEqual({
-      sources: {
-        baseMap,
-        terrain: source(resolveTerrain({ enabled: true, preset: 'aws-terrarium' })),
-        overlay,
-      },
-    });
-  });
-
-  test('a panel saved before Terrain and Overlay existed draws its Base map alone', () => {
-    expect(resolveSources({ baseMap: { preset: 'osm' } })).toEqual({ sources: { baseMap } });
-  });
-
-  test.each([
-    ['Base map', { baseMap: { preset: 'custom' as const } }],
-    ['Terrain', { terrain: { enabled: true, preset: 'custom' as const } }],
-    ['Overlay', { overlay: { preset: 'custom' as const } }],
-  ])('a problem with the %s is the problem shown', (slot, options) => {
-    expect(resolveSources(options)).toEqual({ problem: expect.stringContaining(`A custom ${slot} needs`) });
-  });
-});
 
 describe('mapStyle', () => {
   test('a Base map alone is drawn under the Trail, with no Terrain', () => {
@@ -82,12 +52,15 @@ describe('mapStyle', () => {
     ]);
   });
 
-  test('any Base map combines with any Terrain and Overlay, each carrying its own attribution', () => {
-    const style = mapStyle({ baseMap: source(resolveBaseMap({ preset: 'kartverket-grey' })), overlay, terrain }, lines);
+  test('the pickers are independent: any Base map combines with any Terrain and Overlay, each with its attribution', () => {
+    const style = mapStyle(
+      { baseMap, overlay, terrain: source(resolveTerrain({ enabled: true, preset: 'aws-terrarium' })) },
+      lines
+    );
     expect(Object.values(style.sources).map((s) => ('attribution' in s ? s.attribution : undefined))).toEqual([
+      '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
       '<a href="https://www.kartverket.no/">© Kartverket</a>',
-      '<a href="https://www.kartverket.no/">© Kartverket</a>',
-      '<a href="https://mapterhorn.com/attribution">© Mapterhorn</a>',
+      'Norway terrain data © Kartverket',
       undefined,
     ]);
   });

@@ -393,6 +393,15 @@ test('Terrain is off until enabled, then defaults to Mapterhorn with any Base ma
   await options.getTextInput('URL template').fill('https://tiles.mapterhorn.com/{z}/{x}/{y}.webp');
   await page.keyboard.press('Tab');
   await expect(panel.locator('.maplibregl-ctrl-attrib')).toContainText('© My elevation tiles');
+
+  // Only a change of Terrain recreates the map: another Base map restyles the one that is there.
+  const canvas = await panel.locator('canvas.maplibregl-canvas').elementHandle();
+  await Promise.all([
+    panelEditPage.getCustomOptions('Base map').getSelect('Base map').selectOption('Kartverket topo'),
+    tileFrom(page, 'cache.kartverket.no'),
+  ]);
+  await expect(panel.locator('.maplibregl-ctrl-attrib')).toContainText('© Kartverket');
+  expect(await canvas?.evaluate((element) => element.isConnected)).toBe(true);
 });
 
 test('the Overlay picker offers hillshade or a custom URL, with an opacity', async ({

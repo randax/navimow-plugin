@@ -1,4 +1,4 @@
-import React, { Component, useEffect, useRef, type ReactNode } from 'react';
+import React, { Component, useEffect, useMemo, useRef, type ReactNode } from 'react';
 import { css } from '@emotion/css';
 import { GPUInitializationError, Map, Marker, setWorkerUrl, type GeoJSONSource } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
@@ -62,17 +62,34 @@ interface Props extends MapSources {
 }
 
 /**
+ * The same object for as long as its value is the same. Grafana hands the panel a fresh copy of all
+ * its options whenever one changes, so a source is a new object even when nothing about it did; by
+ * value, the map is restyled only for a source that differs, and recreated only for a new Terrain.
+ */
+const useByValue = <T,>(value: T): T => {
+  const json = JSON.stringify(value);
+  return useMemo(() => (json === undefined ? undefined : JSON.parse(json)) as T, [json]);
+};
+
+/**
  * Thin adapter over MapLibre: owns exactly one map instance and draws what it is given. Its
  * children are the panel's controls, laid over the map.
  */
-export const MapView: React.FC<Props & { children?: ReactNode }> = ({ children, ...props }) => (
-  <WebGLBoundary width={props.width} height={props.height}>
-    <div style={{ position: 'relative', width: props.width, height: props.height }}>
-      <MapCanvas {...props} />
-      {children}
-    </div>
-  </WebGLBoundary>
-);
+export const MapView: React.FC<Props & { children?: ReactNode }> = ({ children, ...props }) => {
+  const sources: MapSources = {
+    baseMap: useByValue(props.baseMap),
+    overlay: useByValue(props.overlay),
+    terrain: useByValue(props.terrain),
+  };
+  return (
+    <WebGLBoundary width={props.width} height={props.height}>
+      <div style={{ position: 'relative', width: props.width, height: props.height }}>
+        <MapCanvas {...props} {...sources} />
+        {children}
+      </div>
+    </WebGLBoundary>
+  );
+};
 
 /**
  * MapLibre 6 needs WebGL 2 and throws GPUInitializationError from its constructor when it cannot get

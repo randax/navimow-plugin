@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import type { PanelProps } from '@grafana/data';
-import { resolveSources } from '../model/style';
-import type { View } from '../model/terrain';
+import { resolveBaseMap } from '../model/baseMap';
+import { resolveOverlay } from '../model/overlay';
+import { resolveTerrain, type View } from '../model/terrain';
 import { mowerAt, trailScene } from '../model/trail';
 import { initialView } from '../model/view';
 import type { MapPanelOptions } from '../types';
@@ -27,9 +28,11 @@ const useView = (start: View): [View, (view: View) => void] => {
 };
 
 export const MapPanel: React.FC<PanelProps<MapPanelOptions>> = ({ options, data, width, height }) => {
-  const { baseMap, terrain, overlay, trailColumns, dockOrigin } = options;
-  const resolved = useMemo(() => resolveSources({ baseMap, terrain, overlay }), [baseMap, terrain, overlay]);
-  const [view, setView] = useView(initialView(terrain));
+  const baseMap = useMemo(() => resolveBaseMap(options.baseMap), [options.baseMap]);
+  const terrain = useMemo(() => resolveTerrain(options.terrain), [options.terrain]);
+  const overlay = useMemo(() => resolveOverlay(options.overlay), [options.overlay]);
+  const [view, setView] = useView(initialView(options.terrain));
+  const { trailColumns, dockOrigin } = options;
   const trail = useMemo(
     () => trailScene(data.series, { trailColumns, dockOrigin }),
     [data.series, trailColumns, dockOrigin]
@@ -39,24 +42,31 @@ export const MapPanel: React.FC<PanelProps<MapPanelOptions>> = ({ options, data,
   const last = 'scene' in trail ? trail.scene.mower : undefined;
   const mower = useMemo(() => last && mowerAt(last, now), [last, now]);
 
-  if ('problem' in resolved) {
-    return <PanelMessage width={width} height={height} text={resolved.problem} />;
+  const message = (text: string) => <PanelMessage width={width} height={height} text={text} />;
+  if ('problem' in baseMap) {
+    return message(baseMap.problem);
+  }
+  if ('problem' in terrain) {
+    return message(terrain.problem);
+  }
+  if ('problem' in overlay) {
+    return message(overlay.problem);
   }
   if ('problem' in trail) {
-    return <PanelMessage width={width} height={height} text={trail.problem} />;
+    return message(trail.problem);
   }
-  const { sources } = resolved;
   return (
     <MapView
-      {...sources}
+      baseMap={baseMap.source}
+      overlay={overlay.overlay}
       // Flat is the map without its Terrain; the switch recreates it with or without.
-      terrain={view === 'terrain' ? sources.terrain : undefined}
+      terrain={view === 'terrain' ? terrain.source : undefined}
       trail={trail.scene}
       mower={mower}
       width={width}
       height={height}
     >
-      {sources.terrain && <ViewSwitch view={view} onChange={setView} />}
+      {terrain.source && <ViewSwitch view={view} onChange={setView} />}
     </MapView>
   );
 };
