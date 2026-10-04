@@ -8,6 +8,9 @@ import { readTrails, type Trail, type TrailColumns } from './trailFrame';
 // topographic Base map.
 export const TRAIL_COLOURS = ['#E02F44', '#1F60C4', '#FF780A', '#8F3BB8', '#D6338E', '#37474F'];
 
+// Positions outside any Job, such as moving off and onto the dock: grey, so they never pass for a Job.
+const OUTSIDE_JOB_COLOUR = '#8E8E8E';
+
 // A Job's colour comes from its identifier, so it keeps it as older Jobs leave the range. The hash is
 // taken modulo the palette at every step, so identifiers that differ by one in their last character,
 // as sequential ones do, land on neighbouring colours rather than clashing.
@@ -64,7 +67,11 @@ export function placeTrails(trails: Trail[], origin: DockOrigin): TrailScene {
                 properties: {
                   job: trail.job ?? null,
                   // Without a Job column there is no identifier; such Trails are told apart by position.
-                  colour: trail.job === undefined ? TRAIL_COLOURS[i % TRAIL_COLOURS.length] : colourOf(trail.job),
+                  colour: trail.outsideJob
+                    ? OUTSIDE_JOB_COLOUR
+                    : trail.job === undefined
+                      ? TRAIL_COLOURS[i % TRAIL_COLOURS.length]
+                      : colourOf(trail.job),
                 },
                 geometry: { type: 'MultiLineString' as const, coordinates: parts },
               },

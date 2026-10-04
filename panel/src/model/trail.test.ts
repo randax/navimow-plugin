@@ -59,6 +59,15 @@ describe('placeTrails', () => {
     expect(coloursOf(trails.slice(1))).toEqual(later);
   });
 
+  test('positions outside any Job keep one neutral colour, whatever else is in range', () => {
+    const outside: Trail = { outsideJob: true, segments: [[at(10, 0, 0), at(9, 1, 0)]] };
+    const colour = (trails: Trail[]) =>
+      placeTrails(trails, ORIGIN).lines.features.find((f) => f.properties.job === null)?.properties.colour;
+    const alone = colour([outside]);
+    expect(colour([job('41', 300), job('42', 200), outside])).toBe(alone);
+    expect(TRAIL_COLOURS).not.toContain(alone);
+  });
+
   test('a Trail from data without a Job column is still drawn', () => {
     const { lines } = placeTrails([run([at(2, 0, 0), at(1, 5, 0)])], ORIGIN);
     expect(lines.features).toEqual([expect.objectContaining({ properties: { job: null, colour: TRAIL_COLOURS[0] } })]);

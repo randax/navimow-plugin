@@ -85,6 +85,26 @@ describe('readTrails', () => {
       [undefined, [[0], [100]]],
       ['a', [[1, 2]]],
     ]);
+    expect(result.map((t) => t.outsideJob)).toEqual([true, undefined]);
+  });
+
+  // Grafana splits a SQL time series into a frame per value of a text column, such as status or Zone.
+  test('a Job split across frames is segmented as if it were one frame', () => {
+    const columns = { time: at(0, SEC, 2 * SEC), x: [0, 1, 2], y: [0, 0, 0], job_id: ['a', 'a', 'a'] };
+    const whole = trails([frame(columns)]);
+    const split = [0, 1, 2].map((i) =>
+      frame(Object.fromEntries(Object.entries(columns).map(([name, values]) => [name, [values[i]]])))
+    );
+    expect(xs(trails(split))).toEqual(xs(whole));
+    expect(xs(whole)).toEqual([['a', [[0, 1, 2]]]]);
+  });
+
+  test('a row without a position in another frame still breaks the line', () => {
+    const result = trails([
+      frame({ time: at(0, 2 * SEC), x: [0, 2], y: [0, 0], job_id: ['a', 'a'] }),
+      frame({ time: at(SEC), x: [null], y: [null], job_id: ['a'] }),
+    ]);
+    expect(xs(result)).toEqual([['a', [[0], [2]]]]);
   });
 
   test('a silence longer than 15 minutes is a gap, not a straight line', () => {

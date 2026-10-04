@@ -37,10 +37,11 @@ export interface TrailPoint {
 
 /**
  * One Job's positions in time order, as the unbroken runs between gaps in the data. `job` is absent
- * when the data has no Job column, or for positions recorded outside any Job.
+ * when the data has no Job column, or for positions recorded outside any Job, which are `outsideJob`.
  */
 export interface Trail {
   job?: string;
+  outsideJob?: boolean;
   segments: TrailPoint[][];
 }
 
@@ -109,59 +110,56 @@ export function readTrails(
     };
   }
 
-  const trails = new Map<string, Trail>();
-  usable.forEach((frame, index) => {
+  // Every timed row of every frame. Rows without a position stay in: they mark where a line must break.
+  const rows = usable.flatMap((frame, index) => {
     const [time, x, y, heading, job, zone, status, mower] = (
       ['time', 'x', 'y', 'heading', 'job', 'zone', 'status', 'mower'] as const
     ).map((c) => values(frame, c));
-
-    // Every timed row in time order, since the mower delivers some positions seconds or hours late.
-    // Rows without a position stay in: they mark where the line must break.
-    const rows = [];
-    for (let row = 0; row < frame.length; row++) {
-      const t = toTime(time![row]);
-      if (!Number.isFinite(t)) {
-        continue;
-      }
-      const [mowerId, jobId] = [toText(mower?.[row]), toText(job?.[row])];
+    return Array.from({ length: frame.length }, (_, row) => {
+      const [mowerId = '', jobId] = [toText(mower?.[row]), toText(job?.[row])];
       const point: TrailPoint = {
-        time: t,
+        time: toTime(time![row]),
         x: toNumber(x![row]),
         y: toNumber(y![row]),
         heading: optionalNumber(heading?.[row]),
         zone: toText(zone?.[row]),
         status: toText(status?.[row]),
-        mower: mowerId,
+        mower: toText(mower?.[row]),
       };
-      rows.push({
-        time: t,
+      return {
+        time: point.time,
         point: Number.isFinite(point.x) && Number.isFinite(point.y) ? point : undefined,
-        mower: mowerId ?? '',
         jobId,
-        // One Trail per Job of each mower; without a Job column, a frame is the only grouping on offer.
-        key: job ? `job:${mowerId ?? ''}:${jobId ?? ''}` : `frame:${index}:${mowerId ?? ''}`,
-      });
-    }
-    rows.sort((a, b) => a.time - b.time);
-
-    // A line only continues from the same mower's previous row when that row is this Trail's own
-    // position and not long ago, so a gap in the data is drawn as a gap.
-    const previous = new Map<string, (typeof rows)[number]>();
-    for (const row of rows) {
-      const before = previous.get(row.mower);
-      previous.set(row.mower, row);
-      if (!row.point) {
-        continue;
-      }
-      const trail = trails.get(row.key) ?? { job: row.jobId, segments: [] };
-      trails.set(row.key, trail);
-      if (before?.key === row.key && before.point && row.time - before.time <= GAP_MS) {
-        trail.segments.at(-1)!.push(row.point);
-      } else {
-        trail.segments.push([row.point]);
-      }
-    }
+        outsideJob: job !== undefined && jobId === undefined,
+        // A Job column says which Trail a row belongs to, whichever frame it came in: Grafana splits
+        // one series into frames by any text column, such as status or Zone. Without one, a frame is
+        // the only grouping on offer, and its rows are a mower's history of their own.
+        key: job ? `job:${mowerId}:${jobId ?? ''}` : `frame:${index}:${mowerId}`,
+        history: job ? `job:${mowerId}` : `frame:${index}:${mowerId}`,
+      };
+    }).filter((r) => Number.isFinite(r.time));
   });
+  // The mower delivers some positions seconds or hours late, so arrival order is not time order.
+  rows.sort((a, b) => a.time - b.time);
+
+  // A line only continues from the previous row of the same mower's history when that row is this
+  // Trail's own position and not long ago, so a gap in the data is drawn as a gap.
+  const trails = new Map<string, Trail>();
+  const previous = new Map<string, (typeof rows)[number]>();
+  for (const row of rows) {
+    const before = previous.get(row.history);
+    previous.set(row.history, row);
+    if (!row.point) {
+      continue;
+    }
+    const trail = trails.get(row.key) ?? { job: row.jobId, outsideJob: row.outsideJob || undefined, segments: [] };
+    trails.set(row.key, trail);
+    if (before?.key === row.key && before.point && row.time - before.time <= GAP_MS) {
+      trail.segments.at(-1)!.push(row.point);
+    } else {
+      trail.segments.push([row.point]);
+    }
+  }
 
   return { trails: [...trails.values()].sort((a, b) => a.segments[0][0].time - b.segments[0][0].time) };
 }

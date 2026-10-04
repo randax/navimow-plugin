@@ -115,6 +115,7 @@ const MapCanvas: React.FC<Props> = ({ baseMap, trail, mower, width, height }) =>
   const map = useRef<Map | null>(null);
   const lines = useRef(trail.lines);
   const fittedFor = useRef<string>(undefined);
+  const fittedWide = useRef(false);
   const countPending = useRef(true);
 
   // New data replaces the Trail's source data only. The source exists once the style has loaded;
@@ -162,11 +163,18 @@ const MapCanvas: React.FC<Props> = ({ baseMap, trail, mower, width, height }) =>
 
   // Frame the Trail when it first appears and when the dock moves, but never on a refresh, which must
   // not undo the owner's panning, nor on a rotation, which turns the Trail about the dock while the
-  // owner compares it with the lawn.
+  // owner compares it with the lawn. A single docked position frames nothing but the dock at full
+  // zoom, so the first Trail with any extent is framed once more.
   const origin = trail.origin && `${trail.origin.lat},${trail.origin.lon}`;
   useEffect(() => {
-    if (map.current && trail.bounds && origin !== fittedFor.current) {
+    if (!map.current || !trail.bounds) {
+      return;
+    }
+    const [[west, south], [east, north]] = trail.bounds;
+    const wide = west !== east || south !== north;
+    if (origin !== fittedFor.current || (wide && !fittedWide.current)) {
       fittedFor.current = origin;
+      fittedWide.current = wide;
       // Padding is capped so a small panel still has room left to fit into.
       map.current.fitBounds(trail.bounds, { padding: Math.min(40, width / 4, height / 4), maxZoom: 20, duration: 0 });
     }
@@ -207,6 +215,7 @@ const MapCanvas: React.FC<Props> = ({ baseMap, trail, mower, width, height }) =>
       map.current = null;
       // A remount (React's strict mode does one) gets a fresh map, which must be framed and counted again.
       fittedFor.current = undefined;
+      fittedWide.current = false;
       countPending.current = true;
     },
     []
