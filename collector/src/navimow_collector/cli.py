@@ -113,7 +113,7 @@ def _login(
         )
         return 0
     if args.code:
-        code, redirect_uri = _pasted_code(args.code), MANUAL_REDIRECT_URI
+        code, redirect_uri = _pasted_login(args.code)
     else:
         code, redirect_uri = _browser_code(client_id, args.timeout)
 
@@ -139,14 +139,20 @@ def _browser_code(client_id: str, timeout: float) -> tuple[str, str]:
             ) from error
 
 
-def _pasted_code(value: str) -> str:
+def _pasted_login(value: str) -> tuple[str, str]:
     """Accept a copied code or the redirect URL from a failed browser load, with or without
-    its scheme (some address bars copy `localhost:1/callback?code=...`)."""
+    its scheme (some address bars copy `localhost:1/callback?code=...`).
+
+    The code is bound to the redirect it was issued for, so a full URL (such as the loopback
+    listener's, pasted after the browser flow timed out) is exchanged with its own redirect.
+    """
     value = value.strip()
-    code = value
+    code, redirect_uri = value, MANUAL_REDIRECT_URI
     if "code=" in value:
-        query = urlparse(value).query or value.partition("?")[2] or value
-        code = parse_qs(query).get("code", [""])[0]
+        url = urlparse(value)
+        code = parse_qs(url.query or value.partition("?")[2] or value).get("code", [""])[0]
+        if url.scheme in ("http", "https") and url.netloc:
+            redirect_uri = f"{url.scheme}://{url.netloc}{url.path}"
     if not code:
         raise ValueError("login code is missing")
-    return code
+    return code, redirect_uri

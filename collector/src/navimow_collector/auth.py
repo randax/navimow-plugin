@@ -271,7 +271,12 @@ class TokenManager:
         return await self._on_rejection(rejected_token)
 
     async def on_mqtt_error(self, error: str, rejected_token: str) -> str | None:
-        """Refresh when MQTT says the OAuth data behind `rejected_token` is no longer valid."""
+        """Refresh when MQTT says the OAuth data behind `rejected_token` is no longer valid.
+
+        Pass the access token the MQTT credentials were fetched with, not the current one:
+        credentials outlive a proactive refresh, and blaming the new token for the old
+        credentials would trigger a needless recovery refresh.
+        """
         if MQTT_OAUTH_ERROR in error:
             return await self._on_rejection(rejected_token)
         return await self.access_token()

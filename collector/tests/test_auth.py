@@ -632,3 +632,18 @@ def test_first_use_rejections_climb_the_ladder_whatever_the_caller_cadence(
 
     assert tokens.state is AuthState.RETRY_PENDING
     assert len(session.forms) == 1
+
+
+def test_a_pasted_loopback_redirect_is_exchanged_with_its_own_redirect_uri(tmp_path: Path) -> None:
+    config = tmp_path / "collector.toml"
+    config.write_text(f'[auth]\nstate_file = "{tmp_path / "tokens.json"}"\n')
+    session = FakeSession([Response(200, token())])
+    pasted = "http://localhost:54321/callback?code=abc&state=x"  # after the browser flow timed out
+
+    assert (
+        main(["--config", str(config), "login", "--code", pasted], session_factory=lambda: session)
+        == 0
+    )
+
+    assert session.forms[0] is not None
+    assert session.forms[0]["redirect_uri"] == "http://localhost:54321/callback"
