@@ -824,27 +824,57 @@ def test_an_sdk_callback_still_queued_at_shutdown_is_ignored(live: Live) -> None
     assert live.vendor.count("smarthome/getVehicleStatus") == 0
 
 
+def stopped_at_its_first_request(live: Live) -> Callable[[], Vendor]:
+    """A session for the `collect` command: the service manager stops the collector as soon
+    as it asks the vendor anything, so the command returns and no real broker is dialled."""
+    live.vendor.offline = True
+
+    class Terminating(Vendor):
+        def request(self, method: str, url: str, **kwargs: Any) -> Request:
+            os.kill(os.getpid(), signal.SIGTERM)
+            return live.vendor.request(method, url, **kwargs)
+
+    return Terminating
+
+
 def test_the_collect_command_collects_until_it_is_signalled(
     live: Live, config_file: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("NAVIMOW_AUTH_STATE_FILE", str(live.store.path))
     monkeypatch.setenv("NAVIMOW_COLLECTOR_STATE_DIR", str(live.state))
-    live.vendor.offline = True  # so no real broker is ever dialled
+    session = stopped_at_its_first_request(live)
 
-    class Terminating(Vendor):
-        def request(self, method: str, url: str, **kwargs: Any) -> Request:
-            os.kill(os.getpid(), signal.SIGTERM)  # the service manager stops the collector
-            return live.vendor.request(method, url, **kwargs)
-
-    assert main(["--config", str(config_file), "collect"], session_factory=Terminating) == 0
+    assert main(["--config", str(config_file), "collect"], session_factory=session) == 0
     assert "smarthome/authList" in live.vendor.calls  # it got as far as looking for mowers
+
+
+def test_the_collect_command_refuses_to_start_without_a_writable_state_directory(
+    live: Live,
+    config_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Unable to note when the stream last flowed, a later restart would record a gap
+    # across Trail that was in fact collected.
+    occupied = live.state.parent / "occupied"
+    occupied.write_text("a file where the state directory should go")
+    monkeypatch.setenv("NAVIMOW_AUTH_STATE_FILE", str(live.store.path))
+    monkeypatch.setenv("NAVIMOW_COLLECTOR_STATE_DIR", str(occupied / "state"))
+    session = stopped_at_its_first_request(live)
+
+    assert main(["--config", str(config_file), "collect"], session_factory=session) == 2
+    assert "collector.state_dir" in capsys.readouterr().err
+    assert live.vendor.calls == []
 
 
 def test_the_collect_command_refuses_to_start_without_its_database(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     config = tmp_path / "collector.toml"
-    config.write_text('[storage]\ndsn = "postgresql://nobody@127.0.0.1:1/none"\n')
+    config.write_text(
+        '[storage]\ndsn = "postgresql://nobody@127.0.0.1:1/none"\n'
+        f'[collector]\nstate_dir = "{tmp_path / "state"}"\n'
+    )
 
     assert main(["--config", str(config), "collect"]) == 2
     assert "postgres" in capsys.readouterr().err

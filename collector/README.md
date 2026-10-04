@@ -141,7 +141,11 @@ state_dir = "/var/lib/navimow-collector"
 ```
 
 `collector.state_dir` holds that buffer and the connection note; it defaults to
-`~/.local/state/navimow-collector`.
+`~/.local/state/navimow-collector`. The collector does not start if it cannot
+write there. Should the directory stop being writable while it collects,
+collection goes on and the failure is logged every minute, but the connection
+note stays at its last value: the gap recorded at the next restart then starts
+too early and lies across Trail that was in fact collected.
 
 Run the tests with a local PostgreSQL installation (the suite starts `pg_ctl`
 automatically) or point it at an existing server:

@@ -9,6 +9,7 @@ import secrets
 import shlex
 import signal
 import sys
+import tempfile
 import webbrowser
 from collections.abc import Callable
 from dataclasses import fields
@@ -108,9 +109,17 @@ def _replay(config: Config, capture: Path) -> int:
 
 
 def _collect(config: Config, session_factory: Callable[[], HTTPSession]) -> int:
-    """Collect live until SIGINT or SIGTERM; only a database missing at startup is fatal."""
+    """Collect live until SIGINT or SIGTERM; only what is missing at startup is fatal."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     state_dir = Path(config.collector.state_dir).expanduser()
+    # Unable to note there when the stream last flowed, a later restart would record a gap
+    # across Trail that was in fact collected.
+    try:
+        state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with tempfile.TemporaryFile(dir=state_dir):
+            pass
+    except OSError as error:
+        raise ConfigError(f"collector.state_dir {state_dir} cannot be written: {error}") from error
     storage = BufferedStorage(lambda: open_storage(config.storage), state_dir / "buffer.jsonl")
     storage.connect()
     try:
