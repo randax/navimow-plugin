@@ -24,7 +24,8 @@ class Writer(Protocol):
         ...
 
     def write_gaps(self, gaps: Sequence[Gap]) -> int:
-        """Store gaps, skipping any already stored; return how many were new."""
+        """Store gaps; one already stored is extended if this one ends later, and skipped
+        otherwise. Return how many were new or extended."""
         ...
 
 

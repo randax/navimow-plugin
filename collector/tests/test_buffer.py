@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import socket
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -34,12 +34,13 @@ class Database:
         self.dsn = dsn
         self.down = False
         self.attempts = 0
+        self.crash: BaseException | None = None  # raised by the next write, as a dying process
 
     def open(self) -> Storage:
         self.attempts += 1
         if self.down:
             raise StorageError("postgres: connection refused")
-        return open_storage(StorageConfig(dsn=Secret(self.dsn)))
+        return Observed(open_storage(StorageConfig(dsn=Secret(self.dsn))), self)
 
     def go_down(self) -> None:
         """Refuse new connections and kill the open one, as a restarting server does."""
@@ -61,6 +62,39 @@ class Database:
             return conn.execute(
                 "SELECT mower_id, start_time, end_time, reason FROM collector_gap"
             ).fetchall()
+
+
+class Observed:
+    """The real storage, through which a test can interrupt a write."""
+
+    def __init__(self, storage: Storage, db: Database) -> None:
+        self._storage = storage
+        self._db = db
+
+    def __enter__(self) -> Observed:
+        return self
+
+    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
+        self.close()
+
+    def migrate(self) -> None:
+        self._storage.migrate()
+
+    def check_schema(self) -> None:
+        self._storage.check_schema()
+
+    def write_trail(self, points: Sequence[TrailPoint]) -> int:
+        if self._db.crash:
+            raise self._db.crash
+        return self._storage.write_trail(points)
+
+    def write_gaps(self, gaps: Sequence[Gap]) -> int:
+        if self._db.crash:
+            raise self._db.crash
+        return self._storage.write_gaps(gaps)
+
+    def close(self) -> None:
+        self._storage.close()
 
 
 def points(*seconds: int) -> list[TrailPoint]:
@@ -212,6 +246,21 @@ def test_shutting_down_during_an_outage_keeps_what_memory_held(
     restarted.flush()
 
     assert db.trail() == [1, 2]
+    assert db.gaps() == [(gap.mower_id, gap.start_time, gap.end_time, gap.reason)]
+
+
+def test_a_gap_held_during_an_outage_is_on_disk_at_once(database: str, tmp_path: Path) -> None:
+    # The collector forgets when a gap started as soon as it has handed the gap over.
+    db, clock = Database(database), Clock()
+    storage = buffered(db, tmp_path, clock)
+    gap = Gap("DEVICE_1", START, START + timedelta(minutes=4), "reconnect")
+    db.go_down()
+    storage.write_gaps([gap])
+    del storage  # the process dies with the database still away
+
+    db.down = False
+    buffered(db, tmp_path, clock).flush()
+
     assert db.gaps() == [(gap.mower_id, gap.start_time, gap.end_time, gap.reason)]
 
 

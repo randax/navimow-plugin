@@ -125,6 +125,25 @@ def test_migration_can_be_disabled(
         assert conn.execute("SELECT to_regclass('trail_point')").fetchone() == (None,)
 
 
+def test_a_gap_recorded_again_with_a_later_end_is_extended(
+    config_file: Path, database: str, tmp_path: Path
+) -> None:
+    # A collector that died before noting its reconnection records the same gap again,
+    # longer, when it restarts.
+    first = {"recv_ms": 1788084400000, "start_ms": 1788084160000, "reason": "reconnect"}
+    again = {"recv_ms": 1788084900000, "start_ms": 1788084160000, "reason": "restart"}
+    for name, gap in (("first.jsonl", first), ("again.jsonl", again), ("stale.jsonl", first)):
+        capture = tmp_path / name
+        capture.write_text(json.dumps({"kind": "gap", "mower_id": "DEVICE_1", **gap}) + "\n")
+        assert main(["--config", str(config_file), "replay", str(capture)]) == 0
+
+    with psycopg.connect(database) as conn:
+        rows = conn.execute(
+            "SELECT mower_id, start_time, end_time, reason FROM collector_gap"
+        ).fetchall()
+    assert rows == [("DEVICE_1", ms(1788084160000), ms(1788084900000), "restart")]
+
+
 def test_a_state_the_schema_cannot_hold_is_stored_as_unknown(
     config_file: Path, database: str, tmp_path: Path
 ) -> None:

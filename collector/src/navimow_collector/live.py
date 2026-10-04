@@ -149,8 +149,9 @@ class Collector:
 
     def stop(self) -> None:
         """Disconnect; the next start records the time from here as a gap."""
-        if self._broker is not None:
-            self._broker.disconnect()
+        broker, self._broker = self._broker, None
+        if broker is not None:
+            broker.disconnect()
         if self.connected:
             self.connected = False
             self._mark(self._clock())
@@ -177,6 +178,7 @@ class Collector:
         try:
             if not self._mowers:
                 self._mowers = await self._discover(token)
+                self._fetched_at = self._clock()  # the wait is owed to the credential endpoint
             credentials = await self._fetch_credentials(token)
         except RestError as error:
             _LOGGER.warning("Could not fetch broker credentials; will retry: %s", error)
@@ -202,13 +204,25 @@ class Collector:
             )
             return
         _LOGGER.info("Connecting to the broker for mowers %s", ", ".join(self._mowers))
-        self._broker = self._connect(credentials, self._mowers)
+        broker = self._broker = self._connect(credentials, self._mowers)
         self._address = address
-        self._broker.on_connected = self._on_connected
-        self._broker.on_disconnected = self._on_disconnected
-        self._broker.on_raw = self._on_raw
-        self._broker.connect_async()
+        broker.on_connected = self._while_current(broker, self._on_connected)
+        broker.on_disconnected = self._while_current(broker, self._on_disconnected)
+        broker.on_raw = self._while_current(broker, self._on_raw)
+        broker.connect_async()
         self._down_since = self._down_since or now
+
+    def _while_current(
+        self, broker: Broker, handler: Callable[..., Awaitable[None]]
+    ) -> Callable[..., Awaitable[None]]:
+        """A callback the SDK had already queued when its connection was retired or the
+        collector stopped must not act: it would speak for a connection that is not its own."""
+
+        async def guarded(*args: Any) -> None:
+            if broker is self._broker:
+                await handler(*args)
+
+        return guarded
 
     async def _rejected(self, error: RestError, token: str) -> None:
         """Let the token manager judge a refusal; an access token found dead is refreshed."""
@@ -224,7 +238,6 @@ class Collector:
         self.connected = True
         self._down_since = None
         self._fetches = 0
-        self._mark(now)
         _LOGGER.info("Broker connected")
         if gap_start is not None:
             # Written even when no time is seen to pass: a stalled loop runs the drop and
@@ -239,6 +252,9 @@ class Collector:
                         "reason": self._gap_reason,
                     }
                 )
+        # Only now may the start of that gap be forgotten: a crash before this line finds
+        # it still on disk, and records the same gap again, extended.
+        self._mark(now)
         await self._poll_status()
 
     async def _on_disconnected(self) -> None:

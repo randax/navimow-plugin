@@ -113,7 +113,9 @@ class BufferedStorage:
             except StorageError as error:
                 self._outage(error)
         self._memory.extend(rows)
-        if len(self._memory) > self._memory_rows:
+        # A gap goes to disk at once: its writer forgets when it started as soon as it has
+        # handed it over, so it must not be lost with this process.
+        if len(self._memory) > self._memory_rows or any(isinstance(row, Gap) for row in rows):
             self._spill_memory()
         return 0
 
@@ -142,6 +144,8 @@ class BufferedStorage:
                 if os.fstat(spill.fileno()).st_size >= self._disk_bytes:
                     raise OSError("it has reached its size limit")
                 spill.writelines(_encode(row) + "\n" for row in self._memory)
+                spill.flush()
+                os.fsync(spill.fileno())
             self._spilled += len(self._memory)
         except OSError as error:
             if not self._dropping:

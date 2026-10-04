@@ -55,6 +55,9 @@ class Vendor:
         self.broker_host = "mqtt.example"
         self.broker_password: str | None = None  # by default, derived from the token
         self.offline = False
+        self.clock: Clock | None = None
+        self.takes: dict[str, float] = {}  # seconds an endpoint takes to answer
+        self.asked_at: dict[str, list[float]] = {}
         self.calls: list[str] = []
         self.failing: dict[str, Response] = {}
 
@@ -71,6 +74,9 @@ class Vendor:
         host, _, endpoint = url.partition("/openapi/")
         assert host == "https://navimow-fra.ninebot.com"
         self.calls.append(endpoint)
+        if self.clock:
+            self.asked_at.setdefault(endpoint, []).append(self.clock.now)
+            self.clock.now += self.takes.get(endpoint, 0)
         if self.offline:
             raise HTTPClientError("<urlopen error [Errno 8] nodename nor servname provided>")
         if endpoint in self.failing:
@@ -154,6 +160,7 @@ class Live:
     def __init__(self, database: str, tmp_path: Path, *mowers: str) -> None:
         self.clock = Clock(NOW)
         self.vendor = Vendor(*mowers)
+        self.vendor.clock = self.clock
         self.db = Database(database)
         self.state = tmp_path / "state"
         self.store = logged_in(self.state, at=NOW)
@@ -317,6 +324,28 @@ def test_a_reconnection_is_recorded_even_when_no_time_is_seen_to_pass(live: Live
     asyncio.run(scenario())
 
     assert gaps(live) == [("DEVICE_1", at(NOW + 100), at(NOW + 100), "reconnect")]
+
+
+def test_a_crash_while_recording_a_gap_does_not_lose_the_outage(live: Live) -> None:
+    class PowerCut(BaseException):
+        pass
+
+    async def scenario() -> None:
+        await live.connected()
+        live.clock.now = NOW + 100
+        await live.broker.drop()
+        live.clock.now = NOW + 340
+        live.db.crash = PowerCut()
+        with pytest.raises(PowerCut):
+            await live.broker.accept()
+
+        live.db.crash = None
+        live.clock.now = NOW + 3600
+        await live.connected()
+
+    asyncio.run(scenario())
+
+    assert gaps(live) == [("DEVICE_1", at(NOW + 100), at(NOW + 3600), "restart")]
 
 
 def test_a_restart_writes_a_gap_from_when_the_stream_last_flowed(live: Live) -> None:
@@ -550,6 +579,68 @@ def test_a_working_connection_is_kept_when_the_broker_moves_and_followed_once_it
     assert gaps(live) == [("DEVICE_1", at(NOW + 3400), at(NOW + 3460), "reconnect")]
 
 
+def test_a_retired_broker_connection_cannot_speak_for_its_replacement(live: Live) -> None:
+    async def scenario() -> Collector:
+        collector = await live.connected()
+        live.clock.now = NOW + 100
+        await live.broker.drop()
+        retired = live.broker
+        live.vendor.broker_host = "mqtt-2.example"
+        live.clock.now = NOW + 160
+        await collector.tick()
+        assert live.broker is not retired and retired.on_connected and retired.on_raw
+
+        # Callbacks the SDK had queued before the connection was retired still run.
+        await retired.on_connected()
+        await retired.on_raw(LOCATION.format("DEVICE_1"), json.dumps(pose(at(NOW))).encode())
+        return collector
+
+    collector = asyncio.run(scenario())
+
+    assert not collector.connected
+    assert live.vendor.count("smarthome/getVehicleStatus") == 1
+    assert live.trail() == [] and gaps(live) == []
+
+
+def test_nothing_is_recorded_once_the_collector_has_stopped(live: Live) -> None:
+    async def scenario() -> None:
+        collector = await live.connected()
+        live.clock.now = NOW + 45
+        collector.stop()
+        live.clock.now = NOW + 50
+        assert live.broker.on_connected and live.broker.on_raw
+        await live.broker.on_raw(LOCATION.format("DEVICE_1"), json.dumps(pose(at(NOW))).encode())
+        await live.broker.on_connected()
+        assert not collector.connected
+
+        live.clock.now = NOW + 3600
+        await live.connected()
+
+    asyncio.run(scenario())
+
+    assert live.trail() == []
+    assert gaps(live) == [("DEVICE_1", at(NOW + 45), at(NOW + 3600), "restart")]
+
+
+def test_a_slow_mower_discovery_does_not_shorten_the_wait_between_credential_fetches(
+    live: Live,
+) -> None:
+    live.vendor.takes["smarthome/authList"] = 25
+    live.vendor.failing[CREDENTIALS] = Response(200, json.dumps({"code": 0, "desc": TOO_FREQUENT}))
+
+    async def scenario() -> None:
+        collector = live.start()
+        for _ in range(12):
+            await collector.tick()
+            live.clock.now += 10
+
+    asyncio.run(scenario())
+
+    first, second = live.vendor.asked_at[CREDENTIALS][:2]
+    assert first == NOW + 25
+    assert second - first >= 60
+
+
 def test_an_access_token_the_vendor_rejects_is_refreshed_and_collection_starts(live: Live) -> None:
     live.vendor.token = "replaced-elsewhere"  # the stored access token now earns a 401
 
@@ -650,9 +741,8 @@ def test_the_broker_connection_keeps_alive_well_inside_the_idle_drop() -> None:
     assert mqtt.auth_headers == {"Authorization": "Bearer access"}
 
 
-def test_the_sdk_connection_drives_the_collector_as_the_fake_broker_does(live: Live) -> None:
-    """The SDK's own client, never dialled: paho's callbacks are invoked as paho would."""
-    sdk: list[Any] = []
+def undialled(sdk: list[Any]) -> Callable[[BrokerCredentials, Sequence[str]], Broker]:
+    """The SDK's own client, never dialled: a test invokes paho's callbacks as paho would."""
 
     def connect(credentials: BrokerCredentials, mowers: Sequence[str]) -> Broker:
         mqtt: Any = connect_broker(credentials, mowers)
@@ -662,12 +752,19 @@ def test_the_sdk_connection_drives_the_collector_as_the_fake_broker_does(live: L
         broker: Broker = mqtt
         return broker
 
-    async def settled() -> None:
-        for _ in range(20):  # the SDK hands each callback to the loop as its own task
-            await asyncio.sleep(0)
+    return connect
+
+
+async def settled() -> None:
+    for _ in range(20):  # the SDK hands each callback to the loop as its own task
+        await asyncio.sleep(0)
+
+
+def test_the_sdk_connection_drives_the_collector_as_the_fake_broker_does(live: Live) -> None:
+    sdk: list[Any] = []
 
     async def scenario() -> None:
-        collector = live.start(connect)
+        collector = live.start(undialled(sdk))
         await collector.tick()
         paho = sdk[0].client
 
@@ -690,6 +787,24 @@ def test_the_sdk_connection_drives_the_collector_as_the_fake_broker_does(live: L
     asyncio.run(scenario())
 
     assert [(row[0], row[1]) for row in live.trail()] == [("DEVICE_1", at(NOW))]
+
+
+def test_an_sdk_callback_still_queued_at_shutdown_is_ignored(live: Live) -> None:
+    sdk: list[Any] = []
+
+    async def scenario() -> Collector:
+        collector = live.start(undialled(sdk))
+        await collector.tick()
+        paho = sdk[0].client
+        paho.on_connect(paho, None, {}, 0, None)  # queued for the loop, which has not run it
+        collector.stop()
+        await settled()
+        return collector
+
+    collector = asyncio.run(scenario())
+
+    assert not collector.connected
+    assert live.vendor.count("smarthome/getVehicleStatus") == 0
 
 
 def test_the_collect_command_collects_until_it_is_signalled(

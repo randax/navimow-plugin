@@ -51,7 +51,7 @@ MIGRATIONS = (
         PRIMARY KEY (mower_id, device_time)
     )
     """,
-    # One row per mower and outage: a gap starts once, so a redelivered gap is skipped.
+    # One row per mower and outage: a gap starts once, so one recorded again is the same gap.
     """
     CREATE TABLE IF NOT EXISTS collector_gap (
         mower_id text NOT NULL,
@@ -141,7 +141,9 @@ class PostgresStorage:
                 """
                 INSERT INTO collector_gap (mower_id, start_time, end_time, reason)
                 VALUES (%s, %s, %s, %s)
-                ON CONFLICT DO NOTHING
+                ON CONFLICT (mower_id, start_time) DO UPDATE
+                    SET end_time = EXCLUDED.end_time, reason = EXCLUDED.reason
+                    WHERE collector_gap.end_time < EXCLUDED.end_time
                 """,
                 [(gap.mower_id, gap.start_time, gap.end_time, gap.reason) for gap in gaps],
             )

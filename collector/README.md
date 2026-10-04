@@ -104,7 +104,12 @@ record, so a capture that contains it replays to the same row:
 After that, rows it cannot take are held in memory (1,000 rows), then appended
 to `buffer.jsonl` in the state directory (up to 64 MiB; beyond that, or if the
 file cannot be written, the newest rows are dropped and an error is logged),
-and written when the database returns, by this process or the next.
+and written when the database returns, by this process or the next. A clean
+stop moves what is in memory to that file; a crash while the database is away
+loses the Trail points still in memory, at most 1,000. Gap rows go to the file
+at once, and the note of when a gap started is kept until its row has been
+handed over, so a crash at any point records the gap again rather than losing
+it. Only a buffer file that cannot be written can cost a gap.
 
 A slow database counts as an outage too. The collector gives a connection
 attempt 5 seconds and a statement 5 seconds (a lock held by maintenance
