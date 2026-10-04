@@ -24,7 +24,7 @@ interface Preset {
   source: RasterSourceSpecification;
 }
 
-const KARTVERKET_ATTRIBUTION = '<a href="https://www.kartverket.no/">© Kartverket</a>';
+export const KARTVERKET_ATTRIBUTION = '<a href="https://www.kartverket.no/">© Kartverket</a>';
 
 // Kartverket's WMTS orders the path row before column: {z}/{y}/{x}.
 const kartverket = (layer: string): RasterSourceSpecification => ({
@@ -68,23 +68,23 @@ export const MAX_ZOOM = { min: 0, max: 24 };
 const inRange = (value: number, { min, max }: { min: number; max: number }): boolean =>
   Number.isInteger(value) && value >= min && value <= max;
 
-// Saved panels can outlive a preset, or predate these options entirely.
-export function resolveBaseMap({ preset, custom }: BaseMapOptions = { preset: 'kartverket-topo' }): ResolvedBaseMap {
-  if (preset !== 'custom') {
-    const known = Object.hasOwn(BASE_MAP_PRESETS, preset) ? BASE_MAP_PRESETS[preset] : undefined;
-    return known
-      ? { source: known.source }
-      : { problem: `Unknown Base map "${preset}". Choose another under Base map in the panel options.` };
-  }
-  const { url = '', tileSize = 256, maxzoom = 18, attribution = '' } = custom ?? {};
+/** What every custom slot comes to, whichever kind of source it then becomes. */
+export type CustomTiles = Required<Pick<RasterSourceSpecification, 'tiles' | 'tileSize' | 'maxzoom' | 'attribution'>>;
+
+/** Checks a custom slot. `slot` names it in the problem shown; `defaults` stand in for numbers left blank. */
+export function customTiles(
+  slot: string,
+  custom: CustomSourceOptions | undefined,
+  defaults: { tileSize: number; maxzoom: number }
+): CustomTiles | { problem: string } {
+  const { url = '', tileSize = defaults.tileSize, maxzoom = defaults.maxzoom, attribution = '' } = custom ?? {};
   if (!isTileTemplate(url.trim())) {
     return {
-      problem:
-        'A custom Base map needs an http(s) URL containing either {z}, {x} and {y}, or {bbox-epsg-3857} for a WMS service.',
+      problem: `A custom ${slot} needs an http(s) URL containing either {z}, {x} and {y}, or {bbox-epsg-3857} for a WMS service.`,
     };
   }
   if (!attribution.trim()) {
-    return { problem: 'A custom Base map needs an attribution. Enter the credit line its provider requires.' };
+    return { problem: `A custom ${slot} needs an attribution. Enter the credit line its provider requires.` };
   }
   // The editor clamps these, but panel JSON does not; a tile size of 0 would request every tile at max zoom.
   if (!inRange(tileSize, TILE_SIZE)) {
@@ -93,7 +93,17 @@ export function resolveBaseMap({ preset, custom }: BaseMapOptions = { preset: 'k
   if (!inRange(maxzoom, MAX_ZOOM)) {
     return { problem: `Max zoom must be a whole number from ${MAX_ZOOM.min} to ${MAX_ZOOM.max}.` };
   }
-  return {
-    source: { type: 'raster', tiles: [url.trim()], tileSize, maxzoom, attribution: escapeHtml(attribution.trim()) },
-  };
+  return { tiles: [url.trim()], tileSize, maxzoom, attribution: escapeHtml(attribution.trim()) };
+}
+
+// Saved panels can outlive a preset, or predate these options entirely.
+export function resolveBaseMap({ preset, custom }: BaseMapOptions = { preset: 'kartverket-topo' }): ResolvedBaseMap {
+  if (preset !== 'custom') {
+    const known = Object.hasOwn(BASE_MAP_PRESETS, preset) ? BASE_MAP_PRESETS[preset] : undefined;
+    return known
+      ? { source: known.source }
+      : { problem: `Unknown Base map "${preset}". Choose another under Base map in the panel options.` };
+  }
+  const tiles = customTiles('Base map', custom, { tileSize: 256, maxzoom: 18 });
+  return 'problem' in tiles ? tiles : { source: { type: 'raster', ...tiles } };
 }
