@@ -92,11 +92,19 @@ restart's gap starts when the previous process last noted a live connection,
 which it does once a minute and when it shuts down. Each new connection also
 asks Navimow once for every mower's current status.
 
+Live messages reach the ingestion core as records in the capture format of
+`tools/capture.py`, exactly as replay feeds them. A gap is one more kind of
+record, so a capture that contains it replays to the same row:
+
+```json
+{"recv_ms": 1788084400000, "kind": "gap", "mower_id": "DEVICE_1", "start_ms": 1788084160000, "reason": "reconnect"}
+```
+
 **Database outages.** The database must be reachable when the collector starts.
 After that, rows it cannot take are held in memory (1,000 rows), then appended
-to `buffer.jsonl` in the state directory (up to 64 MiB, beyond which the newest
-rows are dropped), and written when the database returns, in this run or the
-next. Put a `connect_timeout` in the DSN: without one, a database host that has
+to `buffer.jsonl` in the state directory (up to 64 MiB; beyond that, or if the
+file cannot be written, the newest rows are dropped and an error is logged),
+and written when the database returns, in this run or the next. Put a `connect_timeout` in the DSN: without one, a database host that has
 vanished from the network can stall the collector on every retry.
 
 ```toml

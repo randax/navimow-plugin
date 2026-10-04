@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import asdict
 from datetime import datetime
@@ -86,8 +87,9 @@ class BufferedStorage:
         except StorageError as error:
             self._outage(error)
             return
-        self._spill.unlink(missing_ok=True)
-        self._spilled = 0
+        if self._spilled:
+            self._spill.unlink(missing_ok=True)
+            self._spilled = 0
         self._memory.clear()
         _LOGGER.info("Database reachable again; wrote %d buffered rows", waiting)
 
@@ -130,22 +132,23 @@ class BufferedStorage:
         self._retry_at = self._clock() + RETRY_SECONDS
 
     def _spill_memory(self) -> None:
-        """Move memory to disk, or drop it once the disk holds its limit: newest rows lose."""
+        """Move memory to disk. Once the disk holds its limit, or fails, the rows are dropped
+        instead: memory stays bounded whatever happens, and it is the newest rows that lose."""
         try:
-            full = self._spill.stat().st_size >= self._disk_bytes
-        except FileNotFoundError:
-            full = False
-        if full:
-            if not self.dropped:
-                _LOGGER.error(
-                    "Buffer %s is full; dropping rows until the database returns", self._spill
-                )
-            self.dropped += len(self._memory)
-        else:
             self._spill.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             with self._spill.open("a", encoding="utf-8") as spill:
+                if os.fstat(spill.fileno()).st_size >= self._disk_bytes:
+                    raise OSError("it has reached its size limit")
                 spill.writelines(_encode(row) + "\n" for row in self._memory)
             self._spilled += len(self._memory)
+        except OSError as error:
+            if not self.dropped:  # said once, not once per batch
+                _LOGGER.error(
+                    "Cannot buffer to %s; dropping rows until the database returns: %s",
+                    self._spill,
+                    error,
+                )
+            self.dropped += len(self._memory)
         self._memory.clear()
 
     def _spilled_batches(self) -> Iterator[list[Row]]:
@@ -161,7 +164,7 @@ def _count_lines(path: Path) -> int:
     try:
         with path.open("rb") as spill:
             return sum(1 for _ in spill)
-    except FileNotFoundError:
+    except OSError:
         return 0
 
 

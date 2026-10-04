@@ -199,3 +199,17 @@ def test_a_line_cut_short_by_a_crash_does_not_block_the_rest(database: str, tmp_
 
     assert db.trail() == [1, 2]
     assert restarted.buffered == 0
+
+
+def test_a_disk_that_cannot_be_written_costs_rows_not_memory(database: str, tmp_path: Path) -> None:
+    db = Database(database)
+    (tmp_path / "state").write_text("a file where the state directory should be")
+    storage = BufferedStorage(
+        db.open, tmp_path / "state" / "buffer.jsonl", memory_rows=10, clock=Clock()
+    )
+    db.go_down()
+    for second in range(100):
+        storage.write_trail(points(second))
+
+    assert storage.buffered <= 10
+    assert storage.dropped >= 90
