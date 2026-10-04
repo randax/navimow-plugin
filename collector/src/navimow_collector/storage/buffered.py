@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 from collections.abc import Callable, Sequence
+from contextlib import suppress
 from dataclasses import asdict
 from datetime import datetime
 from itertools import islice
@@ -61,6 +63,7 @@ class BufferedStorage:
         # is sent a slice at a time, and a file that was sent cannot always be removed.
         self._replayed = 0
         self._replayed_file: tuple[int, int] | None = None
+        self._unreadable_until: float | None = None  # the file could not be read just now
         self._retry_at = 0.0
         self._dropping = False  # whether this outage's loss has been reported yet
         self.dropped = 0
@@ -81,7 +84,12 @@ class BufferedStorage:
     @property
     def draining(self) -> bool:
         """Whether rows are waiting which the database is believed able to take now."""
-        return bool(self.buffered) and self._clock() >= self._retry_at
+        waiting = bool(self._memory) or self._file_is_due()
+        return waiting and self._clock() >= self._retry_at
+
+    def _file_is_due(self) -> bool:
+        """Whether the buffer file holds rows to send, and may be read."""
+        return bool(self._spilled) and self._clock() >= (self._unreadable_until or 0)
 
     def connect(self) -> None:
         """Open the database now, so a misconfiguration fails at startup, not into the buffer."""
@@ -103,9 +111,9 @@ class BufferedStorage:
             return
         room = REPLAY_ROWS
         try:
-            if self._spilled:
+            if self._file_is_due():
                 room -= self._replay_spill(room)
-            if not self._spilled and self._memory and room > 0:
+            if not self._file_is_due() and self._memory and room > 0:
                 self._send(self._memory[:room])
                 del self._memory[:room]
         except StorageError as error:
@@ -125,6 +133,7 @@ class BufferedStorage:
             _LOGGER.error("%d buffered rows could not be saved and are lost", len(self._memory))
             self.dropped += len(self._memory)
             self._memory.clear()
+        self._trim_spill()
         if self._storage is not None:
             self._storage.close()
             self._storage = None
@@ -146,7 +155,7 @@ class BufferedStorage:
     def _send(self, rows: Sequence[Row]) -> int:
         """Write rows now, raising StorageError only when the database cannot be reached."""
         written = self._attempt(rows)
-        self._refused.clear()  # done with: none of these rows will be tried again
+        self._refused.difference_update(rows)  # done with: these will not be tried again
         return written
 
     def _attempt(self, rows: Sequence[Row]) -> int:
@@ -232,28 +241,62 @@ class BufferedStorage:
         """Send up to `limit` lines of the buffer file, from where the last call stopped,
         and remove the file once all of it is sent; return how many lines were taken.
 
-        A file that cannot be read keeps its rows for the next start; one that cannot be
-        removed (a filesystem gone read-only) is remembered as sent up to where it ends.
+        A file that cannot be read still owes its rows and is tried again after the retry
+        interval; one that cannot be removed (a filesystem gone read-only) is remembered
+        as sent up to where it ends.
         """
-        taken = 0
         try:
             with self._spill.open("rb") as spill:
                 self._forget_position_in_another_file(spill)
                 spill.seek(self._replayed)
                 lines = list(islice(spill, limit))
-                taken = len(lines)
                 # A line cut short by a crash is skipped rather than blocking the rest.
                 self._send([row for row in map(_decode, lines) if row is not None])
+                self._unreadable_until = None
                 self._replayed, self._replayed_file = spill.tell(), _identity(spill)
                 if spill.read(1):
-                    self._spilled = max(self._spilled - taken, 1)  # more for a later call
-                    return taken
-            self._spill.unlink()
+                    self._spilled = max(self._spilled - len(lines), 1)  # more for a later call
+                    return len(lines)
+        except FileNotFoundError:
+            _LOGGER.error("Buffer file %s is gone, and its unsent rows with it", self._spill)
+            self.dropped += self._spilled
+            self._spilled = self._replayed = 0
+            return 0
+        except OSError as error:
+            if self._unreadable_until is None:  # said once, not once per retry
+                _LOGGER.error("Buffer file %s cannot be read; will retry: %s", self._spill, error)
+            self._unreadable_until = self._clock() + RETRY_SECONDS
+            return 0
+        self._spilled = 0
+        try:
+            self._spill.unlink(missing_ok=True)
             self._replayed = 0
         except OSError as error:
-            _LOGGER.error("Buffer file %s could not be read and removed: %s", self._spill, error)
-        self._spilled = 0
-        return taken
+            _LOGGER.error("Buffer file %s is sent but cannot be removed: %s", self._spill, error)
+        return len(lines)
+
+    def _trim_spill(self) -> None:
+        """On a clean stop, cut the rows already sent off the front of the buffer file: the
+        next process starts the file from its first row. After a crash it sends them again,
+        which costs time, not correctness."""
+        if not self._replayed:
+            return
+        unsent = self._spill.with_name(f".{self._spill.name}.tmp")
+        try:
+            with self._spill.open("rb") as spill, unsent.open("wb") as rest:
+                self._forget_position_in_another_file(spill)
+                spill.seek(self._replayed)
+                shutil.copyfileobj(spill, rest)
+                rest.flush()
+                os.fsync(rest.fileno())
+            os.replace(unsent, self._spill)
+            self._replayed = 0
+        except OSError as error:
+            _LOGGER.warning(
+                "Could not trim %s; the next start re-sends rows: %s", self._spill, error
+            )
+            with suppress(OSError):
+                unsent.unlink(missing_ok=True)
 
     def _forget_position_in_another_file(self, spill: BinaryIO) -> None:
         """A file emptied or replaced behind the collector (an operator making room) is not

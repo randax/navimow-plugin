@@ -124,12 +124,13 @@ class FakeBroker:
         self.credentials = credentials
         self.mowers = list(mowers)
         self.connecting = False
+        self.is_connected = False
 
     def connect_async(self) -> None:
         self.connecting = True
 
     def disconnect(self) -> None:
-        self.connecting = False
+        self.connecting = self.is_connected = False
 
     def update_credentials(
         self,
@@ -145,10 +146,12 @@ class FakeBroker:
 
     async def accept(self) -> None:
         assert self.connecting and self.on_connected
+        self.is_connected = True
         await self.on_connected()
 
     async def drop(self) -> None:
         assert self.on_disconnected
+        self.is_connected = False
         await self.on_disconnected()
 
     async def deliver(self, topic: str, payload: Any) -> None:
@@ -765,6 +768,7 @@ def undialled(sdk: list[Any]) -> Callable[[BrokerCredentials, Sequence[str]], Br
         mqtt: Any = connect_broker(credentials, mowers)
         mqtt.loop = asyncio.get_running_loop()
         mqtt.connect_async = lambda: None
+        mqtt.client.is_connected = lambda: True  # as paho says before it calls on_connect
         sdk.append(mqtt)
         broker: Broker = mqtt
         return broker
@@ -804,6 +808,52 @@ def test_the_sdk_connection_drives_the_collector_as_the_fake_broker_does(live: L
     asyncio.run(scenario())
 
     assert [(row[0], row[1]) for row in live.trail()] == [("DEVICE_1", at(NOW))]
+
+
+def test_a_connection_the_sdk_tore_down_before_its_callback_ran_does_not_count(
+    live: Live,
+) -> None:
+    sdk: list[Any] = []
+
+    async def scenario() -> Collector:
+        collector = live.start(undialled(sdk))
+        await collector.tick()
+        # paho has the broker's answer but has not yet said it is connected when new
+        # credentials make the SDK replace its client; the old client's callback follows.
+        paho = sdk[0].client
+        paho.is_connected = lambda: False
+        sdk[0].update_credentials("user", "reissued")
+        assert sdk[0].client is not paho
+        paho.on_connect(paho, None, {}, 0, None)
+        await settled()
+        return collector
+
+    collector = asyncio.run(scenario())
+
+    assert not collector.connected
+    assert live.vendor.count("smarthome/getVehicleStatus") == 0
+
+
+def test_a_broker_address_the_sdk_cannot_use_is_a_failed_fetch_not_a_crash(live: Live) -> None:
+    live.vendor.broker_host = "wss://mqtt.example:abc"  # no port the SDK can parse
+    sdk: list[Any] = []
+
+    async def scenario() -> None:
+        collector = live.start(undialled(sdk))
+        await collector.tick()
+        live.vendor.broker_host = "wss://mqtt.example"
+        live.clock.now = NOW + 30
+        await collector.tick()
+        assert live.vendor.count(CREDENTIALS) == 1  # retried on the ladder, not at once
+
+        live.clock.now = NOW + 60
+        await collector.tick()
+        collector.stop()
+
+    asyncio.run(scenario())
+
+    assert live.vendor.count(CREDENTIALS) == 2
+    assert [mqtt.broker for mqtt in sdk] == ["mqtt.example"]
 
 
 def test_an_sdk_callback_still_queued_at_shutdown_is_ignored(live: Live) -> None:

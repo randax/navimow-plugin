@@ -595,8 +595,80 @@ def test_a_buffer_file_that_cannot_be_read_does_not_stop_collection(
     clock.now += RETRY_SECONDS
     storage.flush()
     storage.write_trail(points(4))
+    storage.flush()  # behind a file that still owes rows, a row waits for the next tick
 
     assert db.trail() == [3, 4]
+
+
+def test_a_buffer_file_unreadable_for_a_while_is_written_once_it_can_be_read(
+    database: str, tmp_path: Path
+) -> None:
+    db, clock = Database(database), Clock()
+    storage = buffered(db, tmp_path, clock, memory_rows=1)
+    spill, elsewhere = tmp_path / "buffer.jsonl", tmp_path / "elsewhere"
+    storage.write_trail(points(0))
+    db.go_down()
+    storage.write_trail(points(1, 2))
+    spill.rename(elsewhere)
+    spill.mkdir()  # for the moment, nothing that can be read as a file
+    db.down = False
+    clock.now += RETRY_SECONDS
+    storage.flush()
+    assert (storage.buffered, storage.draining) == (2, False)  # still owed, not retried at once
+
+    spill.rmdir()
+    elsewhere.rename(spill)
+    storage.flush()
+    assert db.trail() == [0]  # not before the retry interval has passed
+
+    clock.now += RETRY_SECONDS
+    storage.flush()
+    assert db.trail() == [0, 1, 2]
+    assert storage.buffered == 0
+
+
+def test_a_clean_stop_leaves_only_unsent_rows_for_the_next_process(
+    database: str, tmp_path: Path
+) -> None:
+    db, clock = Database(database), Clock()
+    storage = buffered(db, tmp_path, clock, memory_rows=10)
+    impossible = replace(points(5000)[0], vehicle_state=2**40)
+    db.go_down()
+    storage.write_trail([impossible, *points(*range(2 * REPLAY_ROWS))])
+    db.down = False
+    clock.now += RETRY_SECONDS
+    storage.flush()  # the first slice, where the rejected row is counted
+    storage.close()  # a second slice, then the process stops with one row unsent
+    assert (storage.rejected, db.sent) == (1, 2 * REPLAY_ROWS - 1)
+
+    restarted = buffered(db, tmp_path, clock)
+    assert restarted.buffered == 1
+    while restarted.buffered:
+        restarted.flush()
+
+    assert (restarted.rejected, db.sent) == (0, 2 * REPLAY_ROWS)
+    assert db.trail() == list(range(2 * REPLAY_ROWS))
+
+
+def test_a_rejection_is_remembered_while_its_row_still_waits_in_a_later_slice(
+    database: str, tmp_path: Path
+) -> None:
+    db, clock = Database(database), Clock()
+    storage = buffered(db, tmp_path, clock)
+    rows = points(*range(2 * REPLAY_ROWS))
+    rows[300] = replace(rows[300], vehicle_state=2**40)
+    # The batch is rejected and tried row by row: row 300 is rejected and the last row
+    # meets an outage, so all of them wait, to be written in two slices.
+    db.drop_at_write = 1 + len(rows)
+    storage.write_trail(rows)
+    assert (storage.buffered, storage.rejected) == (len(rows), 1)
+
+    clock.now += RETRY_SECONDS
+    while storage.buffered:
+        storage.flush()
+
+    assert storage.rejected == 1
+    assert len(db.trail()) == len(rows) - 1
 
 
 def test_a_line_cut_short_by_a_crash_does_not_block_the_rest(database: str, tmp_path: Path) -> None:

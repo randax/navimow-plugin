@@ -56,6 +56,9 @@ class Broker(Protocol):
     on_disconnected: Callable[[], Awaitable[None]] | None
     on_raw: Callable[[str, bytes], Awaitable[None]] | None
 
+    @property
+    def is_connected(self) -> bool: ...
+
     def connect_async(self) -> None: ...
 
     def disconnect(self) -> None: ...
@@ -193,6 +196,7 @@ class Collector:
                 self._mowers = await self._discover(token)
                 self._fetched_at = self._clock()  # the wait is owed to the credential endpoint
             credentials = await self._fetch_credentials(token)
+            self._apply_credentials(credentials, now)
         except RestError as error:
             _LOGGER.warning("Could not fetch broker credentials; will retry: %s", error)
             await self._rejected(error, token)
@@ -200,7 +204,6 @@ class Collector:
         if self.connected:
             self._fetches = 0
         self._credentials = credentials
-        self._apply_credentials(credentials, now)
 
     def _apply_credentials(self, credentials: BrokerCredentials, now: float) -> None:
         """Hand fresh credentials to the broker connection, opening it if there is none."""
@@ -217,7 +220,10 @@ class Collector:
             )
             return
         _LOGGER.info("Connecting to the broker for mowers %s", ", ".join(self._mowers))
-        broker = self._broker = self._connect(credentials, self._mowers)
+        try:
+            broker = self._broker = self._connect(credentials, self._mowers)
+        except Exception as error:  # the SDK refuses an address it cannot parse
+            raise RestError(f"unusable broker address {credentials.host!r}: {error}") from error
         self._address = address
         broker.on_connected = self._while_current(broker, self._on_connected)
         broker.on_disconnected = self._while_current(broker, self._on_disconnected)
@@ -247,6 +253,8 @@ class Collector:
 
     async def _on_connected(self) -> None:
         """Record the gap this connection ends, then ask where every mower stands."""
+        if self._broker is None or not self._broker.is_connected:
+            return  # queued by the SDK for a client it has since torn down and replaced
         now = self._clock()
         gap_start = None if self.connected else self._flowed_until
         self.connected = True

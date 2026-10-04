@@ -114,14 +114,16 @@ does a gap wait in memory with the Trail points, exposed to a crash like them.
 
 A backlog is written back 200 rows at a time, a slice every tenth of a second,
 so collection, token refresh and shutdown carry on while it drains; a stop in
-the middle leaves the rest in the file for the next start. Rows already written
-stay in the file until all of it is, so while it drains the file can reach
-twice its limit.
+the middle leaves only the unwritten rest in the file for the next start, while
+after a crash the next start writes the file again from its beginning, which
+costs time and nothing else. Rows already written stay in the file until all of
+it is, so while it drains the file can reach twice its limit.
 
 A row the database refuses for what it holds is logged and dropped, never
 retried, so it cannot hold up the rows behind it. Trouble with the buffer file
-itself (unreadable, or not removable after its rows were written) is logged and
-costs at most the rows in that file; it never stops collection. Emptying or
+itself never stops collection: one that cannot be read is tried again every ten
+seconds while new rows are written all the same, and one that cannot be
+removed after its rows were written is logged and not written twice. Emptying or
 deleting the file by hand is safe at any time and costs only the rows in it.
 Do not overwrite it in place, for instance by copying a backup over it while
 the collector is working through it: the collector would carry on from its old
