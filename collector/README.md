@@ -102,14 +102,15 @@ record, so a capture that contains it replays to the same row:
 
 **Database outages.** The database must be reachable when the collector starts.
 After that, rows it cannot take are held in memory (1,000 rows), then appended
-to `buffer.jsonl` in the state directory (up to 64 MiB; beyond that, or if the
-file cannot be written, the newest rows are dropped and an error is logged),
-and written when the database returns, by this process or the next. A clean
-stop moves what is in memory to that file; a crash while the database is away
-loses the Trail points still in memory, at most 1,000. Gap rows go to the file
-at once, and the note of when a gap started is kept until its row has been
-handed over, so a crash at any point records the gap again rather than losing
-it. Only a buffer file that cannot be written can cost a gap.
+to `buffer.jsonl` in the state directory (up to 64 MiB), and written when the
+database returns, by this process or the next. Once the file is full, or if it
+cannot be written, memory keeps what it can hold and the newest rows beyond
+that are dropped, with an error logged. A clean stop moves what is in memory to
+the file; a crash while the database is away loses what was still in memory, at
+most 1,000 rows. Gap rows go to the file at once, and the note of when a gap
+started is kept until its row has been handed over, so a crash at any point
+records the gap again rather than losing it. Only when the file cannot take it
+does a gap wait in memory with the Trail points, exposed to a crash like them.
 
 A row the database refuses for what it holds is logged and dropped, never
 retried, so it cannot hold up the rows behind it. Trouble with the buffer file

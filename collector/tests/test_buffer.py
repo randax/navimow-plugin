@@ -259,7 +259,7 @@ def test_a_gap_held_during_an_outage_is_on_disk_at_once(database: str, tmp_path:
 
 def test_the_disk_buffer_never_exceeds_its_limit(database: str, tmp_path: Path) -> None:
     db, clock = Database(database), Clock()
-    storage = buffered(db, tmp_path, clock, disk_bytes=1000)
+    storage = buffered(db, tmp_path, clock, memory_rows=10, disk_bytes=1000)
     db.go_down()
     storage.write_trail(points(*range(1500)))  # one batch far larger than the limit
     size = (tmp_path / "buffer.jsonl").stat().st_size
@@ -268,14 +268,34 @@ def test_the_disk_buffer_never_exceeds_its_limit(database: str, tmp_path: Path) 
 
     assert 0 < size <= 1000
     assert (tmp_path / "buffer.jsonl").stat().st_size == size
-    assert storage.dropped >= 1990
+    assert storage.buffered + storage.dropped == 3000
+    assert storage.buffered < 20
 
     db.down = False
     clock.now += RETRY_SECONDS
     storage.flush()
-    kept = db.trail()
-    assert kept[:4] == [0, 1, 2, 3]  # the oldest rows are the ones kept
-    assert len(kept) < 1000
+    # The oldest rows are the ones kept: what fitted in the file, then what memory may hold.
+    assert db.trail() == list(range(len(db.trail())))
+    assert 10 < len(db.trail()) < 20
+
+
+def test_a_gap_the_buffer_file_cannot_take_does_not_cost_the_rows_in_memory(
+    database: str, tmp_path: Path
+) -> None:
+    db = Database(database)
+    (tmp_path / "state").write_text("a file where the state directory should be")
+    storage = BufferedStorage(db.open, tmp_path / "state" / "buffer.jsonl", clock=Clock())
+    gap = Gap("DEVICE_1", START, START + timedelta(seconds=30), GapReason.RECONNECT)
+    db.go_down()
+    storage.write_trail(points(*range(30)))
+    storage.write_gaps([gap])  # goes to disk at once, which fails
+    assert (storage.buffered, storage.dropped) == (31, 0)
+
+    db.down = False
+    storage.close()
+
+    assert db.trail() == list(range(30))
+    assert gaps(database) == [(gap.mower_id, gap.start_time, gap.end_time, gap.reason)]
 
 
 def test_a_row_the_database_rejects_is_dropped_and_the_rest_arrive(

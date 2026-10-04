@@ -149,8 +149,9 @@ class BufferedStorage:
         self._retry_at = self._clock() + RETRY_SECONDS
 
     def _spill_memory(self) -> None:
-        """Move memory to disk. Rows the file has no room for, or cannot take, are dropped
-        instead: memory stays bounded whatever happens, and it is the newest rows that lose."""
+        """Move memory to disk. Rows the file has no room for, or cannot take, stay in memory
+        up to its limit; beyond that the newest are dropped, so memory is bounded whatever
+        happens to the disk."""
         kept, problem = 0, "it has reached its size limit"
         try:
             self._spill.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -163,19 +164,20 @@ class BufferedStorage:
                         break
                     lines.append(line)
                     room -= len(line)
-                data = b"".join(lines)
-                # Unbuffered, so the count is what reached the file: a disk that fills up
-                # mid-write keeps the rows that fitted, and the torn one is ended next time.
-                written = spill.write(data) or 0
-                kept = data[:written].count(b"\n")
-                os.fsync(spill.fileno())
-                if written < len(data):
-                    problem = "the write was cut short"
+                if data := b"".join(lines):
+                    # Unbuffered, so the count is what reached the file: a disk that fills
+                    # up mid-write keeps the rows that fitted; the torn one is ended next time.
+                    written = spill.write(data) or 0
+                    kept = data[:written].count(b"\n")
+                    os.fsync(spill.fileno())
+                    if written < len(data):
+                        problem = "the write was cut short"
         except OSError as error:
             problem = str(error)
         self._spilled += kept
-        lost = len(self._memory) - kept
-        if lost:
+        del self._memory[:kept]
+        lost = len(self._memory) - self._memory_rows
+        if lost > 0:
             if not self._dropping:
                 _LOGGER.error(
                     "Cannot buffer to %s (%s); dropping rows until the database returns",
@@ -184,7 +186,7 @@ class BufferedStorage:
                 )
             self._dropping = True
             self.dropped += lost
-        self._memory.clear()
+            del self._memory[self._memory_rows :]
 
     def _replay_spill(self) -> None:
         """Send what the buffer file holds, then remove it.
