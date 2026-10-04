@@ -78,9 +78,20 @@ export interface CustomSlot {
 
 export const CUSTOM_BASE_MAP: CustomSlot = { name: 'Base map', wms: true, tileSize: 256, maxzoom: 18 };
 
+// Saved options are JSON that provisioning or a hand may have written, so a field can hold anything.
+// What is not text is no text; a number may come as the text that spells it; null is absent.
+const text = (value: unknown): string => (typeof value === 'string' ? value.trim() : '');
+export const numberFrom = (value: unknown): number | undefined =>
+  typeof value === 'number' ? value : text(value) === '' ? undefined : Number(value);
+
 // MapLibre fills both kinds of template itself: {z}/{x}/{y} for tile services, {bbox-epsg-3857} for WMS.
 const isTemplate = (url: string, wms: boolean): boolean =>
   ['{z}', '{x}', '{y}'].every((p) => url.includes(p)) || (wms && url.includes('{bbox-epsg-3857}'));
+
+// Every placeholder MapLibre fills in a tile URL. Any other is requested as written, and nothing is drawn.
+const PLACEHOLDERS = ['{z}', '{x}', '{y}', '{quadkey}', '{prefix}', '{ratio}', '{bbox-epsg-3857}'];
+const list = (items: string[]): string =>
+  [items.slice(0, -1).join(', '), ...items.slice(-1)].filter(Boolean).join(' and ');
 
 /** The URL as a browser would request it for one tile, if it is an http(s) URL a browser can parse. */
 const filledIn = (template: string): URL | undefined => {
@@ -103,11 +114,18 @@ const inRange = (value: number, { min, max }: { min: number; max: number }): boo
 export type CustomTiles = Required<Pick<RasterSourceSpecification, 'tiles' | 'tileSize' | 'maxzoom' | 'attribution'>>;
 
 /** Checks a custom slot, so that what is wrong with it is shown in the panel rather than logged by the map. */
-export function customTiles(
-  slot: CustomSlot,
-  { url = '', tileSize = slot.tileSize, maxzoom = slot.maxzoom, attribution = '' }: CustomSourceOptions = {}
-): CustomTiles | { problem: string } {
-  const request = isTemplate(url, slot.wms) ? filledIn(url.trim()) : undefined;
+export function customTiles(slot: CustomSlot, custom?: CustomSourceOptions | null): CustomTiles | { problem: string } {
+  const url = text(custom?.url);
+  const attribution = text(custom?.attribution);
+  const tileSize = numberFrom(custom?.tileSize) ?? slot.tileSize;
+  const maxzoom = numberFrom(custom?.maxzoom) ?? slot.maxzoom;
+  const unfilled = [...new Set(url.match(/\{[^}]*\}/g))].filter((p) => !PLACEHOLDERS.includes(p));
+  if (isTemplate(url, slot.wms) && unfilled.length > 0) {
+    return {
+      problem: `A custom ${slot.name} URL has ${list(unfilled)}, which the map cannot fill in. It fills ${list(PLACEHOLDERS)}.`,
+    };
+  }
+  const request = isTemplate(url, slot.wms) ? filledIn(url) : undefined;
   if (!request) {
     return {
       problem: slot.wms
@@ -120,7 +138,7 @@ export function customTiles(
       problem: `A custom ${slot.name} URL cannot carry a user name or password before its host: browsers refuse to request it.`,
     };
   }
-  if (!attribution.trim()) {
+  if (!attribution) {
     return { problem: `A custom ${slot.name} needs an attribution. Enter the credit line its provider requires.` };
   }
   // The editor clamps these, but panel JSON does not; a tile size of 0 would request every tile at max zoom.
@@ -130,15 +148,19 @@ export function customTiles(
   if (!inRange(maxzoom, MAX_ZOOM)) {
     return { problem: `Max zoom must be a whole number from ${MAX_ZOOM.min} to ${MAX_ZOOM.max}.` };
   }
-  return { tiles: [url.trim()], tileSize, maxzoom, attribution: escapeHtml(attribution.trim()) };
+  return { tiles: [url], tileSize, maxzoom, attribution: escapeHtml(attribution) };
 }
 
 /** A custom Base map or Overlay: both are drawn as plain raster tiles. */
-export function customRaster(slot: CustomSlot, custom?: CustomSourceOptions): ResolvedBaseMap {
+export function customRaster(slot: CustomSlot, custom?: CustomSourceOptions | null): ResolvedBaseMap {
   const tiles = customTiles(slot, custom);
   return 'problem' in tiles ? tiles : { source: { type: 'raster', ...tiles } };
 }
 
-// Saved panels can outlive a preset, or predate these options entirely.
-export const resolveBaseMap = ({ preset, custom }: BaseMapOptions = { preset: 'kartverket-topo' }): ResolvedBaseMap =>
-  preset === 'custom' ? customRaster(CUSTOM_BASE_MAP, custom) : presetSource('Base map', BASE_MAP_PRESETS, preset);
+// Saved panels can outlive a preset, or predate these options entirely; absent or null is the default.
+export function resolveBaseMap(options?: BaseMapOptions | null): ResolvedBaseMap {
+  const preset = options?.preset ?? 'kartverket-topo';
+  return preset === 'custom'
+    ? customRaster(CUSTOM_BASE_MAP, options?.custom)
+    : presetSource('Base map', BASE_MAP_PRESETS, preset);
+}

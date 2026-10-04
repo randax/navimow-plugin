@@ -3,6 +3,8 @@ import { resolveOverlay, type OverlayOptions } from './overlay';
 describe('resolveOverlay', () => {
   test('there is no Overlay unless one is chosen', () => {
     expect(resolveOverlay(undefined)).toEqual({});
+    expect(resolveOverlay(null)).toEqual({});
+    expect(resolveOverlay({ preset: null } as unknown as OverlayOptions)).toEqual({});
     expect(resolveOverlay({ preset: 'none', opacity: 1 })).toEqual({});
   });
 
@@ -37,7 +39,8 @@ describe('resolveOverlay', () => {
   });
 
   describe('opacity', () => {
-    const opacityOf = (opacity: number | undefined) => resolveOverlay({ preset: 'kartverket-hillshade', opacity });
+    const opacityOf = (opacity: unknown) =>
+      resolveOverlay({ preset: 'kartverket-hillshade', opacity } as OverlayOptions);
 
     test("is the owner's", () => {
       expect(opacityOf(0.8)).toMatchObject({ overlay: { opacity: 0.8 } });
@@ -48,8 +51,19 @@ describe('resolveOverlay', () => {
       [1.5, 1],
       [-1, 0],
       [Number.NaN, 0.5],
+      // Provisioning files sometimes hold numbers as text.
+      ['1', 1],
+      ['0.25', 0.25],
+      ['faint', 0.5],
+      [null, 0.5],
     ])('%p from panel JSON, which bypasses the slider, is drawn as %p', (saved, drawn) => {
       expect(opacityOf(saved)).toMatchObject({ overlay: { opacity: drawn } });
+    });
+  });
+
+  test('a custom slot saved as null is refused for its URL, not crashed by it', () => {
+    expect(resolveOverlay({ preset: 'custom', custom: null } as unknown as OverlayOptions)).toEqual({
+      problem: expect.stringContaining('A custom Overlay needs an http(s) URL'),
     });
   });
 

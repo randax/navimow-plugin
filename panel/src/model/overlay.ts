@@ -4,6 +4,7 @@ import {
   CUSTOM_BASE_MAP,
   customRaster,
   KARTVERKET_ATTRIBUTION,
+  numberFrom,
   presetSource,
   type CustomSlot,
   type CustomSourceOptions,
@@ -46,18 +47,25 @@ export const OVERLAY_PRESETS: Record<OverlayPreset, Preset<RasterSourceSpecifica
 
 export const DEFAULT_OVERLAY_OPACITY = 0.5;
 
-// The slider keeps opacity in range, but panel JSON does not.
-const drawnOpacity = (opacity = DEFAULT_OVERLAY_OPACITY): number =>
-  Number.isFinite(opacity) ? Math.min(1, Math.max(0, opacity)) : DEFAULT_OVERLAY_OPACITY;
+// The slider keeps opacity a number in range, but panel JSON does not.
+const drawnOpacity = (saved: unknown): number => {
+  const opacity = numberFrom(saved) ?? DEFAULT_OVERLAY_OPACITY;
+  return Number.isFinite(opacity) ? Math.min(1, Math.max(0, opacity)) : DEFAULT_OVERLAY_OPACITY;
+};
 
 export const CUSTOM_OVERLAY: CustomSlot = { ...CUSTOM_BASE_MAP, name: 'Overlay' };
 
-// Absent means none, for the whole of the options or, in options written by hand, for the preset alone.
-export function resolveOverlay({ preset = 'none', custom, opacity }: OverlayOptions = {}): ResolvedOverlay {
+// Absent or null means none, for the whole of the options or, in options written by hand, for the preset alone.
+export function resolveOverlay(options?: OverlayOptions | null): ResolvedOverlay {
+  const preset = options?.preset ?? 'none';
   if (preset === 'none') {
     return {};
   }
   const resolved =
-    preset === 'custom' ? customRaster(CUSTOM_OVERLAY, custom) : presetSource('Overlay', OVERLAY_PRESETS, preset);
-  return 'problem' in resolved ? resolved : { overlay: { source: resolved.source, opacity: drawnOpacity(opacity) } };
+    preset === 'custom'
+      ? customRaster(CUSTOM_OVERLAY, options?.custom)
+      : presetSource('Overlay', OVERLAY_PRESETS, preset);
+  return 'problem' in resolved
+    ? resolved
+    : { overlay: { source: resolved.source, opacity: drawnOpacity(options?.opacity) } };
 }

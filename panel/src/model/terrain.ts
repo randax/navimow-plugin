@@ -68,19 +68,23 @@ export const CUSTOM_TERRAIN: CustomSlot & { encoding: TerrainEncoding } = {
   encoding: 'terrarium',
 };
 
+/** Whether Terrain is on. Only `true` turns it on: saved by hand as the text "false", it stays off. */
+export const terrainEnabled = (options?: TerrainOptions | null): boolean => options?.enabled === true;
+
 // Off until enabled; once enabled, the higher-resolution Preset unless the owner picks another.
-export function resolveTerrain({ enabled, preset = 'mapterhorn', custom }: TerrainOptions = {}): ResolvedTerrain {
-  if (!enabled) {
+export function resolveTerrain(options?: TerrainOptions | null): ResolvedTerrain {
+  if (!terrainEnabled(options)) {
     return {};
   }
+  const preset = options?.preset ?? 'mapterhorn';
   if (preset !== 'custom') {
     return presetSource('Terrain', TERRAIN_PRESETS, preset);
   }
-  const tiles = customTiles(CUSTOM_TERRAIN, custom);
+  const tiles = customTiles(CUSTOM_TERRAIN, options?.custom);
   if ('problem' in tiles) {
     return tiles;
   }
-  const encoding = custom?.encoding ?? CUSTOM_TERRAIN.encoding;
+  const encoding = options?.custom?.encoding ?? CUSTOM_TERRAIN.encoding;
   return TERRAIN_ENCODINGS.some(({ value }) => value === encoding)
     ? { source: { type: 'raster-dem', ...tiles, encoding } }
     : {

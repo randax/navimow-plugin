@@ -37,9 +37,12 @@ describe('resolveBaseMap', () => {
     });
   });
 
-  test('a panel saved without Base map options gets the default', () => {
-    expect(resolveBaseMap(undefined)).toEqual(resolveBaseMap({ preset: 'kartverket-topo' }));
-  });
+  test.each([undefined, null, {}, { preset: null }])(
+    'a panel saved with %p for its Base map options gets the default',
+    (saved) => {
+      expect(resolveBaseMap(saved as unknown as BaseMapOptions)).toEqual(resolveBaseMap({ preset: 'kartverket-topo' }));
+    }
+  );
 
   test('a preset id this version does not know is refused rather than crashing the panel', () => {
     expect(resolveBaseMap({ preset: 'kartverket-retired' } as unknown as BaseMapOptions)).toEqual({
@@ -118,6 +121,54 @@ describe('resolveBaseMap', () => {
       expect(custom({ url })).toEqual({
         problem:
           'A custom Base map needs an http(s) URL containing either {z}, {x} and {y}, or {bbox-epsg-3857} for a WMS service.',
+      });
+    });
+
+    // Panel JSON written by hand or by provisioning can hold anything where text is expected.
+    test.each([null, 42, ['https://tiles.example.com/{z}/{x}/{y}.png']])(
+      'is refused for its URL, not crashed by it, when the URL is %p',
+      (url) => {
+        expect(custom({ url })).toEqual({ problem: expect.stringContaining('A custom Base map needs an http(s) URL') });
+      }
+    );
+
+    test('is refused for its URL when the whole slot is null', () => {
+      expect(resolveBaseMap({ preset: 'custom', custom: null } as unknown as BaseMapOptions)).toEqual({
+        problem: expect.stringContaining('A custom Base map needs an http(s) URL'),
+      });
+    });
+
+    test.each([null, 42])('is refused for its attribution when that is %p', (attribution) => {
+      expect(custom({ url: 'https://tiles.example.com/{z}/{x}/{y}.png', attribution })).toEqual({
+        problem: 'A custom Base map needs an attribution. Enter the credit line its provider requires.',
+      });
+    });
+
+    test('numbers saved as text are read as the numbers they spell', () => {
+      expect(
+        custom({ url: 'https://tiles.example.com/{z}/{x}/{y}.png', tileSize: '512', maxzoom: ' 20 ' })
+      ).toMatchObject({
+        source: { tileSize: 512, maxzoom: 20 },
+      });
+      expect(custom({ url: 'https://tiles.example.com/{z}/{x}/{y}.png', tileSize: null, maxzoom: '' })).toMatchObject({
+        source: { tileSize: 256, maxzoom: 18 },
+      });
+      expect(custom({ url: 'https://tiles.example.com/{z}/{x}/{y}.png', tileSize: 'large' })).toEqual({
+        problem: expect.stringContaining('Tile size'),
+      });
+    });
+
+    test('every placeholder the map fills is accepted', () => {
+      const url = 'https://tiles.example.com/{prefix}/{z}/{x}/{y}{ratio}.png?q={quadkey}&bbox={bbox-epsg-3857}';
+      expect(custom({ url })).toMatchObject({ source: { tiles: [url] } });
+    });
+
+    test.each([
+      ['https://{s}.tile.example.com/{z}/{x}/{y}.png', '{s}'],
+      ['https://tiles.example.com/{z}/{x}/{y}.png?key={key}&v={v}&again={key}', '{key} and {v}'],
+    ])('%p is refused for %s, which the map would request as written', (url, unknown) => {
+      expect(custom({ url })).toEqual({
+        problem: `A custom Base map URL has ${unknown}, which the map cannot fill in. It fills {z}, {x}, {y}, {quadkey}, {prefix}, {ratio} and {bbox-epsg-3857}.`,
       });
     });
 

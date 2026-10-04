@@ -21,7 +21,7 @@ const useNow = (): number => {
 };
 
 /** The view the map is in. The model decides it (viewState); this remembers it between renders. */
-const useView = (options: TerrainOptions | undefined): [View, (view: View) => void] => {
+const useView = (options: TerrainOptions | null | undefined): [View, (view: View) => void] => {
   const [remembered, remember] = useState<ViewState>();
   const state = viewState(options, remembered);
   // Kept as soon as the options start the panel over, so that an earlier switch cannot come back.

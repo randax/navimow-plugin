@@ -31,6 +31,14 @@ describe('viewState', () => {
     expect(after({ enabled: false })).toBe('flat');
   });
 
+  test.each([null, { enabled: 'true' }, { enabled: 'false' }, { enabled: 1 }])(
+    'options saved as %p leave Terrain off, as they do for the map, so the view is flat',
+    (saved) => {
+      expect(viewState(saved as unknown as TerrainOptions)).toEqual({ start: undefined, view: 'flat' });
+      expect(initialView(saved as unknown as TerrainOptions)).toBe('flat');
+    }
+  );
+
   test("the owner's switch on the panel holds while the options stay as they are", () => {
     expect(after(startsIn('terrain'), 'flat', startsIn('terrain'))).toBe('flat');
     expect(after(startsIn('terrain'), 'flat', { enabled: true, startIn: 'terrain', preset: 'aws-terrarium' })).toBe(

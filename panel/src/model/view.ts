@@ -1,4 +1,4 @@
-import type { TerrainOptions } from './terrain';
+import { terrainEnabled, type TerrainOptions } from './terrain';
 
 /** The two views the owner switches between on the panel: the map from above, or tilted over its relief. */
 export type View = 'flat' | 'terrain';
@@ -21,8 +21,8 @@ export interface Camera {
 const TERRAIN_PITCH = 60;
 
 /** The view the panel opens in: terrain once Terrain is enabled, unless the owner has it start flat. */
-export const initialView = ({ enabled, startIn }: TerrainOptions = {}): View =>
-  enabled && startIn !== 'flat' ? 'terrain' : 'flat';
+export const initialView = (options?: TerrainOptions | null): View =>
+  terrainEnabled(options) && options?.startIn !== 'flat' ? 'terrain' : 'flat';
 
 /** The view the panel is in, and the start it was taken from: nothing while Terrain is off. */
 export interface ViewState {
@@ -35,8 +35,8 @@ export interface ViewState {
  * as the options start the panel the same way. When they change, by a new start or by Terrain going
  * off or on, the panel starts over from them, and an earlier switch is gone for good.
  */
-export function viewState(options: TerrainOptions | undefined, previous?: ViewState): ViewState {
-  const start = options?.enabled ? initialView(options) : undefined;
+export function viewState(options: TerrainOptions | null | undefined, previous?: ViewState): ViewState {
+  const start = terrainEnabled(options) ? initialView(options) : undefined;
   return previous && previous.start === start ? previous : { start, view: start ?? 'flat' };
 }
 

@@ -2,7 +2,7 @@ import { PanelPlugin, type PanelOptionsEditorBuilder } from '@grafana/data';
 import { MapPanel } from './components/MapPanel';
 import { BASE_MAP_PRESETS, CUSTOM_BASE_MAP, MAX_ZOOM, TILE_SIZE, type CustomSlot } from './model/baseMap';
 import { CUSTOM_OVERLAY, DEFAULT_OVERLAY_OPACITY, OVERLAY_PRESETS } from './model/overlay';
-import { CUSTOM_TERRAIN, TERRAIN_ENCODINGS, TERRAIN_PRESETS } from './model/terrain';
+import { CUSTOM_TERRAIN, TERRAIN_ENCODINGS, TERRAIN_PRESETS, terrainEnabled } from './model/terrain';
 import { DEFAULT_TRAIL_COLUMNS, type TrailColumns } from './model/trailFrame';
 import { VIEWS } from './model/view';
 import type { MapPanelOptions } from './types';
@@ -111,7 +111,7 @@ export const plugin = new PanelPlugin<MapPanelOptions>(MapPanel).setPanelOptions
   });
   addCustomSlot(builder, 'baseMap', CUSTOM_BASE_MAP, (options) => options.baseMap?.preset === 'custom');
 
-  const terrainOn = (options: MapPanelOptions) => options.terrain?.enabled === true;
+  const terrainOn = (options: MapPanelOptions) => terrainEnabled(options.terrain);
   const terrainCustom = (options: MapPanelOptions) => terrainOn(options) && options.terrain?.preset === 'custom';
   builder
     .addBooleanSwitch({

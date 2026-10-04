@@ -130,11 +130,12 @@ const MapCanvas: React.FC<Props> = ({ baseMap, overlay, terrain, view, trail, mo
   const map = useRef<Map | null>(null);
   const drawn = useRef({ view, terrain });
   const lines = useRef(trail.lines);
+  const topUp = useRef(false);
   const framed = useRef<Framing>(undefined);
   const countPending = useRef(true);
 
   // New data replaces the Trail's source data only. The source exists once the style has loaded;
-  // until then the style itself carries the data, topped up on load below.
+  // until then the style carries the data it was made with, topped up on load below.
   useEffect(() => {
     lines.current = trail.lines;
     countPending.current = true;
@@ -142,6 +143,8 @@ const MapCanvas: React.FC<Props> = ({ baseMap, overlay, terrain, view, trail, mo
     if (source) {
       redrawing(element.current);
       source.setData(trail.lines);
+    } else if (map.current) {
+      topUp.current = true;
     }
   }, [trail.lines]);
 
@@ -171,7 +174,15 @@ const MapCanvas: React.FC<Props> = ({ baseMap, overlay, terrain, view, trail, mo
       attributionControl: { compact: false },
     });
     created.on('error', (e) => console.error('[navimow-map]', e.error?.message ?? e));
-    created.on('style.load', () => created.getSource<GeoJSONSource>('trail')?.setData(lines.current));
+    // Only for data that arrived while the style was loading. MapLibre fires this after every restyle
+    // in place too, where the Trail is already there and sending it again would re-tile it for nothing.
+    topUp.current = false;
+    created.on('style.load', () => {
+      if (topUp.current) {
+        topUp.current = false;
+        created.getSource<GeoJSONSource>('trail')?.setData(lines.current);
+      }
+    });
     // Marks a fully drawn map, how many Trails it drew and where it looks from, so browser tests can
     // wait for rendering to finish and see what came out. Trails are counted once per new Trail data
     // or map, so panning never pays for it; a line crossing tiles comes back once per tile, hence the ids.

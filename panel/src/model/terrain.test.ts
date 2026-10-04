@@ -3,7 +3,18 @@ import { resolveTerrain, type TerrainOptions } from './terrain';
 describe('resolveTerrain', () => {
   test('Terrain is off unless enabled, whatever else is saved', () => {
     expect(resolveTerrain(undefined)).toEqual({});
+    expect(resolveTerrain(null)).toEqual({});
     expect(resolveTerrain({ preset: 'aws-terrarium' })).toEqual({});
+  });
+
+  test.each(['false', 'true', 1, null])('only true enables it: saved as %p it stays off', (enabled) => {
+    expect(resolveTerrain({ enabled } as unknown as TerrainOptions)).toEqual({});
+  });
+
+  test('a preset saved as null means the default one', () => {
+    expect(resolveTerrain({ enabled: true, preset: null } as unknown as TerrainOptions)).toEqual(
+      resolveTerrain({ enabled: true })
+    );
   });
 
   test('once enabled it defaults to Mapterhorn, the higher-resolution of the two Presets', () => {
@@ -87,6 +98,23 @@ describe('resolveTerrain', () => {
 
     test('custom attribution is shown as text, never interpreted as markup', () => {
       expect(custom({ attribution: '<b>Me</b>' })).toMatchObject({ source: { attribution: '&lt;b&gt;Me&lt;/b&gt;' } });
+    });
+
+    test.each([null, { url: null, attribution: '© Me' }])(
+      'saved as %p it is refused for its URL, not crashed by it',
+      (saved) => {
+        expect(resolveTerrain({ enabled: true, preset: 'custom', custom: saved } as unknown as TerrainOptions)).toEqual(
+          {
+            problem: 'A custom Terrain needs an http(s) URL containing {z}, {x} and {y}.',
+          }
+        );
+      }
+    );
+
+    test('numbers and an encoding saved as null fall back to the common kind', () => {
+      expect(custom({ encoding: null, tileSize: null, maxzoom: '14' })).toMatchObject({
+        source: { encoding: 'terrarium', tileSize: 512, maxzoom: 14 },
+      });
     });
 
     test('a broken custom slot is no problem while Terrain is off', () => {
