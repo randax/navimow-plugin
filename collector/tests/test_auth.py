@@ -582,6 +582,19 @@ def test_login_no_browser_keeps_the_config_in_the_follow_up_command(
     assert f"navimow-collector --config '{config}' login --code" in capsys.readouterr().out
 
 
+def test_login_no_browser_keeps_a_config_named_by_the_environment(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A fresh shell has no NAVIMOW_CONFIG: the follow-up must name the file itself.
+    config = tmp_path / "my collector.toml"
+    config.write_text("[auth]\n")
+    monkeypatch.setenv("NAVIMOW_CONFIG", str(config))
+
+    assert main(["login", "--no-browser"]) == 0
+
+    assert f"navimow-collector --config '{config}' login --code" in capsys.readouterr().out
+
+
 def test_a_refresh_is_saved_even_after_the_state_file_was_deleted(tmp_path: Path) -> None:
     store = logged_in(tmp_path)
     tokens = manager(store, Response(200, token("new", "rotated")))
@@ -783,3 +796,52 @@ def test_a_plain_text_body_echoing_the_refresh_token_is_redacted(
     run(manager(store, Response(200, "bad refresh_token REFRESH-SECRET")).access_token())
 
     assert "REFRESH-SECRET" not in " ".join(r.getMessage() for r in caplog.records)
+
+
+CONFIGURED_LOGIN = "navimow-collector --config '/etc/navimow/my collector.toml' login"
+
+
+def test_a_required_relogin_is_logged_once_with_the_exact_command(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    clock = Clock(3300)
+    rejections = [Response(400, REJECTED_REFRESH), Response(400, REJECTED_REFRESH)]
+    tokens = TokenManager(
+        TokenClient(FakeSession(rejections), "id", "secret"),
+        logged_in(tmp_path),
+        clock=clock,
+        login_command=CONFIGURED_LOGIN,
+    )
+
+    for _ in range(30):  # every tick for five minutes
+        run(tokens.access_token())
+        clock.now += 10
+    assert tokens.next_attempt_at is not None
+    clock.now = tokens.next_attempt_at
+    run(tokens.access_token())  # the hourly probe is rejected too
+
+    [line] = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert f"run `{CONFIGURED_LOGIN}`" in line.getMessage()
+    assert line.__dict__["command"] == CONFIGURED_LOGIN
+    reminder = caplog.records[-1]
+    assert reminder.levelname == "WARNING"
+    assert reminder.__dict__["command"] == CONFIGURED_LOGIN
+    assert tokens.login_command == CONFIGURED_LOGIN
+
+
+def test_starting_without_a_login_names_the_exact_command(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    TokenManager(
+        TokenClient(FakeSession([]), "id", "secret"),
+        TokenStore(tmp_path / "token.json"),
+        login_command=CONFIGURED_LOGIN,
+    )
+
+    [line] = caplog.records
+    assert f"run `{CONFIGURED_LOGIN}`" in line.getMessage()
+    assert line.__dict__["command"] == CONFIGURED_LOGIN
+
+
+def test_the_login_command_is_the_plain_one_by_default(tmp_path: Path) -> None:
+    assert manager(logged_in(tmp_path)).login_command == "navimow-collector login"

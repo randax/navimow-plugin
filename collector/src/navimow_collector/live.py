@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
@@ -18,6 +19,7 @@ from mower_sdk.models import Device
 from mower_sdk.mqtt import NavimowMQTT
 
 from .auth import RETRY_DELAYS, TokenManager, redact, replace_file
+from .health import Snapshot
 from .ingest import Ingestor
 from .records import GapReason
 from .storage.buffered import BufferedStorage
@@ -31,6 +33,14 @@ HEARTBEAT_SECONDS = 60
 TICK_SECONDS = 10
 # The pause between ticks while buffered rows are being written out a slice per tick.
 DRAIN_SECONDS = 0.1
+# How long a tick waits on the vendor (token refresh, mower discovery, broker credentials)
+# before carrying on. The SDK's 30 s timeout applies to each socket operation, not to a
+# request, and a tick can make four requests in a row: unbounded, a hung vendor would stop
+# the buffer draining and look like a stalled loop. The work is left running, not cancelled:
+# a refresh cut short could spend the rotated refresh token it is about to return.
+VENDOR_WAIT_SECONDS = 5
+# Every topic the broker delivers for a mower, whatever the channel.
+MOWER_TOPIC = re.compile(r"^/downlink/vehicle/([^/]+)/")
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -137,6 +147,11 @@ class Collector:
         self._marker = state_dir / "connected-until"
         self._flowed_until = _read_marker(self._marker)
         self._gap_reason = GapReason.RESTART
+        # For the health endpoint: when the loop last completed a tick (construction counts,
+        # so startup is not a stall), and when each mower was last heard from.
+        self._ticked_at = clock()
+        self._heard: dict[str, float] = {}
+        self._vendor_work: asyncio.Future[None] | None = None
 
     async def collect(
         self,
@@ -151,17 +166,54 @@ class Collector:
                 # while rows remain the next tick follows at once.
                 await wait(stop, DRAIN_SECONDS if self._storage.draining else TICK_SECONDS)
         finally:
+            if self._vendor_work is not None:
+                self._vendor_work.cancel()
             self.stop()
 
     async def tick(self) -> None:
         """Do whatever is due; called every few seconds for the life of the process."""
-        token = await self._tokens.access_token()
-        if token is not None:
-            await self._keep_credentials(token)
+        work = self._vendor_work
+        if work is None or work.done():
+            if work is not None:
+                work.result()  # what went wrong in the background is raised here, as inline
+            work = self._vendor_work = asyncio.ensure_future(self._keep_access())
+        with suppress(TimeoutError):
+            await asyncio.wait_for(asyncio.shield(work), VENDOR_WAIT_SECONDS)
         now = self._clock()
         if self.connected and now - (self._flowed_until or 0) >= HEARTBEAT_SECONDS:
             self._remember_flow(now)
         self._storage.flush()
+        self._ticked_at = self._clock()
+
+    async def _keep_access(self) -> None:
+        """Keep the access token fresh and the broker supplied with credentials for it."""
+        token = await self._tokens.access_token()
+        if token is not None:
+            await self._keep_credentials(token)
+
+    def snapshot(self) -> Snapshot:
+        """Every signal the health endpoint reports, read from another thread.
+
+        Only single attributes are read, and the one dict is copied first, so a value may be
+        a moment old but is never torn.
+        """
+        now = self._clock()
+        heard = dict(self._heard)
+        mowers = dict.fromkeys(self._mowers) | heard
+        return Snapshot(
+            seconds_since_tick=_age(now, self._ticked_at),
+            broker_connected=self.connected,
+            last_message_ages={
+                mower: None if at is None else _age(now, at) for mower, at in mowers.items()
+            },
+            database_reachable=self._storage.reachable,
+            buffered_rows=self._storage.buffered,
+            auth_state=self._tokens.state,
+            login_command=self._tokens.login_command,
+            rows_written=self._storage.written,
+            rows_dropped=self._storage.dropped,
+            rows_rejected=self._storage.rejected,
+        )
 
     def stop(self) -> None:
         """Disconnect; the next start records the time from here as a gap."""
@@ -321,6 +373,8 @@ class Collector:
         self._feed({"kind": "rest", "endpoint": "getVehicleStatus", "payload": answer})
 
     async def _on_raw(self, topic: str, payload: bytes) -> None:
+        if match := MOWER_TOPIC.match(topic):
+            self._heard[match.group(1)] = self._clock()
         self._feed({"kind": "mqtt", "topic": topic, "payload": _parse(payload)})
 
     def _feed(self, record: dict[str, object]) -> None:
@@ -379,6 +433,11 @@ class Collector:
 def _loggable(text: str, token: str) -> str:
     """Vendor error text is logged: keep it short and free of the token it was sent."""
     return redact(text, [token]).rstrip(": ")[:300]
+
+
+def _age(now: float, then: float) -> float:
+    """Seconds from `then` to `now`, to the millisecond; never negative if the clock is set back."""
+    return round(max(now - then, 0.0), 3)
 
 
 def _read_marker(path: Path) -> float | None:

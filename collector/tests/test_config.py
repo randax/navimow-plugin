@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from navimow_collector.cli import main
+from navimow_collector.config import load_config
 
 DSN = "postgresql://mower:hunter2@db.example/navimow"
 
@@ -123,3 +124,42 @@ def test_the_state_directory_of_live_collection_is_configurable(
     assert 'state_dir = "/var/lib/navimow-collector"' in show(capsys, "--config", str(config))
     monkeypatch.setenv("NAVIMOW_COLLECTOR_STATE_DIR", "/srv/mower")
     assert 'state_dir = "/srv/mower"' in show(capsys, "--config", str(config))
+
+
+def test_health_listens_on_localhost_by_default(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert load_config(write(tmp_path, "")).health.address() == ("127.0.0.1", 9477)
+    assert 'listen = "127.0.0.1:9477"' in show(capsys, "--config", str(write(tmp_path, "")))
+
+
+@pytest.mark.parametrize(
+    ("listen", "address"),
+    [
+        ("0.0.0.0:9100", ("0.0.0.0", 9100)),
+        ("[::]:9477", ("::", 9477)),
+        ("localhost:0", ("localhost", 0)),
+        ("", None),  # no health endpoint at all
+    ],
+)
+def test_the_health_address_is_configurable(
+    tmp_path: Path, listen: str, address: tuple[str, int] | None
+) -> None:
+    config = write(tmp_path, f'[health]\nlisten = "{listen}"\n')
+    assert load_config(config).health.address() == address
+
+
+def test_the_health_address_can_come_from_the_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NAVIMOW_HEALTH_LISTEN", "0.0.0.0:9000")
+    assert load_config(write(tmp_path, "")).health.address() == ("0.0.0.0", 9000)
+
+
+@pytest.mark.parametrize("listen", ["9477", "host:", ":9477", "host:http", "host:70000", "[::"])
+def test_an_unusable_health_address_is_rejected_by_name(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], listen: str
+) -> None:
+    config = write(tmp_path, f'[health]\nlisten = "{listen}"\n')
+    assert main(["--config", str(config), "config"]) == 2
+    assert "health.listen" in capsys.readouterr().err

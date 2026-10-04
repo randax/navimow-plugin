@@ -55,7 +55,7 @@ def _pg_bindir() -> Path | None:
     return Path(candidates[-1]) if candidates else None
 
 
-def _free_port() -> int:
+def free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return int(s.getsockname()[1])
@@ -73,7 +73,7 @@ def postgres_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
     if bindir is None:
         pytest.skip("no PostgreSQL: set NAVIMOW_TEST_POSTGRES_DSN or install initdb/pg_ctl")
     data = tmp_path_factory.mktemp("pgdata")
-    port = _free_port()
+    port = free_port()
     subprocess.run(
         [bindir / "initdb", "-D", data, "-U", "postgres", "-A", "trust"],
         check=True,

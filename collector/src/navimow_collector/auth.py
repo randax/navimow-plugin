@@ -216,7 +216,7 @@ class TokenClient:
 
 
 class AuthState(StrEnum):
-    """An observable state a future health endpoint can report verbatim."""
+    """An observable state the health endpoint reports verbatim."""
 
     FRESH = "fresh"
     REFRESHING = "refreshing"
@@ -233,10 +233,14 @@ class TokenManager:
         store: TokenStore,
         *,
         clock: Callable[[], float] = time,
+        login_command: str = "navimow-collector login",
     ) -> None:
         self._client = client
         self._store = store
         self._clock = clock
+        # What the operator must run to log in again, as this process was configured: the
+        # log says it in so many words and the health endpoint repeats it.
+        self.login_command = login_command
         # One refresh at a time: the refresh token may rotate, so a second concurrent refresh
         # would spend a token the first has already replaced.
         self._lock = asyncio.Lock()
@@ -247,9 +251,7 @@ class TokenManager:
         self._on_disk = self._credential
         self.state = AuthState.FRESH if self._credential else AuthState.RELOGIN_REQUIRED
         if self._credential is None:
-            _LOGGER.error(
-                "No usable Navimow login in %s; run `navimow-collector login`", store.path
-            )
+            self._ask_for_login(logging.ERROR, "No usable Navimow login in %s", store.path)
         self.next_attempt_at: float | None = None
         self._failures = 0
         # The access token a caller has reported as rejected, until a refresh replaces it.
@@ -427,8 +429,12 @@ class TokenManager:
             self.state = AuthState.RELOGIN_REQUIRED
             # Still probed hourly: a gateway's 401/403 page can look like a dead grant.
             self.next_attempt_at = now + RETRY_DELAYS[-1]
-            _LOGGER.error(
-                "Navimow rejected the stored login (%s); run `navimow-collector login`", detail
+            # An error once, on entering the state; the hourly probe only reminds.
+            self._ask_for_login(
+                logging.WARNING if probing else logging.ERROR,
+                "Navimow %s the stored login (%s)",
+                "still rejects" if probing else "rejected",
+                detail,
             )
             return
         delay = RETRY_DELAYS[min(self._failures, len(RETRY_DELAYS) - 1)]
@@ -437,15 +443,26 @@ class TokenManager:
         self.state = AuthState.RETRY_PENDING
         if delay == RETRY_DELAYS[-1]:
             # Hours of failure may be a dead grant in words we do not recognise.
-            _LOGGER.error(
-                "Navimow token refresh keeps failing (%s); retrying hourly. If this persists, "
-                "run `navimow-collector login`",
+            self._ask_for_login(
+                logging.ERROR,
+                "Navimow token refresh keeps failing (%s); retrying hourly, but if this "
+                "persists a new login is needed",
                 detail,
             )
         else:
             _LOGGER.warning(
                 "Navimow token refresh failed; retrying in %s seconds: %s", delay, detail
             )
+
+    def _ask_for_login(self, level: int, message: str, *args: object) -> None:
+        """Log `message`, then the exact login to run, in the text and as a `command` field."""
+        _LOGGER.log(
+            level,
+            f"{message}; run `%s`",
+            *args,
+            self.login_command,
+            extra={"command": self.login_command},
+        )
 
 
 def authorization_url(client_id: str, redirect_uri: str, state: str) -> str:

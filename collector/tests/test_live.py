@@ -11,6 +11,10 @@ import gzip
 import json
 import os
 import signal
+import socket
+import threading
+import time
+import urllib.request
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -22,8 +26,16 @@ import psycopg
 import pytest
 from mower_sdk.http import HTTPClientError
 
-from navimow_collector.auth import RETRY_DELAYS, Credential, TokenClient, TokenManager
+from navimow_collector import live as live_module
+from navimow_collector.auth import (
+    RETRY_DELAYS,
+    AuthState,
+    Credential,
+    TokenClient,
+    TokenManager,
+)
 from navimow_collector.cli import main
+from navimow_collector.health import STALL_SECONDS, Snapshot, status_code
 from navimow_collector.live import (
     DRAIN_SECONDS,
     KEEPALIVE_SECONDS,
@@ -35,7 +47,7 @@ from navimow_collector.live import (
 )
 from navimow_collector.storage.buffered import REPLAY_ROWS, RETRY_SECONDS, BufferedStorage
 
-from .conftest import FIXTURE, Clock, gaps
+from .conftest import FIXTURE, Clock, free_port, gaps
 from .test_auth import Request, Response, logged_in, token
 from .test_buffer import Database, points
 
@@ -714,6 +726,119 @@ def test_points_survive_a_database_outage_while_live(live: Live) -> None:
     assert [row[1] for row in live.trail()] == [at(NOW + 1), at(NOW + 3), at(NOW + 5)]
 
 
+def test_health_reports_each_mowers_last_message_age(database: str, tmp_path: Path) -> None:
+    live = Live(database, tmp_path, "DEVICE_1", "DEVICE_2", "DEVICE_3")
+
+    async def scenario() -> Collector:
+        collector = await live.connected()
+        await live.broker.deliver(LOCATION.format("DEVICE_1"), pose(at(NOW)))
+        live.clock.now = NOW + 40
+        await live.broker.deliver("/downlink/vehicle/DEVICE_2/realtimeDate/state", {"s": 1})
+        live.clock.now = NOW + 65
+        return collector
+
+    snapshot = asyncio.run(scenario()).snapshot()
+
+    # DEVICE_3 is on the account but has said nothing yet: no age, rather than a fresh one.
+    assert snapshot.last_message_ages == {"DEVICE_1": 65.0, "DEVICE_2": 25.0, "DEVICE_3": None}
+
+
+def test_health_reports_the_broker_the_database_and_the_buffer(live: Live) -> None:
+    async def scenario() -> list[Snapshot]:
+        collector = await live.connected()
+        seen = [collector.snapshot()]
+        live.db.go_down()
+        await live.broker.deliver(LOCATION.format("DEVICE_1"), pose(at(NOW + 1)))
+        await live.broker.deliver(LOCATION.format("DEVICE_1"), pose(at(NOW + 2)))
+        await live.broker.drop()
+        seen.append(collector.snapshot())
+        live.db.down = False
+        live.clock.now = NOW + RETRY_SECONDS
+        await collector.tick()
+        seen.append(collector.snapshot())
+        return seen
+
+    healthy, outage, recovered = asyncio.run(scenario())
+
+    assert (healthy.broker_connected, healthy.database_reachable, healthy.buffered_rows) == (
+        True,
+        True,
+        0,
+    )
+    assert (outage.broker_connected, outage.database_reachable, outage.buffered_rows) == (
+        False,
+        False,
+        2,
+    )
+    assert status_code(outage) == 200  # reported, not failed: a restart would not help
+    assert (recovered.database_reachable, recovered.buffered_rows) == (True, 0)
+    assert recovered.rows_written == 2  # the backlog counts once it is written
+
+
+def test_health_fails_once_the_collection_loop_stops_ticking(live: Live) -> None:
+    collector = live.start()
+    asyncio.run(collector.tick())
+    live.clock.now = NOW + STALL_SECONDS + 1
+
+    stalled = collector.snapshot()
+    asyncio.run(collector.tick())
+
+    assert (stalled.seconds_since_tick, status_code(stalled)) == (STALL_SECONDS + 1, 503)
+    assert (collector.snapshot().seconds_since_tick, status_code(collector.snapshot())) == (0, 200)
+
+
+def test_a_hung_vendor_call_neither_stalls_the_loop_nor_is_abandoned(
+    live: Live, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tick waits only briefly on the vendor, so a hung token refresh cannot fail the health
+    check; the refresh carries on meanwhile, since cutting it short could spend the rotated
+    refresh token it is about to return."""
+    monkeypatch.setattr(live_module, "VENDOR_WAIT_SECONDS", 0.01)
+    answered = asyncio.Event()
+    asked = live.vendor.request
+
+    class Held(Request):
+        async def __aenter__(self) -> Response:
+            await answered.wait()
+            return self.response
+
+    def request(method: str, url: str, **kwargs: Any) -> Request:
+        sent = asked(method, url, **kwargs)
+        return Held(sent.response) if url.endswith("oauth/getAccessToken") else sent
+
+    monkeypatch.setattr(live.vendor, "request", request)
+    live.clock.now = NOW + 3400  # the token is due for its refresh
+
+    async def scenario() -> tuple[Snapshot, Collector]:
+        collector = live.start()
+        live.clock.now += STALL_SECONDS + 60
+        await collector.tick()  # the refresh hangs; the tick completes all the same
+        hung = collector.snapshot()
+        assert live.brokers == []
+        answered.set()
+        await collector.tick()
+        return hung, collector
+
+    hung, collector = asyncio.run(scenario())
+
+    assert (hung.seconds_since_tick, status_code(hung)) == (0, 200)
+    assert live.brokers  # the refresh finished and collection went on with its token
+    stored = live.store.load()
+    assert stored is not None and stored.access_token == "access-1"
+
+
+def test_a_required_login_is_reported_apart_from_liveness(live: Live) -> None:
+    live.store.path.unlink()
+    collector = live.start()
+    asyncio.run(collector.tick())
+
+    snapshot = collector.snapshot()
+
+    assert snapshot.auth_state is AuthState.RELOGIN_REQUIRED
+    assert snapshot.reauth_required
+    assert status_code(snapshot) == 200  # a credential problem never restarts the collector
+
+
 def test_collecting_continues_until_stopped_then_disconnects(live: Live) -> None:
     async def scenario() -> None:
         stop = asyncio.Event()
@@ -930,10 +1055,79 @@ def test_the_collect_command_collects_until_it_is_signalled(
 ) -> None:
     monkeypatch.setenv("NAVIMOW_AUTH_STATE_FILE", str(live.store.path))
     monkeypatch.setenv("NAVIMOW_COLLECTOR_STATE_DIR", str(live.state))
+    monkeypatch.setenv("NAVIMOW_HEALTH_LISTEN", "127.0.0.1:0")
     session = stopped_at_its_first_request(live)
 
     assert main(["--config", str(config_file), "collect"], session_factory=session) == 0
     assert "smarthome/authList" in live.vendor.calls  # it got as far as looking for mowers
+
+
+@pytest.mark.parametrize("named_by", ["option", "environment"])
+def test_the_collect_command_serves_health_and_names_the_login_to_run(
+    live: Live,
+    config_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    named_by: str,
+) -> None:
+    # A systemd unit or container names its configuration in NAVIMOW_CONFIG, which the
+    # operator's shell lacks: the login to run must name the file either way.
+    argv = ["--config", str(config_file), "collect"]
+    if named_by == "environment":
+        monkeypatch.setenv("NAVIMOW_CONFIG", str(config_file))
+        argv = ["collect"]
+    live.store.path.unlink()  # no login yet: the collector waits for one, healthy all along
+    port = free_port()
+    monkeypatch.setenv("NAVIMOW_AUTH_STATE_FILE", str(live.store.path))
+    monkeypatch.setenv("NAVIMOW_COLLECTOR_STATE_DIR", str(live.state))
+    monkeypatch.setenv("NAVIMOW_HEALTH_LISTEN", f"127.0.0.1:{port}")
+    answers: list[tuple[int, dict[str, Any], str]] = []
+
+    def check_then_stop() -> None:
+        """A container health check and a scraper, then the service manager's SIGTERM."""
+        deadline = time.monotonic() + 10
+        while not answers and time.monotonic() < deadline:
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/health") as health:
+                    status, body = health.status, json.load(health)
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/metrics") as metrics:
+                    answers.append((status, body, metrics.read().decode()))
+            except OSError:
+                time.sleep(0.05)  # not serving yet
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    checker = threading.Thread(target=check_then_stop)
+    checker.start()
+    assert main(argv, session_factory=lambda: live.vendor) == 0
+    checker.join()
+
+    [(status, body, metrics)] = answers
+    assert status == 200
+    assert body["auth"]["state"] == "relogin-required"
+    assert "\nnavimow_collector_reauth_required 1\n" in metrics
+    command = f"navimow-collector --config {config_file} login"
+    assert body["auth"]["login_command"] == command
+    assert any(r.__dict__.get("command") == command for r in caplog.records)
+
+
+def test_the_collect_command_refuses_to_start_if_health_cannot_listen(
+    live: Live,
+    config_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("NAVIMOW_AUTH_STATE_FILE", str(live.store.path))
+    monkeypatch.setenv("NAVIMOW_COLLECTOR_STATE_DIR", str(live.state))
+    session = stopped_at_its_first_request(live)
+    with socket.socket() as taken:
+        taken.bind(("127.0.0.1", 0))
+        taken.listen()
+        monkeypatch.setenv("NAVIMOW_HEALTH_LISTEN", f"127.0.0.1:{taken.getsockname()[1]}")
+
+        assert main(["--config", str(config_file), "collect"], session_factory=session) == 2
+
+    assert "health.listen" in capsys.readouterr().err
+    assert live.vendor.calls == []
 
 
 def test_the_collect_command_refuses_to_start_without_a_writable_state_directory(

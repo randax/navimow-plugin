@@ -64,15 +64,37 @@ class CollectorConfig:
 
 
 @dataclass(frozen=True)
+class HealthConfig:
+    """Where `collect` serves /health and /metrics: `host:port`, or empty for nowhere.
+
+    Loopback by default, which a container's own health check reaches; a scraper in
+    another container or host needs `0.0.0.0:9477`.
+    """
+
+    listen: str = "127.0.0.1:9477"
+
+    def address(self) -> tuple[str, int] | None:
+        if not self.listen:
+            return None
+        host, _, port = self.listen.rpartition(":")
+        if host.startswith("[") and host.endswith("]"):
+            host = host[1:-1]  # an IPv6 address, bracketed to set its port apart
+        if host and "[" not in host and "]" not in host and port.isdigit() and int(port) < 65536:
+            return host, int(port)
+        raise ConfigError(f"health.listen must be host:port or empty, not {self.listen!r}")
+
+
+@dataclass(frozen=True)
 class Config:
     storage: StorageConfig = StorageConfig()
     auth: AuthConfig = AuthConfig()
     collector: CollectorConfig = CollectorConfig()
+    health: HealthConfig = HealthConfig()
 
 
 def load_config(config_path: Path | None = None) -> Config:
     """Resolve TOML and environment values into the typed collector configuration."""
-    path = config_path or _environment_path()
+    path = resolve_config_path(config_path)
     values = _load_toml(path) if path is not None else {}
     _validate_sections(values)
     defaults = Config()
@@ -88,10 +110,14 @@ def load_config(config_path: Path | None = None) -> Config:
     # automatic; mypy cannot infer the dynamically assembled field names.
     config = replace(defaults, **sections)
     _validate_backend(config.storage.backend)
+    config.health.address()  # only to validate: a bad address fails here, not at bind time
     return config
 
 
-def _environment_path() -> Path | None:
+def resolve_config_path(config_path: Path | None = None) -> Path | None:
+    """The configuration file in use: the one given, or the one NAVIMOW_CONFIG names."""
+    if config_path is not None:
+        return config_path
     value = os.environ.get("NAVIMOW_CONFIG")
     return Path(value) if value else None
 

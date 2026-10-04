@@ -59,9 +59,9 @@ navimow-collector login --code 'http://localhost:1/callback?code=...'
 Credentials default to `~/.local/state/navimow-collector/tokens.json`; set
 `auth.state_file` to use an operational state directory instead.
 
-If Navimow rejects the stored login, the collector logs that
-`navimow-collector login` is needed and keeps running; it picks up the new
-login from the state file without a restart.
+If Navimow rejects the stored login, the collector logs the exact login command
+to run (see [Health and metrics](#health-and-metrics)) and keeps running; it
+picks up the new login from the state file without a restart.
 
 ## Live collection
 
@@ -158,6 +158,91 @@ write there. Should the directory stop being writable while it collects,
 collection goes on and the failure is logged every minute, but the connection
 note stays at its last value: the gap recorded at the next restart then starts
 too early and lies across Trail that was in fact collected.
+
+## Health and metrics
+
+While `collect` runs it serves two endpoints, by default on `127.0.0.1:9477`:
+
+```toml
+[health]
+listen = "127.0.0.1:9477"  # "0.0.0.0:9477" for a scraper elsewhere; "" serves neither
+```
+
+If that address cannot be used, `collect` does not start.
+
+`GET /health` (or `HEAD`) answers with a JSON report of every signal:
+
+```json
+{"status": "live", "seconds_since_tick": 2.5,
+ "broker": {"connected": true},
+ "mowers": {"DEVICE_1": {"last_message_age_seconds": 12.0},
+            "DEVICE_2": {"last_message_age_seconds": null}},
+ "database": {"reachable": true, "buffered_rows": 0,
+              "rows_written": 1500, "rows_dropped": 0, "rows_rejected": 0},
+ "auth": {"state": "fresh", "reauth_required": false,
+          "login_command": "navimow-collector --config /etc/navimow-collector.toml login"}}
+```
+
+A mower's age is `null` until it has sent something since the collector started.
+
+The status code is the health check: **200 while the collection loop is
+running, 503 only when it has not completed a tick for 120 seconds**, the one
+fault a restart fixes. A broker that is down, a database that is away and a
+login that needs renewing are all reported in the body and the metrics but
+answered with 200: reconnection and the buffer already deal with the first two,
+and no credential problem may ever restart the collector. A Navimow request
+that hangs, such as a token refresh, cannot stall the loop either: each tick waits
+at most 5 seconds for it, and the request carries on in the background. Use it as it is:
+
+```dockerfile
+HEALTHCHECK CMD curl -fsS http://127.0.0.1:9477/health || exit 1
+```
+
+Without curl in the image, `python -c "import urllib.request;
+urllib.request.urlopen('http://127.0.0.1:9477/health')"` fails the same way.
+
+`GET /metrics` serves the same signals in the Prometheus text format:
+
+| Metric | Type | Meaning |
+| --- | --- | --- |
+| `navimow_collector_seconds_since_tick` | gauge | seconds since the collection loop last completed a tick |
+| `navimow_collector_broker_connected` | gauge | 1 while the broker connection is up |
+| `navimow_collector_last_message_age_seconds{mower_id}` | gauge | seconds since the mower's last broker message, `NaN` until the first |
+| `navimow_collector_database_reachable` | gauge | 1 while the database answers |
+| `navimow_collector_buffered_rows` | gauge | rows waiting for the database |
+| `navimow_collector_reauth_required` | gauge | 1 when only `navimow-collector login` can restore access |
+| `navimow_collector_auth_state{state}` | gauge | 1 for the current state: `fresh`, `refreshing`, `retry-pending`, `relogin-required` |
+| `navimow_collector_rows_written_total` | counter | rows the database stored, backlog included |
+| `navimow_collector_rows_dropped_total` | counter | rows lost because no buffer could hold them |
+| `navimow_collector_rows_rejected_total` | counter | rows the database refused for what they hold |
+
+Database reachability is as of the last write or retry: while nothing is
+written it keeps its last value. A mower that is docked and quiet may send
+nothing for hours, so alert on its message age only together with the time of
+day or season you expect it to mow.
+
+To be alerted in Grafana when a login is needed, alert on:
+
+```promql
+navimow_collector_reauth_required == 1
+```
+
+and on collection stopping altogether with `absent(navimow_collector_seconds_since_tick)`
+or `navimow_collector_seconds_since_tick > 120`.
+
+**Logs** go to standard error as one JSON object per line, with `time`,
+`level`, `logger` and `message`, plus any fields specific to the line. When a
+login is needed the line says what to run, including the `--config` the
+collector was started with, and carries it in `command` as well:
+
+```json
+{"time": "2026-10-05T07:12:03.114Z", "level": "ERROR", "logger": "navimow_collector.auth", "message": "Navimow rejected the stored login (HTTP 400: Refresh token is invalid or server rejected the request); run `navimow-collector --config /etc/navimow-collector.toml login`", "command": "navimow-collector --config /etc/navimow-collector.toml login"}
+```
+
+That error is logged once, when the login is found rejected; the hourly check
+that finds it still rejected logs a warning with the same command.
+
+## Tests
 
 Run the tests with a local PostgreSQL installation (the suite starts `pg_ctl`
 automatically) or point it at an existing server:

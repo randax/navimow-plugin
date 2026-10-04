@@ -13,3 +13,8 @@ client_id = "homeassistant"
 [collector]
 # Holds the outage buffer and the note of when the stream last flowed.
 # state_dir = "/var/lib/navimow-collector"
+
+[health]
+# Where `collect` serves /health and /metrics; "" serves neither. Use 0.0.0.0:9477 for a
+# scraper on another host or container.
+listen = "127.0.0.1:9477"
