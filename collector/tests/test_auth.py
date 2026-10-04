@@ -529,3 +529,75 @@ def test_a_login_written_just_before_a_refresh_is_saved_is_kept(tmp_path: Path) 
 
     assert run(tokens.access_token()) == "relogged"
     assert stored(store).access_token == "relogged"
+
+
+def test_repeated_first_use_rejections_climb_the_retry_ladder(tmp_path: Path) -> None:
+    clock = Clock(1)
+    session = FakeSession([Response(200, token(f"minted-{n}")) for n in range(20)])
+    tokens = TokenManager(TokenClient(session, "id", "secret"), logged_in(tmp_path), clock=clock)
+    current = run(tokens.on_unauthorized("access"))
+    delays = []
+    for _ in range(4):
+        current = run(tokens.on_unauthorized(current))  # rejected on first use, again
+        assert tokens.next_attempt_at is not None
+        delays.append(tokens.next_attempt_at - clock.now)
+        clock.now = tokens.next_attempt_at
+        current = run(tokens.access_token())  # the scheduled retry mints another
+
+    assert delays == [60, 300, 900, 3600]
+
+
+def test_login_no_browser_keeps_the_config_in_the_follow_up_command(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = tmp_path / "my collector.toml"
+    config.write_text("[auth]\n")
+
+    assert main(["--config", str(config), "login", "--no-browser"]) == 0
+
+    assert f"navimow-collector --config '{config}' login --code" in capsys.readouterr().out
+
+
+def test_a_refresh_is_saved_even_after_the_state_file_was_deleted(tmp_path: Path) -> None:
+    store = logged_in(tmp_path)
+    tokens = manager(store, Response(200, token("new", "rotated")))
+    store.path.unlink()
+
+    assert run(tokens.access_token()) == "new"
+    assert stored(store) == Credential("new", "rotated", 3600, 3300)
+
+
+def test_an_unreadable_state_file_is_reported_once_not_per_call(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    store = TokenStore(tmp_path / "token.json")
+    store.path.mkdir()
+    tokens = manager(store)
+
+    for _ in range(5):
+        run(tokens.access_token())
+
+    assert len([r for r in caplog.records if "Could not read" in r.getMessage()]) == 1
+
+
+@pytest.mark.parametrize(
+    ("pasted", "code"),
+    [
+        ("localhost:1/callback?code=abc&state=x", "abc"),  # some address bars drop the scheme
+        ("bare-code-with-padding==", "bare-code-with-padding=="),
+    ],
+)
+def test_login_accepts_pasted_codes_in_the_forms_people_copy(
+    tmp_path: Path, pasted: str, code: str
+) -> None:
+    state_file = tmp_path / "tokens.json"
+    config = tmp_path / "collector.toml"
+    config.write_text(f'[auth]\nstate_file = "{state_file}"\n')
+    session = FakeSession([Response(200, token())])
+    assert (
+        main(["--config", str(config), "login", "--code", pasted], session_factory=lambda: session)
+        == 0
+    )
+
+    assert session.forms[0] is not None
+    assert session.forms[0]["code"] == code

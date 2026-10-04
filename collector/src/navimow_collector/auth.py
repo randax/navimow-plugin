@@ -95,8 +95,9 @@ class TokenStore:
             try:
                 current = self.load()
             except ValueError:
-                current = expected  # a corrupt file holds nothing worth keeping
-            if current != expected:
+                current = None
+            # A missing or corrupt file holds nothing worth keeping; only another login is.
+            if current is not None and current != expected:
                 return False
             self._write(credential)
             return True
@@ -236,6 +237,7 @@ class TokenManager:
         # One refresh at a time: the refresh token may rotate, so a second concurrent refresh
         # would spend a token the first has already replaced.
         self._lock = asyncio.Lock()
+        self._read_error: str | None = None  # the last unreadable-state warning, said once
         self._credential = self._read_store()
         # What the state file last held, so only a genuinely new login is adopted, never a
         # file left stale by a failed save.
@@ -315,10 +317,15 @@ class TokenManager:
 
     def _read_store(self) -> Credential | None:
         try:
-            return self._store.load()
+            credential = self._store.load()
         except (OSError, ValueError) as error:
-            _LOGGER.warning("Could not read Navimow login state: %s", error)
+            # Read on every call while awaiting a login, so say it once, not per call.
+            if str(error) != self._read_error:
+                _LOGGER.warning("Could not read Navimow login state: %s", error)
+            self._read_error = str(error)
             return None
+        self._read_error = None
+        return credential
 
     def _adopt_new_login(self) -> bool:
         """Pick up `navimow-collector login` run beside the service, so no restart is needed.
@@ -342,6 +349,9 @@ class TokenManager:
 
     async def _refresh(self, now: float, *, after_rejection: bool = False) -> None:
         assert self._credential is not None
+        # Replacing a token reported dead is an attempt at recovery, not proof of it: the
+        # retry ladder keeps climbing until a token survives to its proactive refresh.
+        recovering = after_rejection or self._rejected == self._credential.access_token
         self.state = AuthState.REFRESHING
         try:
             refreshed = await self._client.refresh(self._credential, now=now)
@@ -355,8 +365,9 @@ class TokenManager:
         # must keep serving even if the disk refuses it.
         self._credential = refreshed
         self._rejected = None
-        self._minted_for_rejection = refreshed.access_token if after_rejection else None
-        self._failures = 0
+        self._minted_for_rejection = refreshed.access_token if recovering else None
+        if not recovering:
+            self._failures = 0
         self.next_attempt_at = None
         self.state = AuthState.FRESH
         try:
@@ -404,6 +415,7 @@ class LoopbackListener:
         self._state = state
         self._code: str | None = None
         self._received = threading.Event()
+        self._accepting = threading.Lock()
         listener = self
 
         class CallbackHandler(BaseHTTPRequestHandler):
@@ -436,11 +448,12 @@ class LoopbackListener:
         code = parameters.get("code", [""])[0]
         if parsed.path != "/callback" or parameters.get("state") != [self._state] or not code:
             return False
-        if self._received.is_set():
-            return False  # exactly one login per listener; a replayed redirect changes nothing
-        self._code = code
-        self._received.set()
-        return True
+        with self._accepting:  # handler threads may race on a double-loaded redirect
+            if self._received.is_set():
+                return False  # exactly one login per listener; a replay changes nothing
+            self._code = code
+            self._received.set()
+            return True
 
     def __enter__(self) -> LoopbackListener:
         self._thread.start()

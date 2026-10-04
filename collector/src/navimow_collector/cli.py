@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import secrets
+import shlex
 import sys
 import webbrowser
 from collections.abc import Callable
@@ -105,7 +106,11 @@ def _login(
     client_id = config.auth.client_id
     if args.no_browser:
         print(authorization_url(client_id, MANUAL_REDIRECT_URI, secrets.token_urlsafe(32)))
-        print("After signing in, run navimow-collector login --code '<code-or-redirect-url>'.")
+        config_option = f"--config {shlex.quote(str(args.config))} " if args.config else ""
+        print(
+            f"After signing in, run navimow-collector {config_option}"
+            "login --code '<code-or-redirect-url>'."
+        )
         return 0
     if args.code:
         code, redirect_uri = _pasted_code(args.code), MANUAL_REDIRECT_URI
@@ -135,12 +140,12 @@ def _browser_code(client_id: str, timeout: float) -> tuple[str, str]:
 
 
 def _pasted_code(value: str) -> str:
-    """Accept either a copied code or the complete redirect URL from a failed browser load."""
-    parsed = urlparse(value.strip())
-    if parsed.scheme and parsed.netloc:
-        code = parse_qs(parsed.query).get("code", [""])[0]
-    else:
-        code = value.strip()
+    """Accept a copied code or the redirect URL from a failed browser load, with or without
+    its scheme (some address bars copy `localhost:1/callback?code=...`)."""
+    value = value.strip()
+    code = value
+    if "code=" in value:
+        code = parse_qs(urlparse(value).query or value.partition("?")[2]).get("code", [""])[0]
     if not code:
         raise ValueError("login code is missing")
     return code
