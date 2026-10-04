@@ -12,9 +12,10 @@ from ..config import StorageConfig
 from ..records import Gap, TrailPoint
 from .base import RejectedError, SchemaError, StorageError
 
-# Live collection writes from its event loop, so no database call may wait for long: a
-# connection attempt, a statement held up by a lock and a server that vanished mid-statement
-# each fail within seconds, which the live buffer then treats as an outage.
+# Live collection writes from its event loop, so a database call should not wait for long:
+# by default a connection attempt, a statement held up by a lock and a server that vanished
+# from the network each fail within seconds, which the live buffer treats as an outage.
+# These are defaults: whatever the operator set for the same thing is left alone.
 CONNECT_TIMEOUT_SECONDS = 5
 STATEMENT_TIMEOUT_MS = 5000
 _DEAD_PEER = {
@@ -78,8 +79,13 @@ class PostgresStorage:
             # The operator's DSN wins wherever it sets one of these itself.
             parameters = {**deadlines, **conninfo_to_dict(config.dsn.reveal())}
             self._connection = psycopg.connect(make_conninfo("", **parameters), autocommit=True)
+            # Only where nothing set it: not the DSN's options, the role, the database or
+            # the server's configuration. A statement that legitimately takes longer than
+            # this default would otherwise time out on every retry, for ever.
             self._connection.execute(
-                "SELECT set_config('statement_timeout', %s, false)", (str(STATEMENT_TIMEOUT_MS),)
+                "SELECT set_config('statement_timeout', %s, false) FROM pg_settings"
+                " WHERE name = 'statement_timeout' AND source = 'default'",
+                (str(STATEMENT_TIMEOUT_MS),),
             )
 
     def __enter__(self) -> PostgresStorage:

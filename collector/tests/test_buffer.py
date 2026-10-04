@@ -13,6 +13,7 @@ from pathlib import Path
 
 import psycopg
 import pytest
+from psycopg.conninfo import make_conninfo
 
 from navimow_collector.config import Secret, StorageConfig
 from navimow_collector.records import Gap, GapReason, TrailPoint
@@ -131,6 +132,26 @@ def test_a_locked_table_delays_rows_rather_than_stalling_the_collector(
     clock.now += RETRY_SECONDS
     storage.flush()
     assert db.trail() == [1, 2]
+
+
+def test_a_statement_timeout_the_operator_set_is_not_shortened(
+    database: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(postgres, "STATEMENT_TIMEOUT_MS", 200)
+    db = Database(make_conninfo(database, options="-c statement_timeout=30000"))
+    storage = buffered(db, tmp_path, Clock())
+    storage.write_trail(points(1))
+    slow = threading.Thread(target=lambda: storage.write_trail(points(2)), daemon=True)
+
+    with psycopg.connect(database) as maintenance:
+        maintenance.execute("LOCK TABLE trail_point IN ACCESS EXCLUSIVE MODE")
+        slow.start()
+        slow.join(1)  # five times the collector's own limit
+        assert slow.is_alive()
+    slow.join(5)
+
+    assert db.trail() == [1, 2]
+    assert storage.buffered == 0
 
 
 def test_a_database_host_that_never_answers_is_given_up_on(

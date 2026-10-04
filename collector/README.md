@@ -122,11 +122,18 @@ itself (unreadable, or not removable after its rows were written) is logged and
 costs at most the rows in that file; it never stops collection. Emptying or
 deleting the file by hand is safe at any time and costs only the rows in it.
 
-A slow database counts as an outage too. The collector gives a connection
-attempt 5 seconds and a statement 5 seconds (a lock held by maintenance
-included), and uses TCP keep-alives to notice a server that vanished, so no
-database problem holds collection up for longer than that. A `connect_timeout`
-or keep-alive setting in the DSN replaces the collector's own.
+A slow database counts as an outage too. By default a connection attempt gets
+5 seconds and each statement 5 seconds (a lock held by maintenance included),
+and TCP keep-alives notice a server that vanished from the network. These are
+defaults, for `collect`, `replay` and migrations alike: a `connect_timeout` or
+keep-alive setting in the DSN is used instead, and so is a `statement_timeout`
+set anywhere at all (the DSN's `options`, the role, the database or the server
+configuration).
+
+Database work still happens on the collector's own event loop, so while one
+call waits, up to those limits, nothing else is done. The limits do not cover a
+server that keeps its connection open but stops answering, such as a suspended
+backend: that holds collection up until it answers.
 
 ```toml
 [collector]
