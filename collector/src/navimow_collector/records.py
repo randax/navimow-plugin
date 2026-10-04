@@ -103,12 +103,15 @@ def _timestamp(value: object) -> datetime | None:
 
 def _int(value: object) -> int | None:
     # Numbers on this wire sometimes arrive as strings, so accept "4" as well as 4.
-    if isinstance(value, bool):
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
         return None
     try:
-        return int(value) if isinstance(value, (int, str)) else None
+        number = int(value)
     except ValueError:
         return None
+    # Beyond a 32-bit column it is noise, and a row no database accepts would never leave
+    # the live buffer.
+    return number if -(2**31) <= number < 2**31 else None
 
 
 def _float(value: object) -> float | None:

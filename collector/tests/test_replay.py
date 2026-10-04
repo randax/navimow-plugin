@@ -125,6 +125,25 @@ def test_migration_can_be_disabled(
         assert conn.execute("SELECT to_regclass('trail_point')").fetchone() == (None,)
 
 
+def test_a_state_the_schema_cannot_hold_is_stored_as_unknown(
+    config_file: Path, database: str, tmp_path: Path
+) -> None:
+    # A row the database can never accept would wait in the live buffer for ever.
+    capture = tmp_path / "state.jsonl"
+    pose = {"time": 1788084160000, "type": 1, "postureX": 1, "postureY": 2, "postureTheta": 3}
+    record = {
+        "recv_ms": 1788084160500,
+        "kind": "mqtt",
+        "topic": "/downlink/vehicle/DEVICE_1/realtimeDate/location",
+        "payload": [{**pose, "vehicleState": 2**40}],
+    }
+    capture.write_text(json.dumps(record) + "\n")
+
+    assert main(["--config", str(config_file), "replay", str(capture)]) == 0
+
+    assert [(row[3], row[6]) for row in trail(database)] == [(1.0, None)]
+
+
 def test_a_gap_record_becomes_a_gap_row(config_file: Path, database: str, tmp_path: Path) -> None:
     # What the live transport feeds the core on every reconnection or restart.
     capture = tmp_path / "gap.jsonl"
