@@ -209,5 +209,47 @@ describe('resolveBaseMap', () => {
           'A custom Base map URL cannot carry a user name or password before its host: browsers refuse to request it.',
       });
     });
+
+    // {ratio} is nothing at all on an ordinary screen, so before the host it leaves no user name behind.
+    test.each([
+      'https://{ratio}@tiles.example.com/{z}/{x}/{y}.png',
+      'https://:{ratio}@tiles.example.com/{z}/{x}/{y}.png',
+      'https://{ratio}:{ratio}@tiles.example.com/{z}/{x}/{y}{ratio}.png',
+    ])('%p is accepted, {ratio} being filled with what the map puts there', (url) => {
+      expect(custom({ url })).toMatchObject({ source: { tiles: [url] } });
+    });
+
+    test('a brace in a user name is no brace in the host name, a line break in between or not', () => {
+      for (const url of [
+        'https://user{bad}@tiles.example.com/{z}/{x}/{y}.png',
+        'https://user{bad}\n@tiles.example.com/{z}/{x}/{y}.png',
+        'https://a@b{bad}\t@tiles.example.com/{z}/{x}/{y}.png',
+      ]) {
+        expect(custom({ url })).toEqual({
+          problem:
+            'A custom Base map URL cannot carry a user name or password before its host: browsers refuse to request it.',
+        });
+      }
+      expect(custom({ url: 'https://user@{s}.tiles.\nexample.com/{z}/{x}/{y}.png' })).toEqual({
+        problem: expect.stringContaining('has {s} in its host name'),
+      });
+    });
+
+    test('tens of thousands of unmatched braces are checked as promptly as any other URL', () => {
+      const started = performance.now();
+      const braces = '{'.repeat(40_000);
+      const inFragment = `https://tiles.example.com/{z}/{x}/{y}.png#${braces}`;
+      expect(custom({ url: inFragment })).toMatchObject({ source: { tiles: [inFragment] } });
+      const inHost = `https://${braces}.example.com/{z}/{x}/{y}.png`;
+      expect(custom({ url: inHost })).toMatchObject({ source: { tiles: [inHost] } });
+      // Milliseconds when the check is linear in the URL's length; it took seconds when it was not.
+      expect(performance.now() - started).toBeLessThan(1000);
+    });
+
+    test('of nested braces, the innermost pair is the placeholder', () => {
+      expect(custom({ url: 'https://{{s}.tiles.example.com/{{z}}/{x}/{y}.png' })).toEqual({
+        problem: expect.stringContaining('has {s} in its host name'),
+      });
+    });
   });
 });

@@ -110,6 +110,9 @@ const placeholders = (slot: CustomSlot): string[] => [
 ];
 const list = (items: string[]): string =>
   [items.slice(0, -1).join(', '), ...items.slice(-1)].filter(Boolean).join(' and ');
+// Any braced name, the innermost of nested ones. Excluding "{" inside keeps the search linear in the
+// URL's length: without that, a long run of unmatched braces took seconds to get through.
+const PLACEHOLDER = /\{[^{}]*\}/g;
 
 /**
  * The placeholders left unfilled in a template's host name and port, as written, past any user
@@ -118,14 +121,19 @@ const list = (items: string[]): string =>
  * brace can be harmless, in a filter value, a fragment, or a path segment the browser folds away.
  */
 const unfilledInHost = (template: string, slot: CustomSlot): string[] => {
-  const host = /^https?:[/\\]*([^/\\?#]*)/i.exec(template)?.[1].replace(/^.*@/, '') ?? '';
-  return [...new Set(host.match(/\{[^}]*\}/g))].filter((p) => !placeholders(slot).includes(p));
+  // As a browser reads it: tabs and line breaks dropped, and the user name ending at the last @.
+  const authority = /^https?:[/\\]*([^/\\?#]*)/i.exec(template.replace(/[\t\n\r]/g, ''))?.[1] ?? '';
+  const host = authority.slice(authority.lastIndexOf('@') + 1);
+  return [...new Set(host.match(PLACEHOLDER))].filter((p) => !placeholders(slot).includes(p));
 };
 
-/** The URL as a browser would request it for one tile, if it is an http(s) URL a browser can parse. */
+/**
+ * The URL as a browser would request it for one tile, if it is an http(s) URL a browser can parse.
+ * {ratio} is filled as the map fills it on an ordinary screen, with nothing; the rest with a digit.
+ */
 const filledIn = (template: string): URL | undefined => {
   try {
-    const url = new URL(template.replace(/\{[^}]*\}/g, '0'));
+    const url = new URL(template.replaceAll('{ratio}', '').replace(PLACEHOLDER, '0'));
     return /^https?:$/.test(url.protocol) ? url : undefined;
   } catch {
     return undefined;
