@@ -2,10 +2,12 @@
 import type { RasterSourceSpecification } from 'maplibre-gl';
 import {
   CUSTOM_BASE_MAP,
-  customTiles,
+  customRaster,
   KARTVERKET_ATTRIBUTION,
+  presetSource,
   type CustomSlot,
   type CustomSourceOptions,
+  type Preset,
 } from './baseMap';
 
 export type OverlayPreset = 'kartverket-hillshade';
@@ -25,13 +27,7 @@ export interface Overlay {
 /** An Overlay to draw, nothing when none is chosen, or a problem to show the owner instead of a map. */
 export type ResolvedOverlay = { overlay?: Overlay } | { problem: string };
 
-interface Preset {
-  label: string;
-  description: string;
-  source: RasterSourceSpecification;
-}
-
-export const OVERLAY_PRESETS: Record<OverlayPreset, Preset> = {
+export const OVERLAY_PRESETS: Record<OverlayPreset, Preset<RasterSourceSpecification>> = {
   'kartverket-hillshade': {
     label: 'Kartverket hillshade',
     description: "Shaded relief from Norway's national elevation model.",
@@ -61,14 +57,7 @@ export function resolveOverlay({ preset = 'none', custom, opacity }: OverlayOpti
   if (preset === 'none') {
     return {};
   }
-  if (preset !== 'custom') {
-    const known = Object.hasOwn(OVERLAY_PRESETS, preset) ? OVERLAY_PRESETS[preset] : undefined;
-    return known
-      ? { overlay: { source: known.source, opacity: drawnOpacity(opacity) } }
-      : { problem: `Unknown Overlay "${preset}". Choose another under Overlay in the panel options.` };
-  }
-  const tiles = customTiles(CUSTOM_OVERLAY, custom);
-  return 'problem' in tiles
-    ? tiles
-    : { overlay: { source: { type: 'raster', ...tiles }, opacity: drawnOpacity(opacity) } };
+  const resolved =
+    preset === 'custom' ? customRaster(CUSTOM_OVERLAY, custom) : presetSource('Overlay', OVERLAY_PRESETS, preset);
+  return 'problem' in resolved ? resolved : { overlay: { source: resolved.source, opacity: drawnOpacity(opacity) } };
 }

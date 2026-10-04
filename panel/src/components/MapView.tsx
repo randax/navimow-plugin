@@ -1,12 +1,11 @@
-import React, { Component, useEffect, useMemo, useRef, type ReactNode } from 'react';
+import React, { Component, useEffect, useRef, useState, type ReactNode } from 'react';
 import { css } from '@emotion/css';
 import { GPUInitializationError, Map, Marker, setWorkerUrl, type GeoJSONSource } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { framedBounds, nextFraming, type Framing } from '../model/framing';
 import { mapStyle, type MapSources } from '../model/style';
 import type { MowerMarker, TrailScene } from '../model/trail';
-import type { View } from '../model/terrain';
-import { cameraFor, type Camera } from '../model/view';
+import { cameraFor, type Camera, type View } from '../model/view';
 import { PanelMessage } from './PanelMessage';
 
 declare let __webpack_public_path__: string;
@@ -70,7 +69,12 @@ interface Props extends MapSources {
  */
 const useByValue = <T,>(value: T): T => {
   const json = JSON.stringify(value);
-  return useMemo(() => (json === undefined ? undefined : JSON.parse(json)) as T, [json]);
+  const [kept, keep] = useState({ value, json });
+  if (kept.json !== json) {
+    keep({ value, json });
+    return value;
+  }
+  return kept.value;
 };
 
 /**

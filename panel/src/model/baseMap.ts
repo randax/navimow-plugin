@@ -18,11 +18,22 @@ export interface BaseMapOptions {
 /** A source ready to draw, or a problem to show the owner instead of a map. */
 export type ResolvedBaseMap = { source: RasterSourceSpecification } | { problem: string };
 
-interface Preset {
+/** A built-in, named source, as a picker offers it. */
+export interface Preset<S> {
   label: string;
   description?: string;
-  source: RasterSourceSpecification;
+  source: S;
 }
+
+/** A Preset's source, or the problem to show for an id this version does not know. */
+export const presetSource = <S>(
+  slot: string,
+  presets: Record<string, Preset<S>>,
+  id: string
+): { source: S } | { problem: string } =>
+  Object.hasOwn(presets, id)
+    ? { source: presets[id].source }
+    : { problem: `Unknown ${slot} "${id}". Choose another under ${slot} in the panel options.` };
 
 export const KARTVERKET_ATTRIBUTION = '<a href="https://www.kartverket.no/">© Kartverket</a>';
 
@@ -35,7 +46,7 @@ const kartverket = (layer: string): RasterSourceSpecification => ({
   attribution: KARTVERKET_ATTRIBUTION,
 });
 
-export const BASE_MAP_PRESETS: Record<BaseMapPreset, Preset> = {
+export const BASE_MAP_PRESETS: Record<BaseMapPreset, Preset<RasterSourceSpecification>> = {
   'kartverket-topo': { label: 'Kartverket topo', source: kartverket('topo') },
   'kartverket-grey': { label: 'Kartverket topo gråtone', source: kartverket('topograatone') },
   'kartverket-toporaster': { label: 'Kartverket turkart (toporaster)', source: kartverket('toporaster') },
@@ -122,14 +133,12 @@ export function customTiles(
   return { tiles: [url.trim()], tileSize, maxzoom, attribution: escapeHtml(attribution.trim()) };
 }
 
-// Saved panels can outlive a preset, or predate these options entirely.
-export function resolveBaseMap({ preset, custom }: BaseMapOptions = { preset: 'kartverket-topo' }): ResolvedBaseMap {
-  if (preset !== 'custom') {
-    const known = Object.hasOwn(BASE_MAP_PRESETS, preset) ? BASE_MAP_PRESETS[preset] : undefined;
-    return known
-      ? { source: known.source }
-      : { problem: `Unknown Base map "${preset}". Choose another under Base map in the panel options.` };
-  }
-  const tiles = customTiles(CUSTOM_BASE_MAP, custom);
+/** A custom Base map or Overlay: both are drawn as plain raster tiles. */
+export function customRaster(slot: CustomSlot, custom?: CustomSourceOptions): ResolvedBaseMap {
+  const tiles = customTiles(slot, custom);
   return 'problem' in tiles ? tiles : { source: { type: 'raster', ...tiles } };
 }
+
+// Saved panels can outlive a preset, or predate these options entirely.
+export const resolveBaseMap = ({ preset, custom }: BaseMapOptions = { preset: 'kartverket-topo' }): ResolvedBaseMap =>
+  preset === 'custom' ? customRaster(CUSTOM_BASE_MAP, custom) : presetSource('Base map', BASE_MAP_PRESETS, preset);

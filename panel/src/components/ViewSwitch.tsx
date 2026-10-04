@@ -2,12 +2,7 @@ import React from 'react';
 import { css } from '@emotion/css';
 import type { GrafanaTheme2 } from '@grafana/data';
 import { RadioButtonGroup, useStyles2 } from '@grafana/ui';
-import type { View } from '../model/terrain';
-
-export const VIEWS: Array<{ value: View; label: string }> = [
-  { value: 'flat', label: 'Flat' },
-  { value: 'terrain', label: 'Terrain' },
-];
+import { VIEWS, type View } from '../model/view';
 
 /** The on-panel control that switches the map between flat and terrain. */
 export const ViewSwitch: React.FC<{ view: View; onChange: (view: View) => void }> = ({ view, onChange }) => {

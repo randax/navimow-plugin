@@ -57,12 +57,13 @@ Terrain is independent of the Base map, so any Base map works with any **Source*
   elevation model.
 - **AWS Terrain Tiles**: worldwide, with 10 m detail in Norway from the same model.
 - **Custom**: your own elevation tiles, as a tile URL with `{z}`, `{x}` and `{y}`, with their
-  encoding (Terrarium or Mapbox), tile size, max zoom and attribution.
+  encoding, tile size, max zoom and attribution. The encoding is Terrarium or Mapbox; tiles in an
+  encoding of their own, with custom colour factors, are not supported.
 
 ## Overlay
 
-An Overlay is one extra layer drawn over the Base map and under the Trail, with an **Opacity**
-slider. Choose it under **Overlay**:
+An Overlay is drawn over the Base map and under the Trail, with an **Opacity** slider. Choose it
+under **Overlay**:
 
 - **Kartverket hillshade**: shaded relief from Norway's national elevation model, which shows the
   lie of the land in the flat view too.

@@ -2,6 +2,7 @@ import path from 'node:path';
 import type { Locator, Page } from '@playwright/test';
 import { test as base, expect } from '@grafana/plugin-e2e';
 import type { Dashboard } from '@grafana/plugin-e2e';
+import type { Camera as MapCamera } from '../src/model/view';
 
 const PLUGIN_ID = 'randax-navimowmap-panel';
 const LIVE_TILES = Boolean(process.env.LIVE_TILES);
@@ -22,7 +23,9 @@ const test = base.extend<{
   openMap: (title: string) => Promise<Locator>;
   trailDashboard: Dashboard;
   openTrail: (title: string) => Promise<Locator>;
+  terrainDashboard: Dashboard;
   openTerrain: (title: string) => Promise<Locator>;
+  overlayDashboard: Dashboard;
 }>({
   // Pull requests must not depend on, or load, third-party tile services: tiles come from fixtures.
   // The nightly run sets LIVE_TILES=1 to exercise the real hosts.
@@ -74,10 +77,14 @@ const test = base.extend<{
   openTrail: async ({ gotoDashboardPage, trailDashboard }, use) =>
     use(async (title) => (await gotoDashboardPage(trailDashboard)).getPanelByTitle(title).locator),
   // The same real Trail, with Terrain.
-  openTerrain: async ({ gotoDashboardPage, readProvisionedDashboard }, use) => {
-    const dashboard = await readProvisionedDashboard({ fileName: 'navimow-terrain.json' });
-    await use(async (title) => (await gotoDashboardPage(dashboard)).getPanelByTitle(title).locator);
-  },
+  terrainDashboard: async ({ readProvisionedDashboard }, use) =>
+    use(await readProvisionedDashboard({ fileName: 'navimow-terrain.json' })),
+  openTerrain: async ({ gotoDashboardPage, terrainDashboard }, use) =>
+    use(async (title) => (await gotoDashboardPage(terrainDashboard)).getPanelByTitle(title).locator),
+  // And with the hillshade Overlay, on a dashboard of its own: the real hillshade service is slow,
+  // and loaded beside the Terrain panels it slowed their tests towards the timeout.
+  overlayDashboard: async ({ readProvisionedDashboard }, use) =>
+    use(await readProvisionedDashboard({ fileName: 'navimow-overlay.json' })),
 });
 
 /** Waits for an image tile from the host; a 200 carrying an error document does not count. */
@@ -93,14 +100,8 @@ const tileFrom = (page: Page, host: string, url: RegExp = /./) =>
 /** The map has loaded and drawn every visible tile. */
 const expectDrawn = (panel: Locator) => expect(panel.getByTestId('navimow-map')).toHaveAttribute('data-map-idle');
 
-interface Camera {
-  center: [number, number];
-  zoom: number;
-  bearing: number;
-  pitch: number;
-  /** Height of the ground the camera looks at: 0 on a flat map. */
-  groundElevation: number;
-}
+/** The map's camera, and the height of the ground it looks at: 0 on a flat map. */
+type Camera = MapCamera & { groundElevation: number };
 
 /** Where the map was looking from when it last came to rest. */
 const cameraOf = async (panel: Locator): Promise<Camera> =>
@@ -340,13 +341,12 @@ test('the Trail is drawn in the terrain view, on ground 400 m up', async ({ open
 
 test('the Overlay is drawn over the Base map and under the Trail', async ({
   gotoDashboardPage,
-  readProvisionedDashboard,
+  overlayDashboard,
   page,
 }) => {
   test.skip(LIVE_TILES, NEEDS_FIXTURE_TILES);
-  // On a dashboard of its own, so the slow hillshade service is not loaded beside the Terrain panels.
   const [dashboardPage] = await Promise.all([
-    gotoDashboardPage(await readProvisionedDashboard({ fileName: 'navimow-overlay.json' })),
+    gotoDashboardPage(overlayDashboard),
     tileFrom(page, 'wms.geonorge.no', /BBOX=-?\d/),
   ]);
   const panel = dashboardPage.getPanelByTitle('Overlay').locator;
@@ -366,12 +366,11 @@ test('the Overlay is drawn over the Base map and under the Trail', async ({
 
 test('a Base map switch keeps the Overlay and the Trail, and the Overlay fades with its opacity', async ({
   gotoPanelEditPage,
-  readProvisionedDashboard,
+  overlayDashboard,
   page,
 }) => {
   test.skip(LIVE_TILES, NEEDS_FIXTURE_TILES);
-  const dashboard = await readProvisionedDashboard({ fileName: 'navimow-overlay.json' });
-  const panelEditPage = await gotoPanelEditPage({ dashboard, id: '1' });
+  const panelEditPage = await gotoPanelEditPage({ dashboard: overlayDashboard, id: '1' });
   const panel = panelEditPage.panel.locator;
   await expectDrawn(panel);
   const canvas = await panel.locator('canvas.maplibregl-canvas').elementHandle();

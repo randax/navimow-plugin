@@ -1,5 +1,5 @@
-import type { TerrainOptions, View } from './terrain';
-import { cameraFor, initialView, viewState, type Camera, type ViewState } from './view';
+import type { TerrainOptions } from './terrain';
+import { cameraFor, initialView, viewState, type Camera, type View, type ViewState } from './view';
 
 describe('initialView', () => {
   test('without Terrain the map is flat, whatever the saved start', () => {

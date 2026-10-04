@@ -1,15 +1,23 @@
 // Type-only import: this module never loads the map library, so it stays testable without a browser.
 import type { RasterDEMSourceSpecification } from 'maplibre-gl';
-import { customTiles, KARTVERKET_ATTRIBUTION, type CustomSlot, type CustomSourceOptions } from './baseMap';
+import {
+  customTiles,
+  KARTVERKET_ATTRIBUTION,
+  presetSource,
+  type CustomSlot,
+  type CustomSourceOptions,
+  type Preset,
+} from './baseMap';
+import type { View } from './view';
 
 export type TerrainPreset = 'mapterhorn' | 'aws-terrarium';
 
-/** How a tile's colours hold elevation. */
-export const TERRAIN_ENCODINGS = ['terrarium', 'mapbox'] as const;
-export type TerrainEncoding = (typeof TERRAIN_ENCODINGS)[number];
-
-/** The two views the owner switches between on the panel: the map from above, or tilted over its relief. */
-export type View = 'flat' | 'terrain';
+/** How a tile's colours hold elevation, as the editor offers the choice. */
+export type TerrainEncoding = 'terrarium' | 'mapbox';
+export const TERRAIN_ENCODINGS: Array<{ value: TerrainEncoding; label: string }> = [
+  { value: 'terrarium', label: 'Terrarium' },
+  { value: 'mapbox', label: 'Mapbox' },
+];
 
 export interface TerrainOptions {
   enabled?: boolean;
@@ -22,14 +30,8 @@ export interface TerrainOptions {
 /** A source to draw relief from, nothing when Terrain is off, or a problem to show the owner instead of a map. */
 export type ResolvedTerrain = { source?: RasterDEMSourceSpecification } | { problem: string };
 
-interface Preset {
-  label: string;
-  description: string;
-  source: RasterDEMSourceSpecification;
-}
-
 // Both are worldwide tile sets that carry Norway's national elevation model, at different detail.
-export const TERRAIN_PRESETS: Record<TerrainPreset, Preset> = {
+export const TERRAIN_PRESETS: Record<TerrainPreset, Preset<RasterDEMSourceSpecification>> = {
   mapterhorn: {
     label: 'Mapterhorn',
     description: 'Worldwide, with 1 m detail in Norway from Kartverket.',
@@ -58,7 +60,13 @@ export const TERRAIN_PRESETS: Record<TerrainPreset, Preset> = {
 };
 
 // Elevation comes as tiles only: a WMS service draws pictures of the ground, which hold no heights.
-export const CUSTOM_TERRAIN: CustomSlot = { name: 'Terrain', wms: false, tileSize: 512, maxzoom: 16 };
+export const CUSTOM_TERRAIN: CustomSlot & { encoding: TerrainEncoding } = {
+  name: 'Terrain',
+  wms: false,
+  tileSize: 512,
+  maxzoom: 16,
+  encoding: 'terrarium',
+};
 
 // Off until enabled; once enabled, the higher-resolution Preset unless the owner picks another.
 export function resolveTerrain({ enabled, preset = 'mapterhorn', custom }: TerrainOptions = {}): ResolvedTerrain {
@@ -66,17 +74,16 @@ export function resolveTerrain({ enabled, preset = 'mapterhorn', custom }: Terra
     return {};
   }
   if (preset !== 'custom') {
-    const known = Object.hasOwn(TERRAIN_PRESETS, preset) ? TERRAIN_PRESETS[preset] : undefined;
-    return known
-      ? { source: known.source }
-      : { problem: `Unknown Terrain "${preset}". Choose another under Terrain in the panel options.` };
+    return presetSource('Terrain', TERRAIN_PRESETS, preset);
   }
   const tiles = customTiles(CUSTOM_TERRAIN, custom);
   if ('problem' in tiles) {
     return tiles;
   }
-  const encoding = custom?.encoding ?? 'terrarium';
-  return TERRAIN_ENCODINGS.includes(encoding)
+  const encoding = custom?.encoding ?? CUSTOM_TERRAIN.encoding;
+  return TERRAIN_ENCODINGS.some(({ value }) => value === encoding)
     ? { source: { type: 'raster-dem', ...tiles, encoding } }
-    : { problem: `A custom Terrain needs its encoding set to ${TERRAIN_ENCODINGS.join(' or ')}.` };
+    : {
+        problem: `A custom Terrain needs its encoding set to ${TERRAIN_ENCODINGS.map(({ value }) => value).join(' or ')}.`,
+      };
 }

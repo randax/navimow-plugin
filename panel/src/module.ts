@@ -1,70 +1,64 @@
 import { PanelPlugin, type PanelOptionsEditorBuilder } from '@grafana/data';
 import { MapPanel } from './components/MapPanel';
-import { VIEWS } from './components/ViewSwitch';
-import { BASE_MAP_PRESETS, MAX_ZOOM, TILE_SIZE } from './model/baseMap';
-import { DEFAULT_OVERLAY_OPACITY, OVERLAY_PRESETS } from './model/overlay';
-import { TERRAIN_PRESETS } from './model/terrain';
+import { BASE_MAP_PRESETS, CUSTOM_BASE_MAP, MAX_ZOOM, TILE_SIZE, type CustomSlot } from './model/baseMap';
+import { CUSTOM_OVERLAY, DEFAULT_OVERLAY_OPACITY, OVERLAY_PRESETS } from './model/overlay';
+import { CUSTOM_TERRAIN, TERRAIN_ENCODINGS, TERRAIN_PRESETS } from './model/terrain';
 import { DEFAULT_TRAIL_COLUMNS, type TrailColumns } from './model/trailFrame';
+import { VIEWS } from './model/view';
 import type { MapPanelOptions } from './types';
 
 /** A picker's choices, one per Preset. */
 const presetOptions = (presets: Record<string, { label: string; description?: string }>) =>
   Object.entries(presets).map(([value, { label, description }]) => ({ value, label, description }));
 
-const TILE_OR_WMS_URL = 'A tile URL with {z}, {x} and {y}, or a WMS GetMap URL with BBOX={bbox-epsg-3857}.';
-const CROSS_ORIGIN = 'The host must allow cross-origin requests.';
-
-/** The editors every custom slot shares: its URL, attribution, tile size and max zoom. */
+/**
+ * The editors every custom slot shares: its URL, attribution, tile size and max zoom. What the slot
+ * accepts and defaults to comes from the model, which checks the same slot.
+ */
 const addCustomSlot = (
   builder: PanelOptionsEditorBuilder<MapPanelOptions>,
-  slot: 'baseMap' | 'terrain' | 'overlay',
-  {
-    category,
-    showIf,
-    urlDescription,
-    tileSize,
-    maxzoom,
-  }: {
-    category: string[];
-    showIf: (options: MapPanelOptions) => boolean;
-    urlDescription: string;
-    tileSize: number;
-    maxzoom: number;
-  }
-) =>
-  builder
+  path: 'baseMap' | 'terrain' | 'overlay',
+  slot: CustomSlot,
+  showIf: (options: MapPanelOptions) => boolean
+) => {
+  const category = [slot.name];
+  const template = slot.wms
+    ? 'A tile URL with {z}, {x} and {y}, or a WMS GetMap URL with BBOX={bbox-epsg-3857}.'
+    : 'A tile URL with {z}, {x} and {y}.';
+  return builder
     .addTextInput({
-      path: `${slot}.custom.url`,
+      path: `${path}.custom.url`,
       name: 'URL template',
-      description: urlDescription,
+      description: `${template} The host must allow cross-origin requests.`,
       category,
       settings: { placeholder: 'https://tiles.example.com/{z}/{x}/{y}.png' },
       showIf,
     })
     .addTextInput({
-      path: `${slot}.custom.attribution`,
+      path: `${path}.custom.attribution`,
       name: 'Attribution',
       description: 'Required. The credit line the tile provider asks for, always shown on the map.',
       category,
       showIf,
     })
     .addNumberInput({
-      path: `${slot}.custom.tileSize`,
+      path: `${path}.custom.tileSize`,
       name: 'Tile size',
       category,
-      defaultValue: tileSize,
+      defaultValue: slot.tileSize,
       settings: { ...TILE_SIZE, integer: true },
       showIf,
     })
     .addNumberInput({
-      path: `${slot}.custom.maxzoom`,
+      path: `${path}.custom.maxzoom`,
       name: 'Max zoom',
       description: 'Highest zoom the service provides; the map enlarges tiles beyond it.',
       category,
-      defaultValue: maxzoom,
+      defaultValue: slot.maxzoom,
       settings: { ...MAX_ZOOM, integer: true },
       showIf,
     });
+};
 
 // Option editors for each Trail column, in the order the options pane shows them.
 const TRAIL_COLUMN_EDITORS: Array<{ key: keyof TrailColumns; name: string; description: string }> = [
@@ -115,13 +109,7 @@ export const plugin = new PanelPlugin<MapPanelOptions>(MapPanel).setPanelOptions
       ],
     },
   });
-  addCustomSlot(builder, 'baseMap', {
-    category: ['Base map'],
-    showIf: (options) => options.baseMap?.preset === 'custom',
-    urlDescription: `${TILE_OR_WMS_URL} ${CROSS_ORIGIN}`,
-    tileSize: 256,
-    maxzoom: 18,
-  });
+  addCustomSlot(builder, 'baseMap', CUSTOM_BASE_MAP, (options) => options.baseMap?.preset === 'custom');
 
   const terrainOn = (options: MapPanelOptions) => options.terrain?.enabled === true;
   const terrainCustom = (options: MapPanelOptions) => terrainOn(options) && options.terrain?.preset === 'custom';
@@ -157,25 +145,13 @@ export const plugin = new PanelPlugin<MapPanelOptions>(MapPanel).setPanelOptions
       settings: { options: VIEWS },
       showIf: terrainOn,
     });
-  addCustomSlot(builder, 'terrain', {
-    category: ['Terrain'],
-    showIf: terrainCustom,
-    urlDescription: `A tile URL with {z}, {x} and {y}. ${CROSS_ORIGIN}`,
-    tileSize: 512,
-    maxzoom: 16,
-  });
-  builder.addRadio({
+  addCustomSlot(builder, 'terrain', CUSTOM_TERRAIN, terrainCustom).addRadio({
     path: 'terrain.custom.encoding',
     name: 'Encoding',
     description: 'How the tiles hold elevation in their colours.',
     category: ['Terrain'],
-    defaultValue: 'terrarium',
-    settings: {
-      options: [
-        { value: 'terrarium', label: 'Terrarium' },
-        { value: 'mapbox', label: 'Mapbox' },
-      ],
-    },
+    defaultValue: CUSTOM_TERRAIN.encoding,
+    settings: { options: TERRAIN_ENCODINGS },
     showIf: terrainCustom,
   });
 
@@ -206,13 +182,7 @@ export const plugin = new PanelPlugin<MapPanelOptions>(MapPanel).setPanelOptions
       settings: { min: 0, max: 1, step: 0.05 },
       showIf: overlayOn,
     });
-  addCustomSlot(builder, 'overlay', {
-    category: ['Overlay'],
-    showIf: (options) => options.overlay?.preset === 'custom',
-    urlDescription: `${TILE_OR_WMS_URL} ${CROSS_ORIGIN}`,
-    tileSize: 256,
-    maxzoom: 18,
-  });
+  addCustomSlot(builder, 'overlay', CUSTOM_OVERLAY, (options) => options.overlay?.preset === 'custom');
 
   builder
     .addNumberInput({

@@ -1,4 +1,13 @@
-import type { TerrainOptions, View } from './terrain';
+import type { TerrainOptions } from './terrain';
+
+/** The two views the owner switches between on the panel: the map from above, or tilted over its relief. */
+export type View = 'flat' | 'terrain';
+
+/** Both views, as the switch and the editor name them. */
+export const VIEWS: Array<{ value: View; label: string }> = [
+  { value: 'flat', label: 'Flat' },
+  { value: 'terrain', label: 'Terrain' },
+];
 
 /** Where the map is looking from: all a recreated map needs to pick up where the last one was. */
 export interface Camera {
