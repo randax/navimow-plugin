@@ -1,4 +1,4 @@
-"""Turn raw capture records into the Trail values this slice can persist."""
+"""Turn raw capture records into the Trail and gap values this slice can persist."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import StrEnum
 
 LOCATION_TOPIC = re.compile(r"^/downlink/vehicle/([^/]+)/realtimeDate/location$")
 
@@ -21,14 +22,35 @@ class TrailPoint:
     vehicle_state: int | None
 
 
+class GapReason(StrEnum):
+    """Why a mower went unrecorded: the broker connection dropped, or the collector was down."""
+
+    RECONNECT = "reconnect"
+    RESTART = "restart"
+
+
+@dataclass(frozen=True)
+class Gap:
+    """A period one mower went unrecorded; nothing can backfill it, so it is stored as a gap."""
+
+    mower_id: str
+    start_time: datetime
+    end_time: datetime
+    reason: GapReason
+
+
 @dataclass(frozen=True)
 class ParsedRecord:
     points: tuple[TrailPoint, ...]
     placeholders_discarded: int = 0
+    gaps: tuple[Gap, ...] = ()
 
 
 def parse_record(record: Mapping[str, object]) -> ParsedRecord:
-    """Parse location poses; all other capture records are intentionally ignored."""
+    """Parse location poses and gaps; all other capture records are intentionally ignored."""
+    if record.get("kind") == "gap":
+        gap = _gap(record)
+        return ParsedRecord((), gaps=(gap,) if gap else ())
     topic = record.get("topic")
     if record.get("kind") != "mqtt" or not isinstance(topic, str):
         return ParsedRecord(())
@@ -53,6 +75,18 @@ def parse_record(record: Mapping[str, object]) -> ParsedRecord:
             continue
         points.append(point)
     return ParsedRecord(tuple(points), placeholders)
+
+
+def _gap(record: Mapping[str, object]) -> Gap | None:
+    """A gap record is written by the live transport: it ends when it is received."""
+    mower_id, reason = record.get("mower_id"), record.get("reason")
+    start, end = _timestamp(record.get("start_ms")), _timestamp(record.get("recv_ms"))
+    if not isinstance(mower_id, str) or not isinstance(reason, str) or not start or not end:
+        return None
+    try:
+        return Gap(mower_id, start, end, GapReason(reason))
+    except ValueError:  # a reason this collector does not know
+        return None
 
 
 def _point(
@@ -80,12 +114,15 @@ def _timestamp(value: object) -> datetime | None:
 
 def _int(value: object) -> int | None:
     # Numbers on this wire sometimes arrive as strings, so accept "4" as well as 4.
-    if isinstance(value, bool):
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
         return None
     try:
-        return int(value) if isinstance(value, (int, str)) else None
+        number = int(value)
     except ValueError:
         return None
+    # Beyond a 32-bit column it is noise, and a row no database accepts would never leave
+    # the live buffer.
+    return number if -(2**31) <= number < 2**31 else None
 
 
 def _float(value: object) -> float | None:

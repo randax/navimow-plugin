@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "navimow-collector"
 version = "0.1.0"
-description = "Capture replay collector for Navimow mower Trails"
+description = "Collector recording Navimow mower Trails into a database"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "GPL-3.0-only" }

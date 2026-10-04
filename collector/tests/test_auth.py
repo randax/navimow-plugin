@@ -24,6 +24,8 @@ from navimow_collector.auth import (
 )
 from navimow_collector.cli import main
 
+from .conftest import Clock
+
 # Vendor prose gathered by the token research (docs/research/token-flow.md, sections 1 and 5).
 REJECTED_REFRESH = "Refresh token is invalid or server rejected the request"
 TOO_FREQUENT = "Request too frequent. Please retry after 1 minute."
@@ -382,14 +384,6 @@ def test_login_no_browser_prints_the_manual_url_for_a_headless_machine(
     out = capsys.readouterr().out
     assert "client_id=custom" in out
     assert "localhost%3A1%2Fcallback" in out
-
-
-class Clock:
-    def __init__(self, now: float) -> None:
-        self.now = now
-
-    def __call__(self) -> float:
-        return self.now
 
 
 def test_a_failed_reactive_refresh_is_retried_on_schedule_without_spinning(

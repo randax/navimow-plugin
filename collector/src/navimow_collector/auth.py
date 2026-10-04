@@ -111,37 +111,13 @@ class TokenStore:
             yield
 
     def _write(self, credential: Credential) -> None:
-        temporary_name: str | None = None
-        try:
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
-                dir=self.path.parent,
-                prefix=f".{self.path.name}.",
-                suffix=".tmp",
-                delete=False,
-            ) as temporary:
-                temporary_name = temporary.name
-                os.chmod(temporary_name, 0o600)
-                json.dump(
-                    {
-                        "access_token": credential.access_token,
-                        "refresh_token": credential.refresh_token,
-                        "expires_in": credential.expires_in,
-                        "obtained_at": credential.obtained_at,
-                    },
-                    temporary,
-                    separators=(",", ":"),
-                )
-                temporary.flush()
-                os.fsync(temporary.fileno())
-            os.replace(temporary_name, self.path)
-            os.chmod(self.path, 0o600)
-            _fsync_directory(self.path.parent)
-            temporary_name = None
-        finally:
-            if temporary_name is not None:
-                Path(temporary_name).unlink(missing_ok=True)
+        contents = {
+            "access_token": credential.access_token,
+            "refresh_token": credential.refresh_token,
+            "expires_in": credential.expires_in,
+            "obtained_at": credential.obtained_at,
+        }
+        replace_file(self.path, json.dumps(contents, separators=(",", ":")))
 
 
 class TokenRequestError(Exception):
@@ -205,7 +181,7 @@ class TokenClient:
         # Vendor text is logged, so it must not carry anything we sent or it handed back.
         secrets = [form[key] for key in ("code", "refresh_token", "client_secret") if key in form]
         if response.status < 200 or response.status >= 300:
-            detail = _redact(f"HTTP {response.status}: {body}".rstrip(": "), secrets)
+            detail = redact(f"HTTP {response.status}: {body}".rstrip(": "), secrets)
             if response.status >= 500 or response.status in (408, 429):
                 # A gateway or overload answer is transient whatever its page says (Apache's
                 # stock 502 says "invalid"); only the vendor's own 4xx prose can mean re-login.
@@ -217,12 +193,12 @@ class TokenClient:
             # A credential object cut short (never log its token); anything else is prose.
             if body.lstrip().startswith("{") and '"access_token"' in body:
                 raise TokenRequestError("truncated token response", relogin=False) from error
-            raise TokenRequestError.from_vendor(_redact(body, secrets)) from error
+            raise TokenRequestError.from_vendor(redact(body, secrets)) from error
         if isinstance(parsed, dict):
             secrets += [str(parsed.get(key)) for key in ("access_token", "refresh_token")]
         if not isinstance(parsed, dict) or not isinstance(parsed.get("access_token"), str):
             # Vendor errors can arrive with status 200: their prose decides.
-            raise TokenRequestError.from_vendor(_redact(body, secrets))
+            raise TokenRequestError.from_vendor(redact(body, secrets))
         try:
             # A refresh response may omit the refresh token; the previous one then still holds.
             refresh_token = parsed.get("refresh_token") or previous_refresh_token
@@ -581,7 +557,33 @@ def _lifetime(value: dict[str, Any]) -> int:
     return DEFAULT_LIFETIME_SECONDS
 
 
-def _redact(text: str, secrets: list[str]) -> str:
+def replace_file(path: Path, contents: str) -> None:
+    """Replace a state file only once its complete, owner-only contents are on disk."""
+    temporary_name: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary:
+            temporary_name = temporary.name
+            os.chmod(temporary_name, 0o600)
+            temporary.write(contents)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        os.replace(temporary_name, path)
+        os.chmod(path, 0o600)
+        _fsync_directory(path.parent)
+        temporary_name = None
+    finally:
+        if temporary_name is not None:
+            Path(temporary_name).unlink(missing_ok=True)
+
+
+def redact(text: str, secrets: list[str]) -> str:
     for secret in secrets:
         if len(secret) >= 8:  # long enough to be a credential, not an ordinary word
             text = text.replace(secret, "<redacted>")

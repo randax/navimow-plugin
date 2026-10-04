@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gzip
 import json
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -12,8 +13,10 @@ import psycopg
 import pytest
 
 from navimow_collector.cli import main
+from navimow_collector.ingest import Ingestor
+from navimow_collector.records import Gap, TrailPoint
 
-from .conftest import FIXTURE
+from .conftest import FIXTURE, gaps
 
 Row = tuple[str, datetime, datetime, float, float, float, int | None]
 
@@ -123,3 +126,82 @@ def test_migration_can_be_disabled(
     assert "migrat" in capsys.readouterr().err.lower()
     with psycopg.connect(database) as conn:
         assert conn.execute("SELECT to_regclass('trail_point')").fetchone() == (None,)
+
+
+def test_a_gap_recorded_again_with_a_later_end_is_extended(
+    config_file: Path, database: str, tmp_path: Path
+) -> None:
+    # A collector that died before noting its reconnection records the same gap again,
+    # longer, when it restarts.
+    first = {"recv_ms": 1788084400000, "start_ms": 1788084160000, "reason": "reconnect"}
+    again = {"recv_ms": 1788084900000, "start_ms": 1788084160000, "reason": "restart"}
+    for name, gap in (("first.jsonl", first), ("again.jsonl", again), ("stale.jsonl", first)):
+        capture = tmp_path / name
+        capture.write_text(json.dumps({"kind": "gap", "mower_id": "DEVICE_1", **gap}) + "\n")
+        assert main(["--config", str(config_file), "replay", str(capture)]) == 0
+
+    assert gaps(database) == [("DEVICE_1", ms(1788084160000), ms(1788084900000), "restart")]
+
+
+def test_a_state_the_schema_cannot_hold_is_stored_as_unknown(
+    config_file: Path, database: str, tmp_path: Path
+) -> None:
+    # A row the database can never accept would wait in the live buffer for ever.
+    capture = tmp_path / "state.jsonl"
+    pose = {"time": 1788084160000, "type": 1, "postureX": 1, "postureY": 2, "postureTheta": 3}
+    record = {
+        "recv_ms": 1788084160500,
+        "kind": "mqtt",
+        "topic": "/downlink/vehicle/DEVICE_1/realtimeDate/location",
+        "payload": [{**pose, "vehicleState": 2**40}],
+    }
+    capture.write_text(json.dumps(record) + "\n")
+
+    assert main(["--config", str(config_file), "replay", str(capture)]) == 0
+
+    assert [(row[3], row[6]) for row in trail(database)] == [(1.0, None)]
+
+
+def test_a_gap_record_becomes_a_gap_row(config_file: Path, database: str, tmp_path: Path) -> None:
+    # What the live transport feeds the core on every reconnection or restart.
+    capture = tmp_path / "gap.jsonl"
+    gap = {
+        "recv_ms": 1788084400000,
+        "kind": "gap",
+        "mower_id": "DEVICE_1",
+        "start_ms": 1788084160000,
+        "reason": "reconnect",
+    }
+    capture.write_text(json.dumps(gap) + "\n")
+
+    assert main(["--config", str(config_file), "replay", str(capture)]) == 0
+    assert main(["--config", str(config_file), "replay", str(capture)]) == 0  # idempotent
+
+    assert gaps(database) == [("DEVICE_1", ms(1788084160000), ms(1788084400000), "reconnect")]
+
+
+class Batches:
+    """A storage adapter which only notes how many rows each write hands it."""
+
+    def __init__(self) -> None:
+        self.sizes: list[int] = []
+
+    def write_trail(self, points: Sequence[TrailPoint]) -> int:
+        self.sizes.append(len(points))
+        return len(points)
+
+    def write_gaps(self, gaps: Sequence[Gap]) -> int:
+        self.sizes.append(len(gaps))
+        return len(gaps)
+
+
+def test_a_capture_of_gaps_alone_is_written_in_batches_not_held_to_its_end() -> None:
+    storage = Batches()
+    ingestor = Ingestor(storage, batch_size=2)
+    for second in range(5):
+        gap = {"recv_ms": 1788084400000 + second, "start_ms": 1788084160000 + second}
+        ingestor.feed({"kind": "gap", "mower_id": "DEVICE_1", "reason": "reconnect", **gap})
+
+    assert storage.sizes == [2, 2]
+    ingestor.flush()
+    assert storage.sizes == [2, 2, 1]

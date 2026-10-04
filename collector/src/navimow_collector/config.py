@@ -57,9 +57,17 @@ class AuthConfig:
 
 
 @dataclass(frozen=True)
+class CollectorConfig:
+    """Where live collection keeps what must survive a restart."""
+
+    state_dir: str = "~/.local/state/navimow-collector"
+
+
+@dataclass(frozen=True)
 class Config:
     storage: StorageConfig = StorageConfig()
     auth: AuthConfig = AuthConfig()
+    collector: CollectorConfig = CollectorConfig()
 
 
 def load_config(config_path: Path | None = None) -> Config:

@@ -114,3 +114,12 @@ def test_auth_defaults_are_visible_but_its_client_secret_is_redacted(
     assert 'client_id = "mine"' in out
     assert "57056e15" not in out
     assert "state_file" in out
+
+
+def test_the_state_directory_of_live_collection_is_configurable(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = write(tmp_path, '[collector]\nstate_dir = "/var/lib/navimow-collector"\n')
+    assert 'state_dir = "/var/lib/navimow-collector"' in show(capsys, "--config", str(config))
+    monkeypatch.setenv("NAVIMOW_COLLECTOR_STATE_DIR", "/srv/mower")
+    assert 'state_dir = "/srv/mower"' in show(capsys, "--config", str(config))

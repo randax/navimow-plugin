@@ -7,19 +7,20 @@ import json
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 
-from .records import TrailPoint, parse_record
-from .storage import Storage
+from .records import Gap, TrailPoint, parse_record
+from .storage import Writer
 
 BATCH_SIZE = 500
 
 
 class Ingestor:
-    """Batch Trail points from raw capture records for a storage adapter."""
+    """Batch Trail points and gaps from raw capture records for a storage adapter."""
 
-    def __init__(self, storage: Storage, batch_size: int = BATCH_SIZE) -> None:
+    def __init__(self, storage: Writer, batch_size: int = BATCH_SIZE) -> None:
         self._storage = storage
         self._batch_size = batch_size
         self._points: list[TrailPoint] = []
+        self._gaps: list[Gap] = []
         self.points_written = 0
         self.placeholders_discarded = 0
 
@@ -27,14 +28,17 @@ class Ingestor:
         parsed = parse_record(record)
         self.placeholders_discarded += parsed.placeholders_discarded
         self._points.extend(parsed.points)
-        if len(self._points) >= self._batch_size:
+        self._gaps.extend(parsed.gaps)
+        if len(self._points) + len(self._gaps) >= self._batch_size:
             self.flush()
 
     def flush(self) -> None:
-        if not self._points:
-            return
-        self.points_written += self._storage.write_trail(self._points)
-        self._points.clear()
+        if self._points:
+            self.points_written += self._storage.write_trail(self._points)
+            self._points.clear()
+        if self._gaps:
+            self._storage.write_gaps(self._gaps)
+            self._gaps.clear()
 
 
 def read_capture(path: Path) -> Iterator[dict[str, object]]:

@@ -1,4 +1,4 @@
-"""PostgreSQL storage for the provisional Trail schema."""
+"""PostgreSQL storage for the provisional Trail and gap schema."""
 
 from __future__ import annotations
 
@@ -6,10 +6,24 @@ from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 
 import psycopg
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from ..config import StorageConfig
-from ..records import TrailPoint
-from .base import SchemaError, StorageError
+from ..records import Gap, TrailPoint
+from .base import RejectedError, SchemaError, StorageError
+
+# Live collection writes from its event loop, so a database call should not wait for long:
+# by default a connection attempt, a statement held up by a lock and a server that vanished
+# from the network each fail within seconds, which the live buffer treats as an outage.
+# These are defaults: whatever the operator set for the same thing is left alone.
+CONNECT_TIMEOUT_SECONDS = 5
+STATEMENT_TIMEOUT_MS = 5000
+_DEAD_PEER = {
+    "keepalives_idle": 5,
+    "keepalives_interval": 2,
+    "keepalives_count": 3,
+    "tcp_user_timeout": 10000,  # milliseconds; libpq ignores it where the system lacks it
+}
 
 
 @contextmanager
@@ -17,6 +31,8 @@ def _translated() -> Iterator[None]:
     """Keep psycopg's exceptions behind the storage boundary."""
     try:
         yield
+    except (psycopg.DataError, psycopg.IntegrityError) as error:
+        raise RejectedError(f"postgres: {error}".strip()) from error
     except psycopg.Error as error:
         raise StorageError(f"postgres: {error}".strip()) from error
 
@@ -38,17 +54,39 @@ MIGRATIONS = (
         PRIMARY KEY (mower_id, device_time)
     )
     """,
+    # One row per mower and outage: a gap starts once, so one recorded again is the same gap.
+    """
+    CREATE TABLE IF NOT EXISTS collector_gap (
+        mower_id text NOT NULL,
+        start_time timestamptz NOT NULL,
+        end_time timestamptz NOT NULL,
+        reason text NOT NULL,
+        PRIMARY KEY (mower_id, start_time)
+    )
+    """,
 )
+TABLES = ("trail_point", "collector_gap")
 
 
 class PostgresStorage:
-    """Persist Trail points with idempotent inserts."""
+    """Persist Trail points and gaps with idempotent inserts."""
 
     def __init__(self, config: StorageConfig) -> None:
         if config.dsn is None:
             raise StorageError("storage.dsn is required for the postgres backend")
         with _translated():
-            self._connection = psycopg.connect(config.dsn.reveal(), autocommit=True)
+            deadlines = {"connect_timeout": CONNECT_TIMEOUT_SECONDS, **_DEAD_PEER}
+            # The operator's DSN wins wherever it sets one of these itself.
+            parameters = {**deadlines, **conninfo_to_dict(config.dsn.reveal())}
+            self._connection = psycopg.connect(make_conninfo("", **parameters), autocommit=True)
+            # Only where nothing set it: not the DSN's options, the role, the database or
+            # the server's configuration. A statement that legitimately takes longer than
+            # this default would otherwise time out on every retry, for ever.
+            self._connection.execute(
+                "SELECT set_config('statement_timeout', %s, false) FROM pg_settings"
+                " WHERE name = 'statement_timeout' AND source = 'default'",
+                (str(STATEMENT_TIMEOUT_MS),),
+            )
 
     def __enter__(self) -> PostgresStorage:
         return self
@@ -73,12 +111,13 @@ class PostgresStorage:
                     )
 
     def check_schema(self) -> None:
-        with _translated():
-            row = self._connection.execute("SELECT to_regclass('trail_point')").fetchone()
-        if row is None or row[0] is None:
-            raise SchemaError(
-                "collector schema is missing; enable storage.migrate or apply migrations"
-            )
+        for table in TABLES:
+            with _translated():
+                row = self._connection.execute("SELECT to_regclass(%s)", (table,)).fetchone()
+            if row is None or row[0] is None:
+                raise SchemaError(
+                    "collector schema is missing; enable storage.migrate or apply migrations"
+                )
 
     def write_trail(self, points: Sequence[TrailPoint]) -> int:
         with _translated(), self._connection.transaction(), self._connection.cursor() as cursor:
@@ -101,6 +140,20 @@ class PostgresStorage:
                     )
                     for point in points
                 ],
+            )
+            return max(cursor.rowcount, 0)
+
+    def write_gaps(self, gaps: Sequence[Gap]) -> int:
+        with _translated(), self._connection.transaction(), self._connection.cursor() as cursor:
+            cursor.executemany(
+                """
+                INSERT INTO collector_gap (mower_id, start_time, end_time, reason)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (mower_id, start_time) DO UPDATE
+                    SET end_time = EXCLUDED.end_time, reason = EXCLUDED.reason
+                    WHERE collector_gap.end_time < EXCLUDED.end_time
+                """,
+                [(gap.mower_id, gap.start_time, gap.end_time, gap.reason.value) for gap in gaps],
             )
             return max(cursor.rowcount, 0)
 
