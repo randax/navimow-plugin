@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gzip
 import json
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,8 @@ import psycopg
 import pytest
 
 from navimow_collector.cli import main
+from navimow_collector.ingest import Ingestor
+from navimow_collector.records import Gap, TrailPoint
 
 from .conftest import FIXTURE, gaps
 
@@ -175,3 +178,30 @@ def test_a_gap_record_becomes_a_gap_row(config_file: Path, database: str, tmp_pa
     assert main(["--config", str(config_file), "replay", str(capture)]) == 0  # idempotent
 
     assert gaps(database) == [("DEVICE_1", ms(1788084160000), ms(1788084400000), "reconnect")]
+
+
+class Batches:
+    """A storage adapter which only notes how many rows each write hands it."""
+
+    def __init__(self) -> None:
+        self.sizes: list[int] = []
+
+    def write_trail(self, points: Sequence[TrailPoint]) -> int:
+        self.sizes.append(len(points))
+        return len(points)
+
+    def write_gaps(self, gaps: Sequence[Gap]) -> int:
+        self.sizes.append(len(gaps))
+        return len(gaps)
+
+
+def test_a_capture_of_gaps_alone_is_written_in_batches_not_held_to_its_end() -> None:
+    storage = Batches()
+    ingestor = Ingestor(storage, batch_size=2)
+    for second in range(5):
+        gap = {"recv_ms": 1788084400000 + second, "start_ms": 1788084160000 + second}
+        ingestor.feed({"kind": "gap", "mower_id": "DEVICE_1", "reason": "reconnect", **gap})
+
+    assert storage.sizes == [2, 2]
+    ingestor.flush()
+    assert storage.sizes == [2, 2, 1]

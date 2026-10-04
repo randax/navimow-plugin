@@ -29,7 +29,7 @@ class Ingestor:
         self.placeholders_discarded += parsed.placeholders_discarded
         self._points.extend(parsed.points)
         self._gaps.extend(parsed.gaps)
-        if len(self._points) >= self._batch_size:
+        if len(self._points) + len(self._gaps) >= self._batch_size:
             self.flush()
 
     def flush(self) -> None:
