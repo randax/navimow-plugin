@@ -5,6 +5,7 @@ import 'maplibre-gl/dist/maplibre-gl.css';
 import { framedBounds, nextFraming, type Framing } from '../model/framing';
 import { mapStyle, type MapSources } from '../model/style';
 import type { MowerMarker, TrailScene } from '../model/trail';
+import type { View } from '../model/terrain';
 import { cameraFor, type Camera } from '../model/view';
 import { PanelMessage } from './PanelMessage';
 
@@ -55,6 +56,7 @@ const mowerIcon = ({ bearing, stale }: MowerMarker): string => {
 };
 
 interface Props extends MapSources {
+  view: View;
   trail: TrailScene;
   mower?: MowerMarker;
   width: number;
@@ -79,7 +81,8 @@ export const MapView: React.FC<Props & { children?: ReactNode }> = ({ children, 
   const sources: MapSources = {
     baseMap: useByValue(props.baseMap),
     overlay: useByValue(props.overlay),
-    terrain: useByValue(props.terrain),
+    // Flat is the map without its Terrain.
+    terrain: useByValue(props.view === 'terrain' ? props.terrain : undefined),
   };
   return (
     <WebGLBoundary width={props.width} height={props.height}>
@@ -118,10 +121,10 @@ class WebGLBoundary extends Component<{ width: number; height: number; children:
 /** Clears the drawn mark until the map next goes idle with the new style or data in. */
 const redrawing = (element: HTMLElement | null) => element?.removeAttribute('data-map-idle');
 
-const MapCanvas: React.FC<Props> = ({ baseMap, overlay, terrain, trail, mower, width, height }) => {
+const MapCanvas: React.FC<Props> = ({ baseMap, overlay, terrain, view, trail, mower, width, height }) => {
   const element = useRef<HTMLDivElement>(null);
   const map = useRef<Map | null>(null);
-  const drawnTerrain = useRef(terrain);
+  const drawn = useRef({ view, terrain });
   const lines = useRef(trail.lines);
   const framed = useRef<Framing>(undefined);
   const countPending = useRef(true);
@@ -146,12 +149,13 @@ const MapCanvas: React.FC<Props> = ({ baseMap, overlay, terrain, trail, mower, w
     const style = mapStyle({ baseMap, overlay, terrain }, lines.current);
     const previous = map.current;
     redrawing(element.current);
-    if (previous && drawnTerrain.current === terrain) {
+    if (previous && drawn.current.terrain === terrain) {
       previous.setStyle(style);
       return;
     }
-    const view = terrain ? 'terrain' : 'flat';
-    const camera = previous ? cameraFor(view, cameraOf(previous)) : { bounds: NORWAY, ...cameraFor(view) };
+    const camera = previous
+      ? cameraFor(view, { view: drawn.current.view, camera: cameraOf(previous) })
+      : { bounds: NORWAY, ...cameraFor(view) };
     previous?.remove();
     const created = new Map({
       container: element.current!,
@@ -170,17 +174,17 @@ const MapCanvas: React.FC<Props> = ({ baseMap, overlay, terrain, trail, mower, w
     created.on('idle', () => {
       if (countPending.current) {
         countPending.current = false;
-        const drawn = new Set(created.queryRenderedFeatures({ layers: ['trail'] }).map((f) => f.id));
-        element.current?.setAttribute('data-trails-drawn', String(drawn.size));
+        const trails = new Set(created.queryRenderedFeatures({ layers: ['trail'] }).map((f) => f.id));
+        element.current?.setAttribute('data-trails-drawn', String(trails.size));
       }
       const at = { ...cameraOf(created), groundElevation: created.getCameraTargetElevation() };
       element.current?.setAttribute('data-camera', JSON.stringify(at));
       element.current?.setAttribute('data-map-idle', '');
     });
     map.current = created;
-    drawnTerrain.current = terrain;
+    drawn.current = { view, terrain };
     countPending.current = true;
-  }, [baseMap, overlay, terrain]);
+  }, [baseMap, overlay, terrain, view]);
 
   // When to frame the Trail is the model's decision (nextFraming); this only carries it out.
   useEffect(() => {

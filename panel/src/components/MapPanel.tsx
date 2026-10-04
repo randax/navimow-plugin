@@ -2,9 +2,9 @@ import React, { useEffect, useMemo, useState } from 'react';
 import type { PanelProps } from '@grafana/data';
 import { resolveBaseMap } from '../model/baseMap';
 import { resolveOverlay } from '../model/overlay';
-import { resolveTerrain, type View } from '../model/terrain';
+import { resolveTerrain, type TerrainOptions, type View } from '../model/terrain';
 import { mowerAt, trailScene } from '../model/trail';
-import { initialView } from '../model/view';
+import { viewState, type ViewState } from '../model/view';
 import type { MapPanelOptions } from '../types';
 import { MapView } from './MapView';
 import { PanelMessage } from './PanelMessage';
@@ -20,18 +20,22 @@ const useNow = (): number => {
   return now;
 };
 
-/** The view the map is in: the one the options start in, until the owner switches on the panel. */
-const useView = (start: View): [View, (view: View) => void] => {
-  // A switch holds only while the options still start where it was made from, so editing them shows.
-  const [switched, setSwitched] = useState<{ from: View; to: View }>();
-  return [switched?.from === start ? switched.to : start, (to) => setSwitched({ from: start, to })];
+/** The view the map is in. The model decides it (viewState); this remembers it between renders. */
+const useView = (options: TerrainOptions | undefined): [View, (view: View) => void] => {
+  const [remembered, remember] = useState<ViewState>();
+  const state = viewState(options, remembered);
+  // Kept as soon as the options start the panel over, so that an earlier switch cannot come back.
+  if (state !== remembered) {
+    remember(state);
+  }
+  return [state.view, (view) => remember({ ...state, view })];
 };
 
 export const MapPanel: React.FC<PanelProps<MapPanelOptions>> = ({ options, data, width, height }) => {
   const baseMap = useMemo(() => resolveBaseMap(options.baseMap), [options.baseMap]);
   const terrain = useMemo(() => resolveTerrain(options.terrain), [options.terrain]);
   const overlay = useMemo(() => resolveOverlay(options.overlay), [options.overlay]);
-  const [view, setView] = useView(initialView(options.terrain));
+  const [view, setView] = useView(options.terrain);
   const { trailColumns, dockOrigin } = options;
   const trail = useMemo(
     () => trailScene(data.series, { trailColumns, dockOrigin }),
@@ -59,8 +63,8 @@ export const MapPanel: React.FC<PanelProps<MapPanelOptions>> = ({ options, data,
     <MapView
       baseMap={baseMap.source}
       overlay={overlay.overlay}
-      // Flat is the map without its Terrain; the switch recreates it with or without.
-      terrain={view === 'terrain' ? terrain.source : undefined}
+      terrain={terrain.source}
+      view={view}
       trail={trail.scene}
       mower={mower}
       width={width}

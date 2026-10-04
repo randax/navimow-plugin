@@ -15,12 +15,32 @@ const TERRAIN_PITCH = 60;
 export const initialView = ({ enabled, startIn }: TerrainOptions = {}): View =>
   enabled && startIn !== 'flat' ? 'terrain' : 'flat';
 
+/** The view the panel is in, and the start it was taken from: nothing while Terrain is off. */
+export interface ViewState {
+  start?: View;
+  view: View;
+}
+
+/**
+ * The view to show, given what was shown before. The owner's switch on the panel holds for as long
+ * as the options start the panel the same way. When they change, by a new start or by Terrain going
+ * off or on, the panel starts over from them, and an earlier switch is gone for good.
+ */
+export function viewState(options: TerrainOptions | undefined, previous?: ViewState): ViewState {
+  const start = options?.enabled ? initialView(options) : undefined;
+  return previous && previous.start === start ? previous : { start, view: start ?? 'flat' };
+}
+
 /**
  * Where a map made for `view` starts. One that replaces another looks at the same place from the
- * same distance and bearing, so switching never throws the owner somewhere else; only the tilt
- * follows the view.
+ * same distance and bearing, so switching never throws the owner somewhere else. Only the tilt
+ * follows a change of view: terrain is entered tilted, unless the owner had tilted the flat map
+ * already, and flat is seen from straight above. A map replaced within its view, for a new Terrain
+ * source, keeps the whole camera.
  */
-export const cameraFor = (view: View, previous?: Camera): Partial<Camera> => ({
-  ...previous,
-  pitch: view === 'flat' ? 0 : previous?.pitch || TERRAIN_PITCH,
-});
+export function cameraFor(view: View, previous?: { view: View; camera: Camera }): Partial<Camera> {
+  if (previous?.view === view) {
+    return previous.camera;
+  }
+  return { ...previous?.camera, pitch: view === 'flat' ? 0 : previous?.camera.pitch || TERRAIN_PITCH };
+}
