@@ -16,10 +16,11 @@ export const initialView = ({ enabled, startIn }: TerrainOptions = {}): View =>
   enabled && startIn !== 'flat' ? 'terrain' : 'flat';
 
 /**
- * Where a map recreated for `view` starts. It looks at the same place from the same distance and
- * bearing, so switching never throws the owner somewhere else; only the tilt follows the view.
+ * Where a map made for `view` starts. One that replaces another looks at the same place from the
+ * same distance and bearing, so switching never throws the owner somewhere else; only the tilt
+ * follows the view.
  */
-export const cameraFor = (view: View, previous: Camera): Camera => ({
+export const cameraFor = (view: View, previous?: Camera): Partial<Camera> => ({
   ...previous,
-  pitch: view === 'flat' ? 0 : previous.pitch || TERRAIN_PITCH,
+  pitch: view === 'flat' ? 0 : previous?.pitch || TERRAIN_PITCH,
 });

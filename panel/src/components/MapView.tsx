@@ -1,17 +1,11 @@
 import React, { Component, useEffect, useRef, type ReactNode } from 'react';
 import { css } from '@emotion/css';
-import {
-  GPUInitializationError,
-  Map,
-  Marker,
-  setWorkerUrl,
-  type GeoJSONSource,
-  type RasterSourceSpecification,
-  type StyleSpecification,
-} from 'maplibre-gl';
+import { GPUInitializationError, Map, Marker, setWorkerUrl, type GeoJSONSource } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { framedBounds, nextFraming, type Framing } from '../model/framing';
+import { mapStyle, type MapSources } from '../model/style';
 import type { MowerMarker, TrailScene } from '../model/trail';
+import { cameraFor, type Camera } from '../model/view';
 import { PanelMessage } from './PanelMessage';
 
 declare let __webpack_public_path__: string;
@@ -32,20 +26,11 @@ const NO_WEBGL =
   'The map needs WebGL, which this browser has turned off or does not support. ' +
   'Turn on hardware acceleration in the browser settings and reload the page.';
 
-// The Trail is part of the style, so a Base map switch keeps it and a refresh only diffs its data.
-const styleFor = (baseMap: RasterSourceSpecification, trail: TrailScene['lines']): StyleSpecification => ({
-  version: 8,
-  sources: { base: baseMap, trail: { type: 'geojson', data: trail } },
-  layers: [
-    { id: 'base', type: 'raster', source: 'base' },
-    {
-      id: 'trail',
-      type: 'line',
-      source: 'trail',
-      layout: { 'line-join': 'round', 'line-cap': 'round' },
-      paint: { 'line-color': ['get', 'colour'], 'line-width': 2, 'line-opacity': 0.9 },
-    },
-  ],
+const cameraOf = (map: Map): Camera => ({
+  center: map.getCenter().toArray(),
+  zoom: map.getZoom(),
+  bearing: map.getBearing(),
+  pitch: map.getPitch(),
 });
 
 const mowerStyles = {
@@ -69,18 +54,23 @@ const mowerIcon = ({ bearing, stale }: MowerMarker): string => {
   return `<svg viewBox="0 0 24 24" width="28" height="28">${shape}</svg>`;
 };
 
-interface Props {
-  baseMap: RasterSourceSpecification;
+interface Props extends MapSources {
   trail: TrailScene;
   mower?: MowerMarker;
   width: number;
   height: number;
 }
 
-/** Thin adapter over MapLibre: owns exactly one map instance and draws what it is given. */
-export const MapView: React.FC<Props> = (props) => (
+/**
+ * Thin adapter over MapLibre: owns exactly one map instance and draws what it is given. Its
+ * children are the panel's controls, laid over the map.
+ */
+export const MapView: React.FC<Props & { children?: ReactNode }> = ({ children, ...props }) => (
   <WebGLBoundary width={props.width} height={props.height}>
-    <MapCanvas {...props} />
+    <div style={{ position: 'relative', width: props.width, height: props.height }}>
+      <MapCanvas {...props} />
+      {children}
+    </div>
   </WebGLBoundary>
 );
 
@@ -111,9 +101,10 @@ class WebGLBoundary extends Component<{ width: number; height: number; children:
 /** Clears the drawn mark until the map next goes idle with the new style or data in. */
 const redrawing = (element: HTMLElement | null) => element?.removeAttribute('data-map-idle');
 
-const MapCanvas: React.FC<Props> = ({ baseMap, trail, mower, width, height }) => {
+const MapCanvas: React.FC<Props> = ({ baseMap, overlay, terrain, trail, mower, width, height }) => {
   const element = useRef<HTMLDivElement>(null);
   const map = useRef<Map | null>(null);
+  const drawnTerrain = useRef(terrain);
   const lines = useRef(trail.lines);
   const framed = useRef<Framing>(undefined);
   const countPending = useRef(true);
@@ -131,35 +122,48 @@ const MapCanvas: React.FC<Props> = ({ baseMap, trail, mower, width, height }) =>
   }, [trail.lines]);
 
   // Create the map on first draw, then restyle it in place: a second style set before the first
-  // has loaded makes MapLibre rebuild from scratch.
+  // has loaded makes MapLibre rebuild from scratch. A change of Terrain is the exception. Terrain
+  // has to be in a map's first style (see mapStyle), so the map is recreated where the last one
+  // was looking; the model decides the camera (cameraFor).
   useEffect(() => {
-    if (map.current) {
-      redrawing(element.current);
-      map.current.setStyle(styleFor(baseMap, lines.current));
+    const style = mapStyle({ baseMap, overlay, terrain }, lines.current);
+    const previous = map.current;
+    redrawing(element.current);
+    if (previous && drawnTerrain.current === terrain) {
+      previous.setStyle(style);
       return;
     }
+    const view = terrain ? 'terrain' : 'flat';
+    const camera = previous ? cameraFor(view, cameraOf(previous)) : { bounds: NORWAY, ...cameraFor(view) };
+    previous?.remove();
     const created = new Map({
       container: element.current!,
-      style: styleFor(baseMap, lines.current),
-      bounds: NORWAY,
+      style,
+      ...camera,
+      // Past MapLibre's default of 60, to look across a slope rather than down on it.
+      maxPitch: 75,
       // Attribution is a licence obligation: never collapsed, never hideable.
       attributionControl: { compact: false },
     });
     created.on('error', (e) => console.error('[navimow-map]', e.error?.message ?? e));
     created.on('style.load', () => created.getSource<GeoJSONSource>('trail')?.setData(lines.current));
-    // Marks a fully drawn map, and how many Trails it drew, so browser tests can wait for rendering
-    // to finish and see what came out. Counted once per new Trail data, so panning never pays for it;
-    // a line crossing tiles comes back once per tile, hence the ids.
+    // Marks a fully drawn map, how many Trails it drew and where it looks from, so browser tests can
+    // wait for rendering to finish and see what came out. Trails are counted once per new Trail data
+    // or map, so panning never pays for it; a line crossing tiles comes back once per tile, hence the ids.
     created.on('idle', () => {
       if (countPending.current) {
         countPending.current = false;
         const drawn = new Set(created.queryRenderedFeatures({ layers: ['trail'] }).map((f) => f.id));
         element.current?.setAttribute('data-trails-drawn', String(drawn.size));
       }
+      const at = { ...cameraOf(created), groundElevation: created.getCameraTargetElevation() };
+      element.current?.setAttribute('data-camera', JSON.stringify(at));
       element.current?.setAttribute('data-map-idle', '');
     });
     map.current = created;
-  }, [baseMap]);
+    drawnTerrain.current = terrain;
+    countPending.current = true;
+  }, [baseMap, overlay, terrain]);
 
   // When to frame the Trail is the model's decision (nextFraming); this only carries it out.
   useEffect(() => {
@@ -207,7 +211,8 @@ const MapCanvas: React.FC<Props> = ({ baseMap, trail, mower, width, height }) =>
     }
     markers.forEach((m) => m.setLngLat(mower.position).addTo(map.current!));
     return () => markers.forEach((m) => m.remove());
-  }, [mower]);
+    // A change of Terrain recreates the map, which needs its markers again.
+  }, [mower, terrain]);
 
   // Browsers keep only about eight WebGL contexts, so release this one with the panel.
   useEffect(

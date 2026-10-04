@@ -29,4 +29,9 @@ describe('cameraFor', () => {
   test("a tilt the owner already chose is kept in terrain, such as when only the Terrain's source changes", () => {
     expect(cameraFor('terrain', { ...camera, pitch: 35 })).toEqual({ ...camera, pitch: 35 });
   });
+
+  test('a first map has no place to keep yet, only the tilt of its view', () => {
+    expect(cameraFor('terrain')).toEqual({ pitch: 60 });
+    expect(cameraFor('flat')).toEqual({ pitch: 0 });
+  });
 });
