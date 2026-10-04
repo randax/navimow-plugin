@@ -64,10 +64,32 @@ class CollectorConfig:
 
 
 @dataclass(frozen=True)
+class HealthConfig:
+    """Where `collect` serves /health and /metrics: `host:port`, or empty for nowhere.
+
+    Loopback by default, which a container's own health check reaches; a scraper in
+    another container or host needs `0.0.0.0:9477`.
+    """
+
+    listen: str = "127.0.0.1:9477"
+
+    def address(self) -> tuple[str, int] | None:
+        if not self.listen:
+            return None
+        host, _, port = self.listen.rpartition(":")
+        if host.startswith("[") and host.endswith("]"):
+            host = host[1:-1]  # an IPv6 address, bracketed to set its port apart
+        if host and "[" not in host and "]" not in host and port.isdigit() and int(port) < 65536:
+            return host, int(port)
+        raise ConfigError(f"health.listen must be host:port or empty, not {self.listen!r}")
+
+
+@dataclass(frozen=True)
 class Config:
     storage: StorageConfig = StorageConfig()
     auth: AuthConfig = AuthConfig()
     collector: CollectorConfig = CollectorConfig()
+    health: HealthConfig = HealthConfig()
 
 
 def load_config(config_path: Path | None = None) -> Config:
@@ -88,6 +110,7 @@ def load_config(config_path: Path | None = None) -> Config:
     # automatic; mypy cannot infer the dynamically assembled field names.
     config = replace(defaults, **sections)
     _validate_backend(config.storage.backend)
+    config.health.address()
     return config
 
 
