@@ -19,6 +19,7 @@ from navimow_collector.auth import (
     TokenClient,
     TokenManager,
     TokenStore,
+    maintain,
 )
 from navimow_collector.cli import main
 
@@ -177,6 +178,8 @@ def test_does_not_refresh_before_the_margin(tmp_path: Path) -> None:
         (502, "", AuthState.RETRY_PENDING),
         (400, REJECTED_REFRESH, AuthState.RELOGIN_REQUIRED),
         (401, "", AuthState.RELOGIN_REQUIRED),
+        (401, "Authentication required", AuthState.RELOGIN_REQUIRED),
+        (403, CIRCUIT_BREAKER, AuthState.RETRY_PENDING),
     ],
 )
 def test_refresh_failures_are_classified_by_vendor_prose(
@@ -215,14 +218,14 @@ def test_transient_failures_retry_on_an_escalating_ladder(tmp_path: Path) -> Non
 def test_refreshes_immediately_after_a_rest_401(tmp_path: Path) -> None:
     tokens = manager(logged_in(tmp_path), Response(200, token("replacement")), now=1)
 
-    assert run(tokens.on_unauthorized()) == "replacement"
+    assert run(tokens.on_unauthorized("access")) == "replacement"
     assert tokens.state is AuthState.FRESH
 
 
 def test_refreshes_immediately_after_the_mqtt_oauth_error(tmp_path: Path) -> None:
     tokens = manager(logged_in(tmp_path), Response(200, token("replacement")), now=1)
 
-    assert run(tokens.on_mqtt_error("CODE_OAUTH_INFO_ILLEGAL")) == "replacement"
+    assert run(tokens.on_mqtt_error("CODE_OAUTH_INFO_ILLEGAL", "access")) == "replacement"
 
 
 def test_a_rejected_token_gets_one_attempt_then_waits_for_the_ladder(tmp_path: Path) -> None:
@@ -234,8 +237,8 @@ def test_a_rejected_token_gets_one_attempt_then_waits_for_the_ladder(tmp_path: P
     run(tokens.access_token())  # proactive refresh fails; retry scheduled for 3360
 
     now[0] += 10
-    run(tokens.on_unauthorized())  # the token is now known dead: try at once
-    run(tokens.on_unauthorized())  # a burst of rejections must not hammer the endpoint
+    run(tokens.on_unauthorized("access"))  # the token is now known dead: try at once
+    run(tokens.on_unauthorized("access"))  # a burst of rejections must not hammer the endpoint
 
     assert len(session.forms) == 2
     assert tokens.state is AuthState.RETRY_PENDING
@@ -248,7 +251,7 @@ def test_concurrent_callers_share_one_refresh(tmp_path: Path) -> None:
     )
 
     async def both() -> list[str | None]:
-        return list(await asyncio.gather(tokens.access_token(), tokens.on_unauthorized()))
+        return list(await asyncio.gather(tokens.access_token(), tokens.on_unauthorized("access")))
 
     assert run(both()) == ["new", "new"]
     assert len(session.forms) == 1  # a second refresh would spend a rotated-away token
@@ -259,7 +262,7 @@ def test_relogin_required_does_not_exit_and_clears_after_a_new_login(tmp_path: P
     tokens = manager(store, Response(400, REJECTED_REFRESH))
     run(tokens.access_token())
     assert tokens.state.value == "relogin-required"  # .value: mypy would narrow the attribute
-    assert run(tokens.on_unauthorized()) == "access"  # still answering, never raising
+    assert run(tokens.on_unauthorized("access")) == "access"  # still answering, never raising
 
     logged_in(tmp_path, access="relogged", at=3300)
 
@@ -341,3 +344,90 @@ def test_login_no_browser_prints_the_manual_url_for_a_headless_machine(
     out = capsys.readouterr().out
     assert "client_id=custom" in out
     assert "localhost%3A1%2Fcallback" in out
+
+
+class Clock:
+    def __init__(self, now: float) -> None:
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def test_a_failed_reactive_refresh_is_retried_on_schedule_without_spinning(
+    tmp_path: Path,
+) -> None:
+    clock = Clock(100)
+    session = FakeSession([Response(503, CIRCUIT_BREAKER), Response(200, token("new"))])
+    tokens = TokenManager(TokenClient(session, "id", "secret"), logged_in(tmp_path), clock=clock)
+    run(tokens.on_unauthorized("access"))  # long before the proactive margin
+    sleeps: list[float] = []
+
+    class Stop(Exception):
+        pass
+
+    async def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        if len(sleeps) == 3:
+            raise Stop
+        clock.now += seconds
+
+    with pytest.raises(Stop):
+        run(maintain(tokens, sleep))
+
+    assert all(seconds > 0 for seconds in sleeps)
+    assert run(tokens.access_token()) == "new"
+    assert len(session.forms) == 2
+
+
+def test_a_late_rejection_of_an_already_replaced_token_is_ignored(tmp_path: Path) -> None:
+    session = FakeSession([Response(200, token("new", "rotated"))])
+    tokens = TokenManager(
+        TokenClient(session, "id", "secret"), logged_in(tmp_path), clock=lambda: 1
+    )
+
+    assert run(tokens.on_unauthorized("access")) == "new"
+    assert run(tokens.on_unauthorized("access")) == "new"  # a slow response still using "access"
+    assert len(session.forms) == 1
+
+
+def test_an_unsaved_refresh_does_not_resurrect_the_spent_credential_on_disk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = logged_in(tmp_path)
+    tokens = manager(store, Response(200, token("new", "rotated")), Response(400, REJECTED_REFRESH))
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "replace", lambda source, destination: (_ for _ in ()).throw(OSError()))
+        assert run(tokens.access_token()) == "new"
+
+    assert run(tokens.on_unauthorized("new")) == "new"
+    assert tokens.state.value == "relogin-required"
+    assert run(tokens.access_token()) == "new"  # the old file on disk is not a new login
+    assert tokens.state.value == "relogin-required"
+
+
+def test_an_unreadable_state_file_never_escapes_while_awaiting_a_login(tmp_path: Path) -> None:
+    store = TokenStore(tmp_path / "token.json")
+    store.path.mkdir()  # reading it raises IsADirectoryError
+
+    tokens = manager(store)
+
+    assert tokens.state is AuthState.RELOGIN_REQUIRED
+    assert run(tokens.access_token()) is None
+
+
+def test_a_corrupt_state_file_starts_in_relogin_required(tmp_path: Path) -> None:
+    store = TokenStore(tmp_path / "token.json")
+    store.path.write_text("{not json")
+
+    assert manager(store).state is AuthState.RELOGIN_REQUIRED
+
+
+def test_loopback_listener_keeps_the_first_redirect() -> None:
+    with LoopbackListener("expected") as listener:
+        with urllib.request.urlopen(f"{listener.redirect_uri}?code=first&state=expected"):
+            pass
+        with pytest.raises(urllib.error.HTTPError):
+            urllib.request.urlopen(f"{listener.redirect_uri}?code=second&state=expected")
+
+        assert listener.wait(timeout=1) == "first"

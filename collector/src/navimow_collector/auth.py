@@ -25,11 +25,16 @@ MANUAL_REDIRECT_URI = "http://localhost:1/callback"
 REFRESH_EARLY_SECONDS = 300
 RETRY_DELAYS = (60, 300, 900, 3600)
 MQTT_OAUTH_ERROR = "CODE_OAUTH_INFO_ILLEGAL"
-RELOGIN_POLL_SECONDS = 60
+# The longest the maintenance loop sleeps, so a rejection reported meanwhile or a new login
+# written beside the service is acted on within a minute.
+POLL_SECONDS = 60
 
 _LOGGER = logging.getLogger(__name__)
-# Vendor prose meaning the grant itself is dead, so only a new login helps.
+# Vendor prose meaning the grant itself is dead, so only a new login helps. The status is part
+# of the text, so a bare 401/403 counts too...
 _RELOGIN_WORDS = ("401", "403", "invalid", "expired", "unauthorized", "forbidden")
+# ...except the gateway's throttling, which can arrive as a 403 and passes on its own.
+_THROTTLED_PHRASES = ("too frequent", "circuit breaker")
 
 
 @dataclass(frozen=True)
@@ -153,7 +158,7 @@ class TokenClient:
         async with self._session.request("POST", TOKEN_URL, data=form) as response:
             body = await response.text()
         if response.status < 200 or response.status >= 300:
-            raise TokenRequestError(body or f"HTTP {response.status}")
+            raise TokenRequestError(f"HTTP {response.status}: {body}".rstrip(": "))
         try:
             parsed = json.loads(body)
             if not isinstance(parsed, dict):
@@ -201,74 +206,91 @@ class TokenManager:
         # One refresh at a time: the refresh token may rotate, so a second concurrent refresh
         # would spend a token the first has already replaced.
         self._lock = asyncio.Lock()
-        self._credential = store.load()
-        self.state = AuthState.FRESH if self._credential is not None else AuthState.RELOGIN_REQUIRED
+        self._credential = self._read_store()
+        # What the state file last held, so only a genuinely new login is adopted, never a
+        # file left stale by a failed save.
+        self._on_disk = self._credential
+        self.state = AuthState.FRESH if self._credential else AuthState.RELOGIN_REQUIRED
+        if self._credential is None:
+            _LOGGER.error(
+                "No usable Navimow login in %s; run `navimow-collector login`", store.path
+            )
         self.next_attempt_at: float | None = None
         self._failures = 0
-        self._last_rejected: Credential | None = None
+        # The access token a caller has reported as rejected, until a refresh replaces it.
+        self._rejected: str | None = None
 
     async def access_token(self) -> str | None:
-        """Return the current token, proactively refreshing once it reaches its margin."""
+        """Return the current token, refreshing once it is due."""
         async with self._lock:
             now = self._clock()
-            if self._credential is not None and self.state is not AuthState.RELOGIN_REQUIRED:
-                if self._credential.refresh_at() <= now and self._may_attempt(now):
-                    await self._refresh(now)
-            return self._token_adopting_new_login()
+            if self.state is AuthState.RELOGIN_REQUIRED:
+                self._adopt_new_login()
+            elif self._due(now):
+                await self._refresh(now)
+            return self._token()
 
-    async def on_unauthorized(self) -> str | None:
-        """Refresh after a REST HTTP 401 response."""
-        return await self._refresh_on_rejection(self._credential)
+    async def on_unauthorized(self, rejected_token: str) -> str | None:
+        """Refresh after a REST HTTP 401 for `rejected_token`."""
+        return await self._on_rejection(rejected_token)
 
-    async def on_mqtt_error(self, error: str) -> str | None:
-        """Refresh when MQTT says its OAuth data is no longer valid."""
+    async def on_mqtt_error(self, error: str, rejected_token: str) -> str | None:
+        """Refresh when MQTT says the OAuth data behind `rejected_token` is no longer valid."""
         if MQTT_OAUTH_ERROR in error:
-            return await self._refresh_on_rejection(self._credential)
+            return await self._on_rejection(rejected_token)
         return await self.access_token()
 
     def seconds_until_next_action(self) -> float:
         """How long a scheduling loop may sleep before calling `access_token` again."""
-        now = self._clock()
         if self.state is AuthState.RELOGIN_REQUIRED or self._credential is None:
-            return RELOGIN_POLL_SECONDS
+            return POLL_SECONDS
         due = self._credential.refresh_at()
-        if self.state is AuthState.RETRY_PENDING and self.next_attempt_at is not None:
+        if self.next_attempt_at is not None:
             due = self.next_attempt_at
-        return max(0.0, due - now)
+        return max(0.0, due - self._clock())
 
-    async def _refresh_on_rejection(self, rejected: Credential | None) -> str | None:
+    async def _on_rejection(self, rejected_token: str) -> str | None:
         async with self._lock:
             now = self._clock()
-            # Another caller may already have replaced the rejected token. A token newly known
-            # to be dead earns one attempt at once; after that a burst of rejections waits for
-            # the retry ladder rather than hammering the endpoint.
-            if (
-                rejected is not None
-                and rejected is self._credential
-                and self.state is not AuthState.RELOGIN_REQUIRED
-                and (rejected is not self._last_rejected or self._may_attempt(now))
-            ):
-                self._last_rejected = rejected
-                await self._refresh(now)
-            return self._token_adopting_new_login()
+            if self.state is AuthState.RELOGIN_REQUIRED:
+                self._adopt_new_login()
+            # A rejection of a token already replaced (a slow response) changes nothing. A
+            # token newly known to be dead earns one attempt at once; after that a burst of
+            # rejections waits for the retry ladder rather than hammering the endpoint.
+            elif self._credential and self._credential.access_token == rejected_token:
+                newly_rejected = self._rejected != rejected_token
+                self._rejected = rejected_token
+                if newly_rejected or self._may_attempt(now):
+                    await self._refresh(now)
+            return self._token()
 
-    def _token_adopting_new_login(self) -> str | None:
-        if self.state is AuthState.RELOGIN_REQUIRED:
-            self._adopt_new_login()
+    def _due(self, now: float) -> bool:
+        if self._credential is None or not self._may_attempt(now):
+            return False
+        known_dead = self._rejected == self._credential.access_token
+        return known_dead or self._credential.refresh_at() <= now
+
+    def _token(self) -> str | None:
         return self._credential.access_token if self._credential else None
+
+    def _read_store(self) -> Credential | None:
+        try:
+            return self._store.load()
+        except (OSError, ValueError) as error:
+            _LOGGER.warning("Could not read Navimow login state: %s", error)
+            return None
 
     def _adopt_new_login(self) -> None:
         """Pick up `navimow-collector login` run beside the service, so no restart is needed."""
-        try:
-            stored = self._store.load()
-        except ValueError:
+        stored = self._read_store()
+        if stored is None or stored == self._on_disk:
             return
-        if stored is not None and stored != self._credential:
-            self._credential = stored
-            self._failures = 0
-            self.next_attempt_at = None
-            self.state = AuthState.FRESH
-            _LOGGER.info("Navimow login found in %s; authentication restored", self._store.path)
+        self._credential = self._on_disk = stored
+        self._rejected = None
+        self._failures = 0
+        self.next_attempt_at = None
+        self.state = AuthState.FRESH
+        _LOGGER.info("Navimow login found in %s; authentication restored", self._store.path)
 
     def _may_attempt(self, now: float) -> bool:
         return self.next_attempt_at is None or now >= self.next_attempt_at
@@ -287,6 +309,7 @@ class TokenManager:
         # Adopt before saving: the old refresh token may already be spent, so the new pair
         # must keep serving even if the disk refuses it.
         self._credential = refreshed
+        self._rejected = None
         self._failures = 0
         self.next_attempt_at = None
         self.state = AuthState.FRESH
@@ -294,6 +317,8 @@ class TokenManager:
             self._store.save(refreshed)
         except OSError as error:
             _LOGGER.error("Could not save refreshed Navimow credentials: %s", error)
+        else:
+            self._on_disk = refreshed
 
     def _record_failure(self, detail: str, now: float, *, relogin: bool) -> None:
         if relogin:
@@ -360,6 +385,8 @@ class LoopbackListener:
         code = parameters.get("code", [""])[0]
         if parsed.path != "/callback" or parameters.get("state") != [self._state] or not code:
             return False
+        if self._received.is_set():
+            return False  # exactly one login per listener; a replayed redirect changes nothing
         self._code = code
         self._received.set()
         return True
@@ -386,7 +413,7 @@ async def maintain(
 ) -> None:
     """Keep the credential fresh for the life of the process; a re-login is awaited, not fatal."""
     while True:
-        await sleep(manager.seconds_until_next_action())
+        await sleep(min(manager.seconds_until_next_action(), POLL_SECONDS))
         await manager.access_token()
 
 
@@ -412,7 +439,10 @@ def _required_number(value: dict[str, Any], name: str) -> float:
 
 
 def _means_relogin(detail: str) -> bool:
-    return any(word in detail.lower() for word in _RELOGIN_WORDS)
+    lowered = detail.lower()
+    if any(phrase in lowered for phrase in _THROTTLED_PHRASES):
+        return False
+    return any(word in lowered for word in _RELOGIN_WORDS)
 
 
 def _fsync_directory(path: Path) -> None:
