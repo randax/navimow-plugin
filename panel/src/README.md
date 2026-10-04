@@ -43,9 +43,50 @@ Choose a Base map under **Base map** in the panel options:
 - **Custom**: your own service, as a tile URL with `{z}`, `{x}` and `{y}`, or a WMS GetMap URL with
   `BBOX={bbox-epsg-3857}`. An attribution is required and is always shown on the map.
 
-The tile host must allow cross-origin requests. If Grafana's content security policy is enabled,
-add the host to its `connect-src`: `https://cache.kartverket.no` for the Kartverket maps,
-`https://tile.openstreetmap.org` for OpenStreetMap, or your custom service's host.
+## Terrain
+
+Turn on **Enable** under **Terrain** to draw the map over real relief, so a sloping garden looks
+like a sloping garden. The Trail follows the ground. A switch on the panel changes between
+**Flat** and **Terrain** without moving the view; **Start in** sets which one the panel opens in.
+Drag with the right mouse button, or Ctrl-drag, to tilt and turn the camera; on a touch screen, use
+two fingers.
+
+Terrain is independent of the Base map, so any Base map works with any **Source**:
+
+- **Mapterhorn** (default): worldwide, with 1 m detail in Norway from Kartverket's national
+  elevation model.
+- **AWS Terrain Tiles**: worldwide, with 10 m detail in Norway from the same model.
+- **Custom**: your own elevation tiles, as a tile URL with `{z}`, `{x}` and `{y}`, with their
+  encoding, tile size, max zoom and attribution. The encoding is Terrarium or Mapbox; tiles in an
+  encoding of their own, with custom colour factors, are not supported.
+
+## Overlay
+
+An Overlay is drawn over the Base map and under the Trail, with an **Opacity** slider. Choose it
+under **Overlay**:
+
+- **Kartverket hillshade**: shaded relief from Norway's national elevation model, which shows the
+  lie of the land in the flat view too.
+- **Custom**: your own tile or WMS service, entered like a custom Base map. This is how to use
+  imagery you hold a licence for, such as an orthophoto subscription: paste the URL your provider
+  gave you, token included. It is saved with the dashboard, so anyone who can view the dashboard
+  can read it.
+
+## Tile hosts
+
+Every tile host must allow cross-origin requests. If Grafana's content security policy is enabled,
+add the hosts in use to its `connect-src`:
+
+| Source                                | Host                             |
+| ------------------------------------- | -------------------------------- |
+| Kartverket Base maps                  | `https://cache.kartverket.no`    |
+| OpenStreetMap Base map                | `https://tile.openstreetmap.org` |
+| Mapterhorn Terrain                    | `https://tiles.mapterhorn.com`   |
+| AWS Terrain Tiles                     | `https://s3.amazonaws.com`       |
+| Kartverket hillshade Overlay          | `https://wms.geonorge.no`        |
+| A custom Base map, Terrain or Overlay | the host in its URL template     |
+
+## Browser support
 
 This panel needs WebGL 2. Without it, for example with hardware acceleration turned off, it shows a
 message instead of a map.

@@ -18,6 +18,8 @@ Provisioned dashboards (`provisioning/`, development only):
 - `/d/navimow-map-lifecycle`: one map inside a collapsible row, used to check maps are released.
 - `/d/navimow-trail`: a slice of the real Trail in `fixtures/trail-2026-09-21.csv` (from 13:30 UTC,
   in delivery order) fed through TestData, and the same data without matching column names.
+- `/d/navimow-terrain`: the same Trail with Terrain, starting flat and starting in terrain.
+- `/d/navimow-overlay`: the same Trail with the hillshade Overlay at full opacity.
 
 `plugin.json` changes need a Grafana restart: `docker compose restart`.
 
@@ -31,10 +33,22 @@ pnpm run e2e                           # against the running Grafana, fixture ti
 LIVE_TILES=1 pnpm run e2e              # the same against the real tile services (nightly in CI)
 ```
 
-Two seams only. Geometry and source resolution live in `src/model/` as pure functions that never
-load MapLibre (ESLint enforces it), and are tested with Jest. Everything visual is tested in a real browser against the
-provisioned dashboards. Headless Chromium draws WebGL through SwiftShader (see
-`playwright.config.ts`), so the first frame is slow.
+Two seams only. Geometry, source resolution and the map's style live in `src/model/` as pure
+functions that never load MapLibre (ESLint enforces it), and are tested with Jest. Everything visual
+is tested in a real browser against the provisioned dashboards. Headless Chromium draws WebGL
+through SwiftShader (see `playwright.config.ts`), so the first frame is slow.
+
+The fixture tiles in `tests/fixtures/` are plain colours a test can count: a green Base map, a blue
+Overlay, and Terrain that is 400 m high everywhere. Tests that count pixels are skipped with
+`LIVE_TILES=1`.
+
+## Terrain
+
+Terrain is declared in a map's first style, never added to a map already drawn: the terrain
+prototype found that MapLibre then keeps the camera's height above sea level, throwing the view
+outward by the height of the ground. So switching between flat and terrain, or changing the
+Terrain's source, recreates the map, and the new one starts from the old one's camera (`cameraFor`
+in `src/model/view.ts`).
 
 ## Build arrangement
 
@@ -46,13 +60,28 @@ the plugin's own origin. The copy uses absolute source paths: relative ones reso
 ## Tile hosts
 
 Tiles load directly from the browser, so every tile host must allow cross-origin requests. If
-Grafana's content security policy is enabled, add the hosts of the Base maps in use to its
-`connect-src`:
+Grafana's content security policy is enabled, add the hosts of the Base map, Terrain and Overlay in
+use to its `connect-src`:
 
 | Base map                          | Host                             |
 | --------------------------------- | -------------------------------- |
 | Kartverket topo, gråtone, turkart | `https://cache.kartverket.no`    |
 | OpenStreetMap                     | `https://tile.openstreetmap.org` |
 | Custom                            | the host in its URL template     |
+
+| Terrain           | Host                           |
+| ----------------- | ------------------------------ |
+| Mapterhorn        | `https://tiles.mapterhorn.com` |
+| AWS Terrain Tiles | `https://s3.amazonaws.com`     |
+| Custom            | the host in its URL template   |
+
+| Overlay              | Host                         |
+| -------------------- | ---------------------------- |
+| Kartverket hillshade | `https://wms.geonorge.no`    |
+| Custom               | the host in its URL template |
+
+A panel with the default Base map, Terrain enabled and the hillshade Overlay therefore needs
+`connect-src` extended with `https://cache.kartverket.no https://tiles.mapterhorn.com https://wms.geonorge.no`.
+Terrain's host is only contacted while a map is in its terrain view.
 
 Nothing else needs a policy change: the MapLibre worker is served from the plugin's own origin.

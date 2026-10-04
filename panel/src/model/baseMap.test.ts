@@ -37,9 +37,12 @@ describe('resolveBaseMap', () => {
     });
   });
 
-  test('a panel saved without Base map options gets the default', () => {
-    expect(resolveBaseMap(undefined)).toEqual(resolveBaseMap({ preset: 'kartverket-topo' }));
-  });
+  test.each([undefined, null, {}, { preset: null }])(
+    'a panel saved with %p for its Base map options gets the default',
+    (saved) => {
+      expect(resolveBaseMap(saved as unknown as BaseMapOptions)).toEqual(resolveBaseMap({ preset: 'kartverket-topo' }));
+    }
+  );
 
   test('a preset id this version does not know is refused rather than crashing the panel', () => {
     expect(resolveBaseMap({ preset: 'kartverket-retired' } as unknown as BaseMapOptions)).toEqual({
@@ -111,10 +114,141 @@ describe('resolveBaseMap', () => {
       'https://tiles.example.com/tile.png',
       'https://tiles.example.com/{z}/{x}.png',
       'ftp://tiles.example.com/{z}/{x}/{y}.png',
+      // Templates in form, but no browser can request them once filled in.
+      'https://[invalid]/{z}/{x}/{y}.png',
+      'https://tiles example.com/{z}/{x}/{y}.png',
     ])('is refused when %p is not an http(s) tile template', (url) => {
       expect(custom({ url })).toEqual({
         problem:
           'A custom Base map needs an http(s) URL containing either {z}, {x} and {y}, or {bbox-epsg-3857} for a WMS service.',
+      });
+    });
+
+    // Panel JSON written by hand or by provisioning can hold anything where text is expected.
+    test.each([null, 42, ['https://tiles.example.com/{z}/{x}/{y}.png']])(
+      'is refused for its URL, not crashed by it, when the URL is %p',
+      (url) => {
+        expect(custom({ url })).toEqual({ problem: expect.stringContaining('A custom Base map needs an http(s) URL') });
+      }
+    );
+
+    test('is refused for its URL when the whole slot is null', () => {
+      expect(resolveBaseMap({ preset: 'custom', custom: null } as unknown as BaseMapOptions)).toEqual({
+        problem: expect.stringContaining('A custom Base map needs an http(s) URL'),
+      });
+    });
+
+    test.each([null, 42])('is refused for its attribution when that is %p', (attribution) => {
+      expect(custom({ url: 'https://tiles.example.com/{z}/{x}/{y}.png', attribution })).toEqual({
+        problem: 'A custom Base map needs an attribution. Enter the credit line its provider requires.',
+      });
+    });
+
+    test('numbers saved as text are read as the numbers they spell', () => {
+      expect(
+        custom({ url: 'https://tiles.example.com/{z}/{x}/{y}.png', tileSize: '512', maxzoom: ' 20 ' })
+      ).toMatchObject({
+        source: { tileSize: 512, maxzoom: 20 },
+      });
+      expect(custom({ url: 'https://tiles.example.com/{z}/{x}/{y}.png', tileSize: null, maxzoom: '' })).toMatchObject({
+        source: { tileSize: 256, maxzoom: 18 },
+      });
+      expect(custom({ url: 'https://tiles.example.com/{z}/{x}/{y}.png', tileSize: '512.0' })).toMatchObject({
+        source: { tileSize: 512 },
+      });
+    });
+
+    // Only a plain decimal numeral is a number; the rest is refused by name, never swapped for the default.
+    test.each(['large', true, false, ['512'], {}, '1e3', '0x100', '0b100000000', '512px'])(
+      'a tile size or max zoom saved as %p is refused',
+      (saved) => {
+        expect(custom({ url: 'https://tiles.example.com/{z}/{x}/{y}.png', tileSize: saved })).toEqual({
+          problem: 'Tile size must be a whole number of pixels from 64 to 1024.',
+        });
+        expect(custom({ url: 'https://tiles.example.com/{z}/{x}/{y}.png', maxzoom: saved })).toEqual({
+          problem: 'Max zoom must be a whole number from 0 to 24.',
+        });
+      }
+    );
+
+    // Past the host name a brace can be harmless, and a URL saved with one drew before this check
+    // existed: the map sends it as written, the browser drops a fragment and folds "/x/../" away.
+    test.each([
+      'https://wms.example.com/wms?REQUEST=GetMap&BBOX={bbox-epsg-3857}&CQL_FILTER=name%3D%27{park}%27&v={v}',
+      'https://tiles.example.com/{z}/{x}/{y}.png#{park}',
+      'https://tiles.example.com/{z}/{x}/{y}.png?a=1#{b}',
+      'https://tiles.example.com/{park}/../{z}/{x}/{y}.png',
+      'https://tiles.example.com/{z}/{x}/{y}{r}.png',
+      'https://tiles.example.com/{style}/{z}/{x}/{y}.png',
+      'https://tiles.example.com/{}/{z}/{x}/{y}.png',
+      'https://tiles.example.com/{{z}/../{z}/{x}/{y}/{.png',
+      'https://tiles.example.com\\{park}/{z}/{x}/{y}.png',
+    ])('%p is accepted, braces past the host name being left as they are', (url) => {
+      expect(custom({ url })).toMatchObject({ source: { tiles: [url] } });
+    });
+
+    test('every placeholder the map fills is accepted, in the host name too', () => {
+      const url =
+        'https://{prefix}.tiles.example.com/{prefix}/{z}/{x}/{y}{ratio}.png?q={quadkey}&bbox={bbox-epsg-3857}';
+      expect(custom({ url })).toMatchObject({ source: { tiles: [url] } });
+    });
+
+    test.each([
+      ['https://{s}.tile.example.com/{z}/{x}/{y}.png', '{s}'],
+      ['https://{a}.{b}.example.com/{a}/{z}/{x}/{y}.png?v={v}', '{a} and {b}'],
+      ['https://tiles.example.com:{port}/{z}/{x}/{y}.png', '{port}'],
+    ])('%p is refused for %s in its host name, which no request could ever have reached', (url, unknown) => {
+      expect(custom({ url })).toEqual({
+        problem: `A custom Base map URL has ${unknown} in its host name, which a custom Base map does not fill in. It fills {z}, {x}, {y}, {quadkey}, {prefix}, {ratio} and {bbox-epsg-3857}.`,
+      });
+    });
+
+    test('is refused with a user name and password in the URL, which browsers will not request', () => {
+      expect(custom({ url: 'https://me:secret@tiles.example.com/{z}/{x}/{y}.png' })).toEqual({
+        problem:
+          'A custom Base map URL cannot carry a user name or password before its host: browsers refuse to request it.',
+      });
+    });
+
+    // {ratio} is nothing at all on an ordinary screen, so before the host it leaves no user name behind.
+    test.each([
+      'https://{ratio}@tiles.example.com/{z}/{x}/{y}.png',
+      'https://:{ratio}@tiles.example.com/{z}/{x}/{y}.png',
+      'https://{ratio}:{ratio}@tiles.example.com/{z}/{x}/{y}{ratio}.png',
+    ])('%p is accepted, {ratio} being filled with what the map puts there', (url) => {
+      expect(custom({ url })).toMatchObject({ source: { tiles: [url] } });
+    });
+
+    test('a brace in a user name is no brace in the host name, a line break in between or not', () => {
+      for (const url of [
+        'https://user{bad}@tiles.example.com/{z}/{x}/{y}.png',
+        'https://user{bad}\n@tiles.example.com/{z}/{x}/{y}.png',
+        'https://a@b{bad}\t@tiles.example.com/{z}/{x}/{y}.png',
+      ]) {
+        expect(custom({ url })).toEqual({
+          problem:
+            'A custom Base map URL cannot carry a user name or password before its host: browsers refuse to request it.',
+        });
+      }
+      expect(custom({ url: 'https://user@{s}.tiles.\nexample.com/{z}/{x}/{y}.png' })).toEqual({
+        problem: expect.stringContaining('has {s} in its host name'),
+      });
+    });
+
+    test('tens of thousands of unmatched braces are checked as promptly as any other URL', () => {
+      const started = performance.now();
+      const braces = '{'.repeat(40_000);
+      const inFragment = `https://tiles.example.com/{z}/{x}/{y}.png#${braces}`;
+      expect(custom({ url: inFragment })).toMatchObject({ source: { tiles: [inFragment] } });
+      const inHost = `https://${braces}.example.com/{z}/{x}/{y}.png`;
+      expect(custom({ url: inHost })).toMatchObject({ source: { tiles: [inHost] } });
+      // Milliseconds when the check is linear in the URL's length; it took seconds when it was not.
+      expect(performance.now() - started).toBeLessThan(1000);
+    });
+
+    test('of nested braces, the innermost pair is the placeholder', () => {
+      expect(custom({ url: 'https://{{s}.tiles.example.com/{{z}}/{x}/{y}.png' })).toEqual({
+        problem: expect.stringContaining('has {s} in its host name'),
       });
     });
   });
