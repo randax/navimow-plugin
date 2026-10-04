@@ -221,15 +221,16 @@ class Collector:
         self._address = address
         broker.on_connected = self._while_current(broker, self._on_connected)
         broker.on_disconnected = self._while_current(broker, self._on_disconnected)
-        broker.on_raw = self._while_current(broker, self._on_raw)
+        broker.on_raw = self._on_raw
         broker.connect_async()
         self._down_since = self._down_since or now
 
     def _while_current(
         self, broker: Broker, handler: Callable[..., Awaitable[None]]
     ) -> Callable[..., Awaitable[None]]:
-        """A callback the SDK had already queued when its connection was retired or the
-        collector stopped must not act: it would speak for a connection that is not its own."""
+        """What a connection says about itself counts only while it is the current one: the
+        SDK may already have queued the callback when the connection was retired or the
+        collector stopped, and it would then speak for a connection that is not its own."""
 
         async def guarded(*args: Any) -> None:
             if broker is self._broker:
@@ -305,7 +306,10 @@ class Collector:
         self._feed({"kind": "rest", "endpoint": "getVehicleStatus", "payload": answer})
 
     async def _on_raw(self, topic: str, payload: bytes) -> None:
-        self._feed({"kind": "mqtt", "topic": topic, "payload": _parse(payload)})
+        # A message is worth recording whichever connection received it, even one retired
+        # since; only a collector that has stopped records nothing more.
+        if self._broker is not None:
+            self._feed({"kind": "mqtt", "topic": topic, "payload": _parse(payload)})
 
     def _feed(self, record: dict[str, object]) -> None:
         """Hand the core a record in the capture format, exactly as replay does."""
