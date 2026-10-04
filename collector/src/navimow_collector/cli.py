@@ -1,11 +1,13 @@
-"""Command-line operations for replaying captures and establishing OAuth access."""
+"""Command-line operations: live collection, capture replay and establishing OAuth access."""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import secrets
 import shlex
+import signal
 import sys
 import webbrowser
 from collections.abc import Callable
@@ -19,13 +21,16 @@ from .auth import (
     MANUAL_REDIRECT_URI,
     LoopbackListener,
     TokenClient,
+    TokenManager,
     TokenRequestError,
     TokenStore,
     authorization_url,
 )
 from .config import Config, ConfigError, Secret, load_config
 from .ingest import Ingestor, read_capture
+from .live import Collector
 from .storage import StorageError, open_storage
+from .storage.buffered import BufferedStorage
 
 
 def main(
@@ -41,6 +46,8 @@ def main(
             return 0
         if args.command == "login":
             return _login(config, args, session_factory)
+        if args.command == "run":
+            return _run(config, session_factory)
         return _replay(config, args.capture)
     except (ConfigError, StorageError, TokenRequestError, OSError, ValueError) as error:
         print(str(error), file=sys.stderr)
@@ -52,6 +59,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", type=Path, help="TOML configuration file")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("config", help="print resolved configuration")
+    commands.add_parser("run", help="collect from every mower on the account until stopped")
     replay = commands.add_parser("replay", help="replay one JSONL capture")
     replay.add_argument("capture", type=Path)
     login = commands.add_parser("login", help="sign in once and store rotating OAuth credentials")
@@ -97,6 +105,32 @@ def _replay(config: Config, capture: Path) -> int:
         f"placeholders discarded: {ingestor.placeholders_discarded}"
     )
     return 0
+
+
+def _run(config: Config, session_factory: Callable[[], HTTPSession]) -> int:
+    """Collect live until SIGINT or SIGTERM; only a database missing at startup is fatal."""
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    state_dir = Path(config.collector.state_dir).expanduser()
+    storage = BufferedStorage(lambda: open_storage(config.storage), state_dir / "buffer.jsonl")
+    storage.connect()
+    try:
+        asyncio.run(_collect(config, session_factory(), storage, state_dir))
+    finally:
+        storage.close()
+    return 0
+
+
+async def _collect(
+    config: Config, session: HTTPSession, storage: BufferedStorage, state_dir: Path
+) -> None:
+    tokens = TokenManager(
+        TokenClient(session, config.auth.client_id, config.auth.client_secret.reveal()),
+        TokenStore(config.auth.state_file),
+    )
+    stop = asyncio.Event()
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        asyncio.get_running_loop().add_signal_handler(signum, stop.set)
+    await Collector(session, tokens, storage, state_dir).run(stop)
 
 
 def _login(
