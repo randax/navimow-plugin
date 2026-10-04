@@ -31,6 +31,8 @@ class Database:
         self.down = False
         self.attempts = 0
         self.sent = 0  # rows the database took, repeats included
+        self.writes = 0
+        self.drop_at_write: int | None = None  # the connection is lost at this write
         self.crash: BaseException | None = None  # raised by the next write, as a dying process
 
     def open(self) -> Storage:
@@ -77,6 +79,9 @@ class Observed:
     def write_trail(self, points: Sequence[TrailPoint]) -> int:
         if self._db.crash:
             raise self._db.crash
+        self._db.writes += 1
+        if self._db.writes == self._db.drop_at_write:
+            raise StorageError("postgres: server closed the connection unexpectedly")
         written = self._storage.write_trail(points)
         self._db.sent += len(points)
         return written
@@ -326,6 +331,25 @@ def test_a_rejected_row_does_not_start_an_outage(database: str, tmp_path: Path) 
 
     assert db.trail() == [1, 3]
     assert (storage.buffered, storage.rejected, storage.reachable) == (0, 1, True)
+
+
+def test_a_rejected_row_is_counted_once_however_often_its_batch_is_retried(
+    database: str, tmp_path: Path
+) -> None:
+    db, clock = Database(database), Clock()
+    storage = buffered(db, tmp_path, clock)
+    impossible = replace(points(2)[0], vehicle_state=2**40)
+    # The batch is rejected, then tried row by row: 1 is written, 2 rejected, and 3 meets
+    # an outage, so all three wait and are tried again.
+    db.drop_at_write = 4
+    storage.write_trail([*points(1), impossible, *points(3)])
+    assert (storage.buffered, storage.rejected) == (3, 1)
+
+    clock.now += RETRY_SECONDS
+    storage.flush()
+
+    assert db.trail() == [1, 3]
+    assert (storage.buffered, storage.rejected) == (0, 1)
 
 
 def test_rows_spilled_after_a_torn_line_are_not_lost_with_it(database: str, tmp_path: Path) -> None:

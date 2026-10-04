@@ -62,6 +62,8 @@ class BufferedStorage:
         self._dropping = False  # whether this outage's loss has been reported yet
         self.dropped = 0
         self.rejected = 0
+        # Rejected rows whose batch may yet be retried after an outage: said and counted once.
+        self._refused: set[Row] = set()
 
     @property
     def reachable(self) -> bool:
@@ -96,6 +98,7 @@ class BufferedStorage:
             return
         self._memory.clear()
         self._dropping = False
+        self._refused.clear()
         _LOGGER.info("Database reachable again; wrote %d buffered rows", waiting)
 
     def close(self) -> None:
@@ -112,7 +115,9 @@ class BufferedStorage:
         self.flush()
         if not self.buffered:
             try:
-                return self._send(rows)
+                written = self._send(rows)
+                self._refused.clear()
+                return written
             except StorageError as error:
                 self._outage(error)
         self._memory.extend(rows)
@@ -136,8 +141,10 @@ class BufferedStorage:
             # would keep every row behind it waiting: find it, drop it, keep the rest.
             if len(rows) > 1:
                 return sum(self._send([row]) for row in rows)
-            self.rejected += 1
-            _LOGGER.error("Dropping a row the database rejected (%s): %r", error, rows[0])
+            if rows[0] not in self._refused:
+                self._refused.add(rows[0])
+                self.rejected += 1
+                _LOGGER.error("Dropping a row the database rejected (%s): %r", error, rows[0])
             return 0
 
     def _outage(self, error: StorageError) -> None:
