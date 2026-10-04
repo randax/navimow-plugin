@@ -27,6 +27,8 @@ export interface TrailScene {
   lines: FeatureCollection<LineString, { job: string | null; colour: string }>;
   mower?: MowerMarker;
   bounds?: Bounds;
+  /** What placed it; a new Dock origin can move the Trail far enough to need framing again. */
+  origin?: DockOrigin;
 }
 
 export const EMPTY_SCENE: TrailScene = { lines: { type: 'FeatureCollection', features: [] } };
@@ -63,6 +65,7 @@ export function placeTrails(trails: Trail[], origin: DockOrigin, now: number): T
             ]
       ),
     },
+    origin,
   };
 
   const all = placed.flat();

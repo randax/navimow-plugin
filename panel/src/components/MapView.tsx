@@ -114,12 +114,14 @@ const MapCanvas: React.FC<Props> = ({ baseMap, trail, width, height }) => {
   const element = useRef<HTMLDivElement>(null);
   const map = useRef<Map | null>(null);
   const lines = useRef(trail.lines);
-  const fitted = useRef(false);
+  const fittedFor = useRef<string>(undefined);
+  const countPending = useRef(true);
 
   // New data replaces the Trail's source data only. The source exists once the style has loaded;
   // until then the style itself carries the data, topped up on load below.
   useEffect(() => {
     lines.current = trail.lines;
+    countPending.current = true;
     const source = map.current?.getSource<GeoJSONSource>('trail');
     if (source) {
       redrawing(element.current);
@@ -145,23 +147,29 @@ const MapCanvas: React.FC<Props> = ({ baseMap, trail, width, height }) => {
     created.on('error', (e) => console.error('[navimow-map]', e.error?.message ?? e));
     created.on('style.load', () => created.getSource<GeoJSONSource>('trail')?.setData(lines.current));
     // Marks a fully drawn map, and how many Trails it drew, so browser tests can wait for rendering
-    // to finish and see what came out. A line crossing tiles comes back once per tile, hence the ids.
+    // to finish and see what came out. Counted once per new Trail data, so panning never pays for it;
+    // a line crossing tiles comes back once per tile, hence the ids.
     created.on('idle', () => {
-      const drawn = new Set(created.queryRenderedFeatures({ layers: ['trail'] }).map((f) => f.id));
-      element.current?.setAttribute('data-trails-drawn', String(drawn.size));
+      if (countPending.current) {
+        countPending.current = false;
+        const drawn = new Set(created.queryRenderedFeatures({ layers: ['trail'] }).map((f) => f.id));
+        element.current?.setAttribute('data-trails-drawn', String(drawn.size));
+      }
       element.current?.setAttribute('data-map-idle', '');
     });
     map.current = created;
   }, [baseMap]);
 
-  // Frame the Trail when it first appears, and never again: a refresh must not undo the owner's panning.
+  // Frame the Trail when it first appears and when a new Dock origin moves it, but never on a refresh,
+  // which must not undo the owner's panning.
+  const origin = trail.origin && `${trail.origin.lat},${trail.origin.lon},${trail.origin.rotation}`;
   useEffect(() => {
-    if (map.current && trail.bounds && !fitted.current) {
-      fitted.current = true;
+    if (map.current && trail.bounds && origin !== fittedFor.current) {
+      fittedFor.current = origin;
       // Padding is capped so a small panel still has room left to fit into.
       map.current.fitBounds(trail.bounds, { padding: Math.min(40, width / 4, height / 4), maxZoom: 20, duration: 0 });
     }
-  }, [trail.bounds, width, height]);
+  }, [trail.bounds, origin, width, height]);
 
   // The rotating icon and its age label are separate markers, so the label stays upright.
   useEffect(() => {

@@ -15,6 +15,10 @@ const at = (minutesAgo: number, x: number, y: number, extra: Partial<TrailPoint>
 });
 
 describe('placeTrails', () => {
+  test('the scene records the Dock origin it was placed with, so the view can follow a change', () => {
+    expect(placeTrails([{ points: [at(1, 0, 0)] }], ORIGIN, NOW).origin).toEqual(ORIGIN);
+  });
+
   test('every point of every Trail is drawn, one line per Job, placed by the Dock origin', () => {
     const trails: Trail[] = [
       { job: 'a', points: [at(60, 0, 0), at(59, 1, 0), at(58, 1, 1)] },
@@ -133,6 +137,17 @@ describe('trailScene', () => {
 
   test('an empty range needs no Dock origin, so the map still shows', () => {
     expect(trailScene([], {}, NOW)).toEqual({ scene: EMPTY_SCENE });
+  });
+
+  test('an empty Trail query beside another query with rows still shows the map', () => {
+    const empty = createDataFrame({ fields: ['time', 'x', 'y'].map((name) => ({ name, values: [] })) });
+    const zoneProgress = createDataFrame({
+      fields: [
+        { name: 'zone', values: [1, 2] },
+        { name: 'progress', values: [50, 10] },
+      ],
+    });
+    expect(trailScene([empty, zoneProgress], { dockOrigin: ORIGIN }, NOW)).toEqual({ scene: EMPTY_SCENE });
   });
 
   test('a frame missing required columns explains itself', () => {

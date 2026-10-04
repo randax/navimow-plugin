@@ -45,8 +45,17 @@ const REQUIRED = ['time', 'x', 'y'] as const;
 const toNumber = (v: unknown): number =>
   typeof v === 'number' ? v : typeof v === 'string' && v.trim() !== '' ? Number(v) : NaN;
 
-// Grafana time fields hold epoch milliseconds; a text column may hold either that or an ISO date.
-const toTime = (v: unknown): number => (typeof v === 'string' && Number.isNaN(Number(v)) ? Date.parse(v) : toNumber(v));
+// Grafana time fields hold epoch milliseconds; a text column may hold either that or a date. A date
+// with a time of day but no zone is UTC, as Grafana reads SQL timestamps; Date.parse would take the
+// browser's zone.
+const toTime = (v: unknown): number => {
+  if (typeof v !== 'string' || !Number.isNaN(Number(v))) {
+    return toNumber(v);
+  }
+  const text = v.trim();
+  const zoneless = !/(Z|[+-]\d\d:?\d\d)$/i.test(text) && /\d:\d\d(:\d\d(\.\d+)?)?$/.test(text);
+  return Date.parse(zoneless ? `${text.replace(' ', 'T')}Z` : text);
+};
 
 const toText = (v: unknown): string | undefined => (v === null || v === undefined || v === '' ? undefined : String(v));
 
@@ -76,10 +85,12 @@ export function readTrails(
   const values = (frame: DataFrame, column: keyof TrailColumns) =>
     frame.fields.find((f) => f.name === names[column])?.values;
 
-  const withRows = frames.filter((f) => f.length > 0);
-  const usable = withRows.filter((f) => REQUIRED.every((c) => values(f, c)));
-  if (usable.length === 0 && withRows.length > 0) {
-    const missing = REQUIRED.filter((c) => !values(withRows[0], c)).map((c) => names[c]);
+  const missingFrom = (frame: DataFrame) => REQUIRED.filter((c) => !values(frame, c)).map((c) => names[c]);
+  // A Trail query that returned no rows still has its columns: that is an empty range, not a mistake.
+  const usable = frames.filter((f) => missingFrom(f).length === 0);
+  if (usable.length === 0 && frames.some((f) => f.length > 0)) {
+    // The frame closest to a Trail is the one the owner meant as the Trail query.
+    const missing = frames.map(missingFrom).reduce((a, b) => (b.length < a.length ? b : a));
     return {
       problem:
         `No ${quoted(missing)} column${missing.length > 1 ? 's' : ''} for the Trail. ` +
