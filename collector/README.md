@@ -65,15 +65,15 @@ login from the state file without a restart.
 
 ## Live collection
 
-After logging in once, start the collector and leave it running:
+After logging in once, start collecting and leave the collector alone:
 
 ```bash
-navimow-collector --config collector/navimow-collector.example.toml run
+navimow-collector --config collector/navimow-collector.example.toml collect
 ```
 
 One process records every mower on the account, and every row carries its
 `mower_id`. A mower added to the account later is picked up at the next start.
-The command runs until it receives SIGINT or SIGTERM. Started before any login
+The command collects until it receives SIGINT or SIGTERM. Started before any login
 exists, it waits for one rather than failing.
 
 **Reconnection** needs no operator. The broker connection keeps alive every 60
@@ -81,8 +81,8 @@ seconds, because the broker silently drops a connection that has been idle for
 about ten minutes. Broker credentials are fetched once and reused for every
 reconnect. They are fetched again only when the access token has been refreshed
 or the connection has stayed down for a minute, never twice within a minute,
-and after 1, 5, 15 and then 60 minutes while fetches keep failing: that endpoint
-rate-limits aggressively.
+and at growing intervals (1, 5, 15, then 60 minutes) while the connection stays
+down or the fetch keeps failing: that endpoint rate-limits aggressively.
 
 **Gaps.** Nothing can backfill what was missed while disconnected, so every
 reconnection or restart writes one `collector_gap` row per mower with its
@@ -104,8 +104,9 @@ record, so a capture that contains it replays to the same row:
 After that, rows it cannot take are held in memory (1,000 rows), then appended
 to `buffer.jsonl` in the state directory (up to 64 MiB; beyond that, or if the
 file cannot be written, the newest rows are dropped and an error is logged),
-and written when the database returns, in this run or the next. Put a `connect_timeout` in the DSN: without one, a database host that has
-vanished from the network can stall the collector on every retry.
+and written when the database returns, by this process or the next. Put a
+`connect_timeout` in the DSN: without one, a database host that has vanished
+from the network can stall the collector on every retry.
 
 ```toml
 [collector]

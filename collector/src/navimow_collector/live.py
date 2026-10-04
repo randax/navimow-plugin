@@ -127,7 +127,7 @@ class Collector:
         self._flowed_until = _read_marker(self._marker)
         self._gap_reason = "restart"
 
-    async def run(self, stop: asyncio.Event) -> None:
+    async def collect(self, stop: asyncio.Event) -> None:
         """Collect until `stop` is set."""
         try:
             while not stop.is_set():

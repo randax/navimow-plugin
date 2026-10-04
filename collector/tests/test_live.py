@@ -605,16 +605,16 @@ def test_points_survive_a_database_outage_while_live(live: Live) -> None:
     assert [row[1] for row in live.trail()] == [at(NOW + 1), at(NOW + 3), at(NOW + 5)]
 
 
-def test_running_ticks_until_stopped_then_disconnects(live: Live) -> None:
+def test_collecting_continues_until_stopped_then_disconnects(live: Live) -> None:
     async def scenario() -> None:
         stop = asyncio.Event()
-        running = asyncio.create_task(live.start().run(stop))
+        collecting = asyncio.create_task(live.start().collect(stop))
         while not live.brokers:
             await asyncio.sleep(0)
         await live.broker.accept()
         live.clock.now = NOW + 45
         stop.set()
-        await running
+        await collecting
 
         live.clock.now = NOW + 3600
         await live.connected()
@@ -679,7 +679,7 @@ def test_the_sdk_connection_drives_the_collector_as_the_fake_broker_does(live: L
     assert [(row[0], row[1]) for row in live.trail()] == [("DEVICE_1", at(NOW))]
 
 
-def test_the_run_command_collects_until_it_is_signalled(
+def test_the_collect_command_collects_until_it_is_signalled(
     live: Live, config_file: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("NAVIMOW_AUTH_STATE_FILE", str(live.store.path))
@@ -691,15 +691,15 @@ def test_the_run_command_collects_until_it_is_signalled(
             os.kill(os.getpid(), signal.SIGTERM)  # the service manager stops the collector
             return live.vendor.request(method, url, **kwargs)
 
-    assert main(["--config", str(config_file), "run"], session_factory=Terminating) == 0
+    assert main(["--config", str(config_file), "collect"], session_factory=Terminating) == 0
     assert "smarthome/authList" in live.vendor.calls  # it got as far as looking for mowers
 
 
-def test_the_run_command_refuses_to_start_without_its_database(
+def test_the_collect_command_refuses_to_start_without_its_database(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     config = tmp_path / "collector.toml"
     config.write_text('[storage]\ndsn = "postgresql://nobody@127.0.0.1:1/none"\n')
 
-    assert main(["--config", str(config), "run"]) == 2
+    assert main(["--config", str(config), "collect"]) == 2
     assert "postgres" in capsys.readouterr().err

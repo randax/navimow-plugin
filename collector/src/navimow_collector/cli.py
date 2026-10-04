@@ -46,8 +46,8 @@ def main(
             return 0
         if args.command == "login":
             return _login(config, args, session_factory)
-        if args.command == "run":
-            return _run(config, session_factory)
+        if args.command == "collect":
+            return _collect(config, session_factory)
         return _replay(config, args.capture)
     except (ConfigError, StorageError, TokenRequestError, OSError, ValueError) as error:
         print(str(error), file=sys.stderr)
@@ -59,7 +59,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", type=Path, help="TOML configuration file")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("config", help="print resolved configuration")
-    commands.add_parser("run", help="collect from every mower on the account until stopped")
+    commands.add_parser("collect", help="record every mower on the account until stopped")
     replay = commands.add_parser("replay", help="replay one JSONL capture")
     replay.add_argument("capture", type=Path)
     login = commands.add_parser("login", help="sign in once and store rotating OAuth credentials")
@@ -107,20 +107,20 @@ def _replay(config: Config, capture: Path) -> int:
     return 0
 
 
-def _run(config: Config, session_factory: Callable[[], HTTPSession]) -> int:
+def _collect(config: Config, session_factory: Callable[[], HTTPSession]) -> int:
     """Collect live until SIGINT or SIGTERM; only a database missing at startup is fatal."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     state_dir = Path(config.collector.state_dir).expanduser()
     storage = BufferedStorage(lambda: open_storage(config.storage), state_dir / "buffer.jsonl")
     storage.connect()
     try:
-        asyncio.run(_collect(config, session_factory(), storage, state_dir))
+        asyncio.run(_until_signalled(config, session_factory(), storage, state_dir))
     finally:
         storage.close()
     return 0
 
 
-async def _collect(
+async def _until_signalled(
     config: Config, session: HTTPSession, storage: BufferedStorage, state_dir: Path
 ) -> None:
     tokens = TokenManager(
@@ -130,7 +130,7 @@ async def _collect(
     stop = asyncio.Event()
     for signum in (signal.SIGINT, signal.SIGTERM):
         asyncio.get_running_loop().add_signal_handler(signum, stop.set)
-    await Collector(session, tokens, storage, state_dir).run(stop)
+    await Collector(session, tokens, storage, state_dir).collect(stop)
 
 
 def _login(
