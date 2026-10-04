@@ -102,10 +102,10 @@ record, so a capture that contains it replays to the same row:
 
 **Database outages.** The database must be reachable when the collector starts.
 After that, rows it cannot take are held in memory (1,000 rows), then appended
-to `buffer.jsonl` in the state directory (up to 64 MiB), and written when the
-database returns, by this process or the next. Once the file is full, or if it
-cannot be written, memory keeps what it can hold and the newest rows beyond
-that are dropped, with an error logged. A clean stop moves what is in memory to
+to `buffer.jsonl` in the state directory (up to 64 MiB of rows waiting), and
+written when the database returns, by this process or the next. Once the file
+is full, or if it cannot be written, memory keeps what it can hold and beyond
+that the newest Trail points are dropped, gaps last, with an error logged. A clean stop moves what is in memory to
 the file; a crash while the database is away loses what was still in memory, at
 most 1,000 rows. Gap rows go to the file at once, and the note of when a gap
 started is kept until its row has been handed over, so a crash at any point
@@ -114,13 +114,18 @@ does a gap wait in memory with the Trail points, exposed to a crash like them.
 
 A backlog is written back 200 rows at a time, a slice every tenth of a second,
 so collection, token refresh and shutdown carry on while it drains; a stop in
-the middle leaves the rest in the file for the next start.
+the middle leaves the rest in the file for the next start. Rows already written
+stay in the file until all of it is, so while it drains the file can reach
+twice its limit.
 
 A row the database refuses for what it holds is logged and dropped, never
 retried, so it cannot hold up the rows behind it. Trouble with the buffer file
 itself (unreadable, or not removable after its rows were written) is logged and
 costs at most the rows in that file; it never stops collection. Emptying or
 deleting the file by hand is safe at any time and costs only the rows in it.
+Do not overwrite it in place, for instance by copying a backup over it while
+the collector is working through it: the collector would carry on from its old
+position in the new contents and skip what lies before it.
 
 A slow database counts as an outage too. By default a connection attempt gets
 5 seconds and each statement 5 seconds (a lock held by maintenance included),

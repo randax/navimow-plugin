@@ -306,6 +306,125 @@ def test_the_disk_buffer_never_exceeds_its_limit(database: str, tmp_path: Path) 
     assert 10 < len(db.trail()) < 20
 
 
+def full(db: Database, tmp_path: Path, clock: Clock) -> BufferedStorage:
+    """A buffer after a long outage: its file at the limit and its memory at its own."""
+    storage = buffered(db, tmp_path, clock, memory_rows=100, disk_bytes=100_000)
+    db.go_down()
+    for second in range(1000):
+        storage.write_trail(points(second))
+    assert storage.dropped > 0 and REPLAY_ROWS + 100 < storage.buffered < 1000
+    return storage
+
+
+def drained(db: Database, tmp_path: Path, clock: Clock) -> list[int]:
+    """What the database holds once the next process has written the buffer file out."""
+    restarted = buffered(db, tmp_path, clock)
+    while restarted.buffered:
+        restarted.flush()
+    return db.trail()
+
+
+def test_a_clean_stop_while_a_full_buffer_drains_saves_what_memory_holds(
+    database: str, tmp_path: Path
+) -> None:
+    db, clock = Database(database), Clock()
+    storage = full(db, tmp_path, clock)
+    held = storage.buffered
+
+    db.down = False
+    storage.close()  # stopped as soon as the database is back, one slice written
+
+    assert len(db.trail()) == REPLAY_ROWS
+    assert drained(db, tmp_path, clock) == list(range(held))
+
+
+def test_rows_arriving_while_a_full_buffer_drains_are_not_dropped(
+    database: str, tmp_path: Path
+) -> None:
+    db, clock = Database(database), Clock()
+    storage = full(db, tmp_path, clock)
+    held, dropped = storage.buffered, storage.dropped
+
+    db.down = False
+    clock.now += RETRY_SECONDS
+    for second in range(2000, 2005):
+        storage.write_trail(points(second))
+    storage.close()
+
+    assert storage.dropped == dropped
+    assert drained(db, tmp_path, clock) == [*range(held), *range(2000, 2005)]
+
+
+def test_the_buffer_file_stays_within_twice_its_limit_however_often_it_is_half_drained(
+    database: str, tmp_path: Path
+) -> None:
+    # Rows already written stay in the file until all of it is: they must not let it grow
+    # for ever under a database that keeps coming and going.
+    db, clock = Database(database), Clock()
+    storage = full(db, tmp_path, clock)
+    for outage in range(1, 12):
+        db.down = False
+        clock.now += RETRY_SECONDS
+        storage.flush()  # one slice, then the database is away again
+        db.go_down()
+        for second in range(outage * 1000, outage * 1000 + 300):
+            storage.write_trail(points(second))
+
+    assert 100_000 < (tmp_path / "buffer.jsonl").stat().st_size <= 200_000
+
+
+def test_rows_a_stop_cannot_save_are_counted_as_dropped(database: str, tmp_path: Path) -> None:
+    db = Database(database)
+    (tmp_path / "state").write_text("a file where the state directory should be")
+    storage = BufferedStorage(db.open, tmp_path / "state" / "buffer.jsonl", clock=Clock())
+    db.go_down()
+    storage.write_trail(points(1, 2, 3))
+
+    storage.close()
+
+    assert storage.dropped == 3
+
+
+def test_when_rows_must_be_dropped_a_gap_is_the_last_to_go(database: str, tmp_path: Path) -> None:
+    # The collector has already forgotten when a gap began, so nothing can record it again.
+    db = Database(database)
+    (tmp_path / "state").write_text("a file where the state directory should be")
+    storage = BufferedStorage(
+        db.open, tmp_path / "state" / "buffer.jsonl", memory_rows=10, clock=Clock()
+    )
+    gap = Gap("DEVICE_1", START, START + timedelta(seconds=30), GapReason.RECONNECT)
+    db.go_down()
+    storage.write_trail(points(*range(10)))
+    storage.write_gaps([gap])
+    storage.write_trail(points(10))
+    assert (storage.buffered, storage.dropped) == (10, 2)
+
+    db.down = False
+    storage.close()
+
+    assert db.trail() == list(range(9))
+    assert gaps(database) == [(gap.mower_id, gap.start_time, gap.end_time, gap.reason)]
+
+
+def test_a_rejection_is_forgotten_once_its_slice_is_written(database: str, tmp_path: Path) -> None:
+    db, clock = Database(database), Clock()
+    storage = buffered(db, tmp_path, clock)
+    impossible = replace(points(5000)[0], vehicle_state=2**40)
+    db.go_down()
+    storage.write_trail([impossible, *points(*range(3 * REPLAY_ROWS))])
+    db.down = False
+    clock.now += RETRY_SECONDS
+    storage.flush()  # the first slice, with the rejected row, is done with
+    assert (storage.rejected, storage.buffered) == (1, 2 * REPLAY_ROWS + 1)
+
+    storage.write_trail([impossible])  # delivered again while the backlog is still draining
+    while storage.buffered:
+        storage.flush()
+
+    assert storage.rejected == 2
+    assert db.trail() == list(range(3 * REPLAY_ROWS))
+
+
 def test_a_gap_the_buffer_file_cannot_take_does_not_cost_the_rows_in_memory(
     database: str, tmp_path: Path
 ) -> None:

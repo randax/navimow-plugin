@@ -65,7 +65,8 @@ class BufferedStorage:
         self._dropping = False  # whether this outage's loss has been reported yet
         self.dropped = 0
         self.rejected = 0
-        # Rejected rows whose batch may yet be retried after an outage: said and counted once.
+        # Rows rejected in an attempt an outage then interrupted: its rows will be tried
+        # again, and a rejection among them is said and counted once.
         self._refused: set[Row] = set()
 
     @property
@@ -112,7 +113,6 @@ class BufferedStorage:
             return
         if not self.buffered:
             self._dropping = False
-            self._refused.clear()
             _LOGGER.info("Database reachable again; every buffered row is written")
 
     def close(self) -> None:
@@ -121,6 +121,10 @@ class BufferedStorage:
         self.flush()
         if self._memory:
             self._spill_memory()
+        if self._memory:
+            _LOGGER.error("%d buffered rows could not be saved and are lost", len(self._memory))
+            self.dropped += len(self._memory)
+            self._memory.clear()
         if self._storage is not None:
             self._storage.close()
             self._storage = None
@@ -129,9 +133,7 @@ class BufferedStorage:
         self.flush()
         if not self.buffered:
             try:
-                written = self._send(rows)
-                self._refused.clear()
-                return written
+                return self._send(rows)
             except StorageError as error:
                 self._outage(error)
         self._memory.extend(rows)
@@ -143,6 +145,11 @@ class BufferedStorage:
 
     def _send(self, rows: Sequence[Row]) -> int:
         """Write rows now, raising StorageError only when the database cannot be reached."""
+        written = self._attempt(rows)
+        self._refused.clear()  # done with: none of these rows will be tried again
+        return written
+
+    def _attempt(self, rows: Sequence[Row]) -> int:
         if self._storage is None:
             self._storage = self._open()
         points = [row for row in rows if isinstance(row, TrailPoint)]
@@ -154,7 +161,7 @@ class BufferedStorage:
             # Retrying cannot help a row the database refuses for what it holds, and it
             # would keep every row behind it waiting: find it, drop it, keep the rest.
             if len(rows) > 1:
-                return sum(self._send([row]) for row in rows)
+                return sum(self._attempt([row]) for row in rows)
             if rows[0] not in self._refused:
                 self._refused.add(rows[0])
                 self.rejected += 1
@@ -171,14 +178,20 @@ class BufferedStorage:
 
     def _spill_memory(self) -> None:
         """Move memory to disk. Rows the file has no room for, or cannot take, stay in memory
-        up to its limit; beyond that the newest are dropped, so memory is bounded whatever
-        happens to the disk."""
+        up to its limit; beyond that the newest Trail points are dropped, so memory is
+        bounded whatever happens to the disk.
+
+        The limit is on rows waiting: what a draining file holds that was already sent does
+        not count, or nothing could be saved until all of it was. Since those rows stay in
+        the file until it is finished, the file itself may reach twice the limit.
+        """
         kept, problem = 0, "it has reached its size limit"
         try:
             self._spill.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             with self._spill.open("ab+", buffering=0) as spill:
                 self._forget_position_in_another_file(spill)
-                room = self._disk_bytes - _end_torn_line(spill)
+                size = _end_torn_line(spill)
+                room = min(self._disk_bytes - (size - self._replayed), 2 * self._disk_bytes - size)
                 lines: list[bytes] = []
                 for row in self._memory:
                     line = _encode(row)
@@ -208,7 +221,12 @@ class BufferedStorage:
                 )
             self._dropping = True
             self.dropped += lost
-            del self._memory[self._memory_rows :]
+            # A gap goes last: its writer has already forgotten when it began, so unlike a
+            # Trail point it leaves no trace of having been lost.
+            gaps: list[Row] = [row for row in self._memory if isinstance(row, Gap)]
+            points: list[Row] = [row for row in self._memory if isinstance(row, TrailPoint)]
+            points = points[: max(self._memory_rows - len(gaps), 0)]
+            self._memory = [*points, *gaps][: self._memory_rows]
 
     def _replay_spill(self, limit: int) -> int:
         """Send up to `limit` lines of the buffer file, from where the last call stopped,
