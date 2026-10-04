@@ -14,7 +14,9 @@ describe('resolveTerrain', () => {
         encoding: 'terrarium',
         tileSize: 512,
         maxzoom: 16,
-        attribution: '<a href="https://mapterhorn.com/attribution">© Mapterhorn</a>',
+        // Kartverket is credited in its own right, whatever the Base map: its data is what is shown.
+        attribution:
+          '<a href="https://mapterhorn.com/attribution">© Mapterhorn</a>, <a href="https://www.kartverket.no/">© Kartverket</a>',
       },
     });
   });
@@ -72,9 +74,14 @@ describe('resolveTerrain', () => {
       });
     });
 
-    test('is refused when the URL is not a tile template', () => {
-      expect(custom({ url: 'https://terrain.example.com/tiles' })).toEqual({
-        problem: expect.stringContaining('A custom Terrain needs an http(s) URL'),
+    test.each([
+      'https://terrain.example.com/tiles',
+      // A map service draws pictures of the ground, not tiles that hold its elevation.
+      'https://wms.example.com/wms?REQUEST=GetMap&BBOX={bbox-epsg-3857}',
+      'https://[invalid]/{z}/{x}/{y}.png',
+    ])('is refused when %p is not an http(s) tile template', (template) => {
+      expect(custom({ url: template })).toEqual({
+        problem: 'A custom Terrain needs an http(s) URL containing {z}, {x} and {y}.',
       });
     });
 

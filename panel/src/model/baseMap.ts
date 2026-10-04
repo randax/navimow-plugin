@@ -56,10 +56,30 @@ export const BASE_MAP_PRESETS: Record<BaseMapPreset, Preset> = {
 const escapeHtml = (text: string): string =>
   text.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] ?? c);
 
+/** A custom slot: what it is called, what it accepts, and what stands in for numbers left blank. */
+export interface CustomSlot {
+  name: string;
+  /** Whether a WMS service will do as well as a tile service. */
+  wms: boolean;
+  tileSize: number;
+  maxzoom: number;
+}
+
+export const CUSTOM_BASE_MAP: CustomSlot = { name: 'Base map', wms: true, tileSize: 256, maxzoom: 18 };
+
 // MapLibre fills both kinds of template itself: {z}/{x}/{y} for tile services, {bbox-epsg-3857} for WMS.
-const isTileTemplate = (url: string): boolean =>
-  /^https?:\/\//i.test(url) &&
-  (['{z}', '{x}', '{y}'].every((p) => url.includes(p)) || url.includes('{bbox-epsg-3857}'));
+const isTemplate = (url: string, wms: boolean): boolean =>
+  ['{z}', '{x}', '{y}'].every((p) => url.includes(p)) || (wms && url.includes('{bbox-epsg-3857}'));
+
+/** The URL as a browser would request it for one tile, if it is an http(s) URL a browser can parse. */
+const filledIn = (template: string): URL | undefined => {
+  try {
+    const url = new URL(template.replace(/\{[^}]*\}/g, '0'));
+    return /^https?:$/.test(url.protocol) ? url : undefined;
+  } catch {
+    return undefined;
+  }
+};
 
 /** Ranges for the custom slot's numbers, shared with the option editor. */
 export const TILE_SIZE = { min: 64, max: 1024 };
@@ -71,20 +91,26 @@ const inRange = (value: number, { min, max }: { min: number; max: number }): boo
 /** What every custom slot comes to, whichever kind of source it then becomes. */
 export type CustomTiles = Required<Pick<RasterSourceSpecification, 'tiles' | 'tileSize' | 'maxzoom' | 'attribution'>>;
 
-/** Checks a custom slot. `slot` names it in the problem shown; `defaults` stand in for numbers left blank. */
+/** Checks a custom slot, so that what is wrong with it is shown in the panel rather than logged by the map. */
 export function customTiles(
-  slot: string,
-  custom: CustomSourceOptions | undefined,
-  defaults: { tileSize: number; maxzoom: number }
+  slot: CustomSlot,
+  { url = '', tileSize = slot.tileSize, maxzoom = slot.maxzoom, attribution = '' }: CustomSourceOptions = {}
 ): CustomTiles | { problem: string } {
-  const { url = '', tileSize = defaults.tileSize, maxzoom = defaults.maxzoom, attribution = '' } = custom ?? {};
-  if (!isTileTemplate(url.trim())) {
+  const request = isTemplate(url, slot.wms) ? filledIn(url.trim()) : undefined;
+  if (!request) {
     return {
-      problem: `A custom ${slot} needs an http(s) URL containing either {z}, {x} and {y}, or {bbox-epsg-3857} for a WMS service.`,
+      problem: slot.wms
+        ? `A custom ${slot.name} needs an http(s) URL containing either {z}, {x} and {y}, or {bbox-epsg-3857} for a WMS service.`
+        : `A custom ${slot.name} needs an http(s) URL containing {z}, {x} and {y}.`,
+    };
+  }
+  if (request.username || request.password) {
+    return {
+      problem: `A custom ${slot.name} URL cannot carry a user name or password before its host: browsers refuse to request it.`,
     };
   }
   if (!attribution.trim()) {
-    return { problem: `A custom ${slot} needs an attribution. Enter the credit line its provider requires.` };
+    return { problem: `A custom ${slot.name} needs an attribution. Enter the credit line its provider requires.` };
   }
   // The editor clamps these, but panel JSON does not; a tile size of 0 would request every tile at max zoom.
   if (!inRange(tileSize, TILE_SIZE)) {
@@ -104,6 +130,6 @@ export function resolveBaseMap({ preset, custom }: BaseMapOptions = { preset: 'k
       ? { source: known.source }
       : { problem: `Unknown Base map "${preset}". Choose another under Base map in the panel options.` };
   }
-  const tiles = customTiles('Base map', custom, { tileSize: 256, maxzoom: 18 });
+  const tiles = customTiles(CUSTOM_BASE_MAP, custom);
   return 'problem' in tiles ? tiles : { source: { type: 'raster', ...tiles } };
 }

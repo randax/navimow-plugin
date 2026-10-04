@@ -1,6 +1,6 @@
 // Type-only import: this module never loads the map library, so it stays testable without a browser.
 import type { RasterDEMSourceSpecification } from 'maplibre-gl';
-import { customTiles, type CustomSourceOptions } from './baseMap';
+import { customTiles, KARTVERKET_ATTRIBUTION, type CustomSlot, type CustomSourceOptions } from './baseMap';
 
 export type TerrainPreset = 'mapterhorn' | 'aws-terrarium';
 
@@ -39,7 +39,8 @@ export const TERRAIN_PRESETS: Record<TerrainPreset, Preset> = {
       encoding: 'terrarium',
       tileSize: 512,
       maxzoom: 16,
-      attribution: '<a href="https://mapterhorn.com/attribution">© Mapterhorn</a>',
+      // Kartverket's own credit too, since its data is what is drawn; it is not left to the Base map.
+      attribution: `<a href="https://mapterhorn.com/attribution">© Mapterhorn</a>, ${KARTVERKET_ATTRIBUTION}`,
     },
   },
   'aws-terrarium': {
@@ -56,6 +57,9 @@ export const TERRAIN_PRESETS: Record<TerrainPreset, Preset> = {
   },
 };
 
+// Elevation comes as tiles only: a WMS service draws pictures of the ground, which hold no heights.
+export const CUSTOM_TERRAIN: CustomSlot = { name: 'Terrain', wms: false, tileSize: 512, maxzoom: 16 };
+
 // Off until enabled; once enabled, the higher-resolution Preset unless the owner picks another.
 export function resolveTerrain({ enabled, preset = 'mapterhorn', custom }: TerrainOptions = {}): ResolvedTerrain {
   if (!enabled) {
@@ -67,7 +71,7 @@ export function resolveTerrain({ enabled, preset = 'mapterhorn', custom }: Terra
       ? { source: known.source }
       : { problem: `Unknown Terrain "${preset}". Choose another under Terrain in the panel options.` };
   }
-  const tiles = customTiles('Terrain', custom, { tileSize: 512, maxzoom: 16 });
+  const tiles = customTiles(CUSTOM_TERRAIN, custom);
   if ('problem' in tiles) {
     return tiles;
   }

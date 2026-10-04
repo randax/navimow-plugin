@@ -1,11 +1,17 @@
 // Type-only import: this module never loads the map library, so it stays testable without a browser.
 import type { RasterSourceSpecification } from 'maplibre-gl';
-import { customTiles, KARTVERKET_ATTRIBUTION, type CustomSourceOptions } from './baseMap';
+import {
+  CUSTOM_BASE_MAP,
+  customTiles,
+  KARTVERKET_ATTRIBUTION,
+  type CustomSlot,
+  type CustomSourceOptions,
+} from './baseMap';
 
 export type OverlayPreset = 'kartverket-hillshade';
 
 export interface OverlayOptions {
-  preset: 'none' | OverlayPreset | 'custom';
+  preset?: 'none' | OverlayPreset | 'custom';
   custom?: CustomSourceOptions;
   /** From 0, invisible, to 1, hiding the Base map; absent means half. */
   opacity?: number;
@@ -48,7 +54,10 @@ export const DEFAULT_OVERLAY_OPACITY = 0.5;
 const drawnOpacity = (opacity = DEFAULT_OVERLAY_OPACITY): number =>
   Number.isFinite(opacity) ? Math.min(1, Math.max(0, opacity)) : DEFAULT_OVERLAY_OPACITY;
 
-export function resolveOverlay({ preset, custom, opacity }: OverlayOptions = { preset: 'none' }): ResolvedOverlay {
+export const CUSTOM_OVERLAY: CustomSlot = { ...CUSTOM_BASE_MAP, name: 'Overlay' };
+
+// Absent means none, for the whole of the options or, in options written by hand, for the preset alone.
+export function resolveOverlay({ preset = 'none', custom, opacity }: OverlayOptions = {}): ResolvedOverlay {
   if (preset === 'none') {
     return {};
   }
@@ -58,7 +67,7 @@ export function resolveOverlay({ preset, custom, opacity }: OverlayOptions = { p
       ? { overlay: { source: known.source, opacity: drawnOpacity(opacity) } }
       : { problem: `Unknown Overlay "${preset}". Choose another under Overlay in the panel options.` };
   }
-  const tiles = customTiles('Overlay', custom, { tileSize: 256, maxzoom: 18 });
+  const tiles = customTiles(CUSTOM_OVERLAY, custom);
   return 'problem' in tiles
     ? tiles
     : { overlay: { source: { type: 'raster', ...tiles }, opacity: drawnOpacity(opacity) } };

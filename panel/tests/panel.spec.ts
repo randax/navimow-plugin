@@ -294,7 +294,7 @@ test('the switch on the panel recreates the map in terrain and back, without the
   expectSamePlace(tilted, before);
   expect(tilted.pitch).toBe(60);
   await expect(map).toHaveAttribute('data-trails-drawn', '1');
-  await expect(panel.locator('.maplibregl-ctrl-attrib')).toContainText('© Mapterhorn');
+  await expect(panel.locator('.maplibregl-ctrl-attrib')).toContainText('© Mapterhorn, © Kartverket');
   await expect(panel.getByRole('img', { name: /^Mower/ })).toBeVisible();
 
   await view.getByRole('radio', { name: 'Flat' }).check();
@@ -376,7 +376,8 @@ test('Terrain is off until enabled, then defaults to Mapterhorn with any Base ma
   await expect(options.getSelect('Source')).toHaveSelected('Mapterhorn');
   await expect(options.getRadioGroup('Start in')).toHaveChecked('Terrain');
   await expect(panel.getByTestId('navimow-map-view').getByRole('radio', { name: 'Terrain' })).toBeChecked();
-  await expect(panel.locator('.maplibregl-ctrl-attrib')).toContainText('© Mapterhorn');
+  // Kartverket's elevation data is on screen, so it is credited even where the Base map is not its own.
+  await expect(panel.locator('.maplibregl-ctrl-attrib')).toContainText('© Mapterhorn, © Kartverket');
   await expect(panel.locator('.maplibregl-ctrl-attrib')).toContainText('© OpenStreetMap contributors');
 
   await options.getSelect('Source').locator().getByRole('combobox').click();

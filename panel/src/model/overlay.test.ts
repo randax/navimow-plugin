@@ -6,6 +6,13 @@ describe('resolveOverlay', () => {
     expect(resolveOverlay({ preset: 'none', opacity: 1 })).toEqual({});
   });
 
+  test('options written by hand without a preset mean no Overlay too', () => {
+    expect(resolveOverlay({ opacity: 0.4 })).toEqual({});
+    expect(resolveOverlay({ custom: { url: 'https://t.example.com/{z}/{x}/{y}.png', attribution: '© Me' } })).toEqual(
+      {}
+    );
+  });
+
   test("the Preset is Kartverket's hillshade, a WMS service asked for one bounding box per tile", () => {
     expect(resolveOverlay({ preset: 'kartverket-hillshade' })).toEqual({
       overlay: {

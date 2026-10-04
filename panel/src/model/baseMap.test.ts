@@ -111,10 +111,20 @@ describe('resolveBaseMap', () => {
       'https://tiles.example.com/tile.png',
       'https://tiles.example.com/{z}/{x}.png',
       'ftp://tiles.example.com/{z}/{x}/{y}.png',
+      // Templates in form, but no browser can request them once filled in.
+      'https://[invalid]/{z}/{x}/{y}.png',
+      'https://tiles example.com/{z}/{x}/{y}.png',
     ])('is refused when %p is not an http(s) tile template', (url) => {
       expect(custom({ url })).toEqual({
         problem:
           'A custom Base map needs an http(s) URL containing either {z}, {x} and {y}, or {bbox-epsg-3857} for a WMS service.',
+      });
+    });
+
+    test('is refused with a user name and password in the URL, which browsers will not request', () => {
+      expect(custom({ url: 'https://me:secret@tiles.example.com/{z}/{x}/{y}.png' })).toEqual({
+        problem:
+          'A custom Base map URL cannot carry a user name or password before its host: browsers refuse to request it.',
       });
     });
   });
