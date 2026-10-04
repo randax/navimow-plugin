@@ -627,6 +627,107 @@ def test_a_buffer_file_unreadable_for_a_while_is_written_once_it_can_be_read(
     assert storage.buffered == 0
 
 
+def unreadable(spill: Path) -> Callable[[], None]:
+    """Put something that cannot be read as a file where the buffer file is; return how to
+    put the file back."""
+    aside = spill.with_name("aside")
+    spill.rename(aside)
+    spill.mkdir()
+
+    def restore() -> None:
+        spill.rmdir()
+        aside.rename(spill)
+
+    return restore
+
+
+def messages(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [record.getMessage() for record in caplog.records]
+
+
+def test_a_buffer_file_unreadable_at_startup_still_owes_its_rows(
+    database: str, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    db, clock = Database(database), Clock()
+    storage = buffered(db, tmp_path, clock)
+    db.go_down()
+    storage.write_trail(points(1, 2))
+    storage.close()  # the previous process leaves two rows in the file
+    restore = unreadable(tmp_path / "buffer.jsonl")
+    db.down = False
+
+    restarted = buffered(db, tmp_path, clock)
+    assert restarted.buffered > 0
+    restarted.flush()
+    assert any("cannot be read" in message for message in messages(caplog))
+
+    restore()
+    restarted.write_trail(points(3))
+    clock.now += RETRY_SECONDS
+    restarted.flush()
+    restarted.flush()
+
+    assert db.trail() == [1, 2, 3]
+    assert restarted.buffered == 0
+
+
+def test_a_database_outage_is_reported_while_a_buffer_file_is_waiting_to_be_read(
+    database: str, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level("INFO")
+    db, clock = Database(database), Clock()
+    storage = buffered(db, tmp_path, clock, memory_rows=1)
+    storage.write_trail(points(0))
+    db.go_down()
+    storage.write_trail(points(1, 2))
+    unreadable(tmp_path / "buffer.jsonl")
+    db.down = False
+    clock.now += RETRY_SECONDS
+    storage.write_trail(points(3))
+    storage.flush()  # the database is back and takes rows; the file still owes its own
+    assert (db.trail(), storage.buffered) == ([0, 3], 2)
+    caplog.clear()
+
+    db.go_down()
+    clock.now += RETRY_SECONDS
+    storage.write_trail(points(4))
+    storage.flush()
+    clock.now += RETRY_SECONDS
+    storage.flush()
+    assert len([m for m in messages(caplog) if "Database unreachable" in m]) == 1
+
+    db.down = False
+    clock.now += RETRY_SECONDS
+    storage.flush()
+    assert len([m for m in messages(caplog) if "Database reachable again" in m]) == 1
+    assert db.trail() == [0, 3, 4]
+
+
+def test_every_spell_of_an_unreadable_buffer_file_is_reported(
+    database: str, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    db, clock = Database(database), Clock()
+    storage = buffered(db, tmp_path, clock, memory_rows=1)
+    db.go_down()
+    storage.write_trail(points(1, 2))
+    restore = unreadable(tmp_path / "buffer.jsonl")
+    db.down = False
+    clock.now += RETRY_SECONDS
+    storage.flush()  # the first spell, reported
+    restore()
+    db.go_down()
+    clock.now += RETRY_SECONDS
+    storage.flush()  # readable again, but now the database is away
+    db.down = False
+    unreadable(tmp_path / "buffer.jsonl")
+    caplog.clear()
+
+    clock.now += RETRY_SECONDS
+    storage.flush()
+
+    assert len([m for m in messages(caplog) if "cannot be read" in m]) == 1
+
+
 def test_a_clean_stop_leaves_only_unsent_rows_for_the_next_process(
     database: str, tmp_path: Path
 ) -> None:

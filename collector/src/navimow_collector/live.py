@@ -253,8 +253,8 @@ class Collector:
 
     async def _on_connected(self) -> None:
         """Record the gap this connection ends, then ask where every mower stands."""
-        if self._broker is None or not self._broker.is_connected:
-            return  # queued by the SDK for a client it has since torn down and replaced
+        if self._broker is None:
+            return
         now = self._clock()
         gap_start = None if self.connected else self._flowed_until
         self.connected = True
@@ -277,6 +277,12 @@ class Collector:
         # Only now may the start of that gap be forgotten: a crash before this line finds
         # it still on disk, and records the same gap again, extended.
         self._remember_flow(now)
+        if not self._broker.is_connected:
+            # The connection came and went before this callback ran (a busy loop, or the
+            # SDK replacing its client). The stream was seen all the same, so whatever
+            # follows is a gap from now; but nothing is connected.
+            await self._on_disconnected()
+            return
         await self._poll_status()
 
     async def _on_disconnected(self) -> None:

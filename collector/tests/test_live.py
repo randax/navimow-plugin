@@ -834,6 +834,38 @@ def test_a_connection_the_sdk_tore_down_before_its_callback_ran_does_not_count(
     assert live.vendor.count("smarthome/getVehicleStatus") == 0
 
 
+def test_a_connection_that_came_and_went_unseen_still_starts_the_next_gap(live: Live) -> None:
+    # A first start, so nothing yet says when the stream last flowed. While the loop is
+    # busy the connection is made, delivers a position and drops; the callbacks run after.
+    sdk: list[Any] = []
+    message = SimpleNamespace(
+        topic=LOCATION.format("DEVICE_1"), payload=json.dumps(pose(at(NOW))).encode()
+    )
+
+    async def scenario() -> Collector:
+        collector = live.start(undialled(sdk))
+        await collector.tick()
+        paho = sdk[0].client
+        paho.on_connect(paho, None, {}, 0, None)
+        paho.on_message(paho, None, message)
+        paho.is_connected = lambda: False
+        paho.on_disconnect(paho, None, {}, 7, None)
+        await settled()
+        assert not collector.connected
+
+        live.clock.now = NOW + 300
+        paho.is_connected = lambda: True
+        paho.on_connect(paho, None, {}, 0, None)
+        await settled()
+        return collector
+
+    collector = asyncio.run(scenario())
+
+    assert collector.connected
+    assert [(row[0], row[1]) for row in live.trail()] == [("DEVICE_1", at(NOW))]
+    assert gaps(live.db.dsn) == [("DEVICE_1", at(NOW), at(NOW + 300), "reconnect")]
+
+
 def test_a_broker_address_the_sdk_cannot_use_is_a_failed_fetch_not_a_crash(live: Live) -> None:
     live.vendor.broker_host = "wss://mqtt.example:abc"  # no port the SDK can parse
     sdk: list[Any] = []

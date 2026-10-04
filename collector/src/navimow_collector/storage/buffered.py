@@ -65,6 +65,7 @@ class BufferedStorage:
         self._replayed_file: tuple[int, int] | None = None
         self._unreadable_until: float | None = None  # the file could not be read just now
         self._retry_at = 0.0
+        self._away = False  # whether the database has been reported unreachable
         self._dropping = False  # whether this outage's loss has been reported yet
         self.dropped = 0
         self.rejected = 0
@@ -121,7 +122,6 @@ class BufferedStorage:
             return
         if not self.buffered:
             self._dropping = False
-            _LOGGER.info("Database reachable again; every buffered row is written")
 
     def close(self) -> None:
         """Write one last slice, then leave what is still waiting on disk for the next start."""
@@ -161,6 +161,9 @@ class BufferedStorage:
     def _attempt(self, rows: Sequence[Row]) -> int:
         if self._storage is None:
             self._storage = self._open()
+            if self._away:
+                _LOGGER.info("Database reachable again; writing what was buffered")
+                self._away = False
         points = [row for row in rows if isinstance(row, TrailPoint)]
         gaps = [row for row in rows if isinstance(row, Gap)]
         try:
@@ -181,8 +184,9 @@ class BufferedStorage:
         if self._storage is not None:
             self._storage.close()
             self._storage = None
-        if not self.buffered:  # said once per outage, not once per retry
+        if not self._away:  # said once per outage, not once per retry
             _LOGGER.warning("Database unreachable; buffering until it returns: %s", error)
+        self._away = True
         self._retry_at = self._clock() + RETRY_SECONDS
 
     def _spill_memory(self) -> None:
@@ -250,14 +254,14 @@ class BufferedStorage:
                 self._forget_position_in_another_file(spill)
                 spill.seek(self._replayed)
                 lines = list(islice(spill, limit))
+                self._unreadable_until = None
                 # A line cut short by a crash is skipped rather than blocking the rest.
                 self._send([row for row in map(_decode, lines) if row is not None])
-                self._unreadable_until = None
                 self._replayed, self._replayed_file = spill.tell(), _identity(spill)
                 if spill.read(1):
                     self._spilled = max(self._spilled - len(lines), 1)  # more for a later call
                     return len(lines)
-        except FileNotFoundError:
+        except (FileNotFoundError, NotADirectoryError):
             _LOGGER.error("Buffer file %s is gone, and its unsent rows with it", self._spill)
             self.dropped += self._spilled
             self._spilled = self._replayed = 0
@@ -306,11 +310,15 @@ class BufferedStorage:
 
 
 def _count_lines(path: Path) -> int:
+    """How many rows a previous process left waiting. A file that is there but cannot be
+    read owes rows all the same: it counts as one, and reading it later corrects that."""
     try:
         with path.open("rb") as spill:
             return sum(1 for _ in spill)
-    except OSError:
+    except (FileNotFoundError, NotADirectoryError):
         return 0
+    except OSError:
+        return 1
 
 
 def _identity(spill: BinaryIO) -> tuple[int, int]:
