@@ -3,3 +3,9 @@ backend = "postgres"
 # dsn = "postgresql://user:password@localhost/navimow"
 dsn_file = "/run/secrets/navimow-postgres-dsn"
 migrate = true
+
+[auth]
+# The public Home Assistant OAuth client needs no developer registration.
+client_id = "homeassistant"
+# client_secret_file = "/run/secrets/navimow-oauth-client-secret"
+# state_file = "/var/lib/navimow-collector/tokens.json"
