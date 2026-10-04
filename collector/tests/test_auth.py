@@ -180,6 +180,14 @@ def test_does_not_refresh_before_the_margin(tmp_path: Path) -> None:
         (401, "", AuthState.RELOGIN_REQUIRED),
         (401, "Authentication required", AuthState.RELOGIN_REQUIRED),
         (403, CIRCUIT_BREAKER, AuthState.RETRY_PENDING),
+        # Digits inside numbers are not a status: an epoch containing "401", a hex ray id.
+        (
+            500,
+            json.dumps({"code": 500, "desc": "system busy", "ts": 1759540113}),
+            AuthState.RETRY_PENDING,
+        ),
+        (502, "Bad gateway, ray id 8a4013f2", AuthState.RETRY_PENDING),
+        (200, json.dumps({"code": 401, "desc": "token has expired"}), AuthState.RELOGIN_REQUIRED),
     ],
 )
 def test_refresh_failures_are_classified_by_vendor_prose(
@@ -431,3 +439,66 @@ def test_loopback_listener_keeps_the_first_redirect() -> None:
             urllib.request.urlopen(f"{listener.redirect_uri}?code=second&state=expected")
 
         assert listener.wait(timeout=1) == "first"
+
+
+def test_a_new_login_is_picked_up_while_retrying(tmp_path: Path) -> None:
+    store = logged_in(tmp_path)
+    clock = Clock(3300)
+    tokens = TokenManager(
+        TokenClient(FakeSession([Response(503, "some unrecognised failure")]), "id", "secret"),
+        store,
+        clock=clock,
+    )
+    run(tokens.access_token())
+    assert tokens.state.value == "retry-pending"
+
+    logged_in(tmp_path, access="relogged", at=3300)
+
+    assert run(tokens.access_token()) == "relogged"
+    assert tokens.state is AuthState.FRESH
+
+
+def test_an_adopted_login_already_past_its_margin_is_refreshed_before_use(tmp_path: Path) -> None:
+    store = logged_in(tmp_path)
+    tokens = manager(store, Response(400, REJECTED_REFRESH), Response(200, token("fresh")))
+    run(tokens.access_token())
+    assert tokens.state.value == "relogin-required"
+
+    logged_in(tmp_path, access="relogged", at=0)  # written long ago, e.g. restored from a backup
+
+    assert run(tokens.access_token()) == "fresh"
+
+
+def test_a_short_lived_token_is_not_refreshed_in_a_tight_loop(tmp_path: Path) -> None:
+    store = TokenStore(tmp_path / "token.json")
+    store.save(Credential("access", "refresh", 60, 0))
+
+    assert manager(store, now=0).seconds_until_next_action() == 30
+
+
+def test_a_refresh_that_echoes_the_rejected_token_backs_off(tmp_path: Path) -> None:
+    session = FakeSession([Response(200, token("access", "rotated"))])
+    tokens = TokenManager(
+        TokenClient(session, "id", "secret"), logged_in(tmp_path), clock=lambda: 1
+    )
+
+    run(tokens.on_unauthorized("access"))
+    run(tokens.on_unauthorized("access"))
+
+    assert len(session.forms) == 1
+    assert tokens.state is AuthState.RETRY_PENDING
+
+
+def test_a_login_written_during_a_refresh_is_not_overwritten(tmp_path: Path) -> None:
+    store = logged_in(tmp_path)
+
+    class LoginMidRefresh(FakeSession):
+        def request(self, method: str, url: str, **kwargs: Any) -> Request:
+            logged_in(tmp_path, access="relogged", at=3300)  # the operator runs `login` now
+            return super().request(method, url, **kwargs)
+
+    session = LoginMidRefresh([Response(200, token("refreshed-old-grant"))])
+    tokens = TokenManager(TokenClient(session, "id", "secret"), store, clock=lambda: 3300)
+
+    assert run(tokens.access_token()) == "relogged"
+    assert stored(store).access_token == "relogged"

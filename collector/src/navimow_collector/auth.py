@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import tempfile
 import threading
 from collections.abc import Awaitable, Callable
@@ -30,10 +31,12 @@ MQTT_OAUTH_ERROR = "CODE_OAUTH_INFO_ILLEGAL"
 POLL_SECONDS = 60
 
 _LOGGER = logging.getLogger(__name__)
-# Vendor prose meaning the grant itself is dead, so only a new login helps. The status is part
-# of the text, so a bare 401/403 counts too...
-_RELOGIN_WORDS = ("401", "403", "invalid", "expired", "unauthorized", "forbidden")
-# ...except the gateway's throttling, which can arrive as a 403 and passes on its own.
+# Vendor prose meaning the grant itself is dead, so only a new login helps...
+_RELOGIN_WORDS = ("invalid", "expired", "unauthorized", "forbidden")
+# ...as does a 401/403, whether the status line or a code in the body, but not those digits
+# inside a longer number or id (an epoch timestamp, a hex ray id).
+_RELOGIN_STATUS = re.compile(r"(?<![0-9a-z])40[13](?![0-9a-z])")
+# The gateway's throttling can arrive as a 403 and passes on its own.
 _THROTTLED_PHRASES = ("too frequent", "circuit breaker")
 
 
@@ -48,7 +51,9 @@ class Credential:
 
     def refresh_at(self) -> float:
         """Refresh with a safety margin so ordinary calls do not see expiry."""
-        return self.obtained_at + max(0, self.expires_in - REFRESH_EARLY_SECONDS)
+        # Halfway at the latest, so an unexpectedly short lifetime cannot refresh in a loop.
+        lead = max(self.expires_in - REFRESH_EARLY_SECONDS, self.expires_in / 2)
+        return self.obtained_at + lead
 
 
 class TokenStore:
@@ -224,9 +229,8 @@ class TokenManager:
         """Return the current token, refreshing once it is due."""
         async with self._lock:
             now = self._clock()
-            if self.state is AuthState.RELOGIN_REQUIRED:
-                self._adopt_new_login()
-            elif self._due(now):
+            self._adopt_new_login()
+            if self.state is not AuthState.RELOGIN_REQUIRED and self._due(now):
                 await self._refresh(now)
             return self._token()
 
@@ -252,12 +256,15 @@ class TokenManager:
     async def _on_rejection(self, rejected_token: str) -> str | None:
         async with self._lock:
             now = self._clock()
-            if self.state is AuthState.RELOGIN_REQUIRED:
-                self._adopt_new_login()
+            self._adopt_new_login()
             # A rejection of a token already replaced (a slow response) changes nothing. A
             # token newly known to be dead earns one attempt at once; after that a burst of
             # rejections waits for the retry ladder rather than hammering the endpoint.
-            elif self._credential and self._credential.access_token == rejected_token:
+            if (
+                self.state is not AuthState.RELOGIN_REQUIRED
+                and self._credential is not None
+                and self._credential.access_token == rejected_token
+            ):
                 newly_rejected = self._rejected != rejected_token
                 self._rejected = rejected_token
                 if newly_rejected or self._may_attempt(now):
@@ -280,17 +287,22 @@ class TokenManager:
             _LOGGER.warning("Could not read Navimow login state: %s", error)
             return None
 
-    def _adopt_new_login(self) -> None:
-        """Pick up `navimow-collector login` run beside the service, so no restart is needed."""
+    def _adopt_new_login(self) -> bool:
+        """Pick up `navimow-collector login` run beside the service, so no restart is needed.
+
+        Checked in every state: a grant can be dead without the vendor saying so in words we
+        recognise, leaving the service on the retry ladder while the operator logs in again.
+        """
         stored = self._read_store()
         if stored is None or stored == self._on_disk:
-            return
+            return False
         self._credential = self._on_disk = stored
         self._rejected = None
         self._failures = 0
         self.next_attempt_at = None
         self.state = AuthState.FRESH
         _LOGGER.info("Navimow login found in %s; authentication restored", self._store.path)
+        return True
 
     def _may_attempt(self, now: float) -> bool:
         return self.next_attempt_at is None or now >= self.next_attempt_at
@@ -306,19 +318,29 @@ class TokenManager:
         except Exception as error:  # Transport errors, whatever their wording, are transient.
             self._record_failure(str(error), now, relogin=False)
             return
+        # A login the operator wrote while the request was in flight is newer intent than the
+        # grant it refreshed: keep that login rather than overwrite it.
+        if self._adopt_new_login():
+            return
         # Adopt before saving: the old refresh token may already be spent, so the new pair
         # must keep serving even if the disk refuses it.
         self._credential = refreshed
-        self._rejected = None
-        self._failures = 0
-        self.next_attempt_at = None
-        self.state = AuthState.FRESH
         try:
             self._store.save(refreshed)
         except OSError as error:
             _LOGGER.error("Could not save refreshed Navimow credentials: %s", error)
         else:
             self._on_disk = refreshed
+        if refreshed.access_token == self._rejected:
+            # The same dead token back is no recovery; back off rather than refresh per 401.
+            self._record_failure(
+                "the refresh returned the rejected access token", now, relogin=False
+            )
+            return
+        self._rejected = None
+        self._failures = 0
+        self.next_attempt_at = None
+        self.state = AuthState.FRESH
 
     def _record_failure(self, detail: str, now: float, *, relogin: bool) -> None:
         if relogin:
@@ -442,7 +464,7 @@ def _means_relogin(detail: str) -> bool:
     lowered = detail.lower()
     if any(phrase in lowered for phrase in _THROTTLED_PHRASES):
         return False
-    return any(word in lowered for word in _RELOGIN_WORDS)
+    return any(word in lowered for word in _RELOGIN_WORDS) or bool(_RELOGIN_STATUS.search(lowered))
 
 
 def _fsync_directory(path: Path) -> None:
