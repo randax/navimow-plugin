@@ -585,6 +585,7 @@ def test_an_unreadable_state_file_is_reported_once_not_per_call(
     [
         ("localhost:1/callback?code=abc&state=x", "abc"),  # some address bars drop the scheme
         ("bare-code-with-padding==", "bare-code-with-padding=="),
+        ("code=abc&state=x", "abc"),  # just the query string
     ],
 )
 def test_login_accepts_pasted_codes_in_the_forms_people_copy(
@@ -601,3 +602,17 @@ def test_login_accepts_pasted_codes_in_the_forms_people_copy(
 
     assert session.forms[0] is not None
     assert session.forms[0]["code"] == code
+
+
+def test_tokens_that_serve_a_while_before_rejection_keep_the_ladder_flat(tmp_path: Path) -> None:
+    clock = Clock(1)
+    session = FakeSession([Response(200, token(f"minted-{n}")) for n in range(10)])
+    tokens = TokenManager(TokenClient(session, "id", "secret"), logged_in(tmp_path), clock=clock)
+
+    current = "access"
+    for _ in range(6):  # the vendor kills each token after half an hour
+        current = run(tokens.on_unauthorized(current))
+        clock.now += 1800
+
+    assert tokens.state is AuthState.FRESH
+    assert len(session.forms) == 6

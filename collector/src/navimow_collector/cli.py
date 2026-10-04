@@ -145,7 +145,8 @@ def _pasted_code(value: str) -> str:
     value = value.strip()
     code = value
     if "code=" in value:
-        code = parse_qs(urlparse(value).query or value.partition("?")[2]).get("code", [""])[0]
+        query = urlparse(value).query or value.partition("?")[2] or value
+        code = parse_qs(query).get("code", [""])[0]
     if not code:
         raise ValueError("login code is missing")
     return code

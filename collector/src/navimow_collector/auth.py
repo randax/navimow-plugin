@@ -31,6 +31,8 @@ MQTT_OAUTH_ERROR = "CODE_OAUTH_INFO_ILLEGAL"
 # The longest the maintenance loop sleeps, so a rejection reported meanwhile or a new login
 # written beside the service is acted on within a minute.
 POLL_SECONDS = 60
+# How soon a rejection of a just-refreshed token counts as "rejected on first use".
+FIRST_USE_SECONDS = 60
 
 _LOGGER = logging.getLogger(__name__)
 # Vendor prose meaning the grant itself is dead, so only a new login helps...
@@ -254,12 +256,14 @@ class TokenManager:
         # The token a rejection-triggered refresh produced: if that is rejected too, refreshing
         # on every 401 will not help, so the retry ladder takes over.
         self._minted_for_rejection: str | None = None
+        self._minted_at = 0.0
 
     async def access_token(self) -> str | None:
         """Return the current token, refreshing once it is due."""
         async with self._lock:
             now = self._clock()
             self._adopt_new_login()
+            self._note_recovery(now)
             if self.state is not AuthState.RELOGIN_REQUIRED and self._due(now):
                 await self._refresh(now)
             return self._token()
@@ -287,6 +291,7 @@ class TokenManager:
         async with self._lock:
             now = self._clock()
             self._adopt_new_login()
+            self._note_recovery(now)
             # A rejection of a token already replaced (a slow response) changes nothing. A
             # token newly known to be dead earns one attempt at once; after that a burst of
             # rejections waits for the retry ladder rather than hammering the endpoint.
@@ -305,6 +310,14 @@ class TokenManager:
                 elif newly_rejected or self._may_attempt(now):
                     await self._refresh(now, after_rejection=True)
             return self._token()
+
+    def _note_recovery(self, now: float) -> None:
+        """A recovery token that served a while proves refreshing works: reset the ladder.
+        Only a rejection on first use says otherwise; a token the vendor kills after half an
+        hour (another client refreshing on the account, say) is just refreshed again."""
+        if self._minted_for_rejection and now - self._minted_at >= FIRST_USE_SECONDS:
+            self._minted_for_rejection = None
+            self._failures = 0
 
     def _due(self, now: float) -> bool:
         if self._credential is None or not self._may_attempt(now):
@@ -366,6 +379,7 @@ class TokenManager:
         self._credential = refreshed
         self._rejected = None
         self._minted_for_rejection = refreshed.access_token if recovering else None
+        self._minted_at = now
         if not recovering:
             self._failures = 0
         self.next_attempt_at = None
