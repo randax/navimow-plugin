@@ -113,6 +113,12 @@ describe('placeTrails', () => {
     ]);
   });
 
+  test("the extent is the Trail's longer side in metres, whatever the rotation", () => {
+    const trails = [run([at(3, -10, 0), at(2, 10, 1)]), run([at(1, 0, 6)])];
+    expect(placeTrails(trails, ORIGIN).extent).toBe(20);
+    expect(placeTrails(trails, { ...ORIGIN, rotation: 45 }).extent).toBe(20);
+  });
+
   test('an empty range draws nothing', () => {
     expect(placeTrails([], ORIGIN)).toEqual(EMPTY_SCENE);
   });

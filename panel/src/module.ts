@@ -17,7 +17,12 @@ const TRAIL_COLUMN_EDITORS: Array<{ key: keyof TrailColumns; name: string; descr
     name: 'Heading',
     description: 'Optional. Radians counter-clockwise from the x-axis; points the mower marker.',
   },
-  { key: 'job', name: 'Job', description: 'Optional. Each Job is drawn as its own line, in its own colour.' },
+  {
+    key: 'job',
+    name: 'Job',
+    description:
+      'Optional. Each Job is drawn as its own line, in its own colour. With SQL, use Format as: Table, which keeps text columns like this one as columns.',
+  },
   {
     key: 'zone',
     name: 'Zone',

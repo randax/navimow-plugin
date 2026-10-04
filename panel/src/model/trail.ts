@@ -35,6 +35,8 @@ export interface TrailScene {
   lines: FeatureCollection<MultiLineString, { job: string | null; colour: string }>;
   mower?: LastPosition;
   bounds?: Bounds;
+  /** The longer side of the Trail's box on the mower's own axes, in metres. */
+  extent?: number;
   /** What placed it; a new Dock origin can move the Trail far enough to need framing again. */
   origin?: DockOrigin;
 }
@@ -47,6 +49,19 @@ export interface TrailOptions {
   /** Blank or absent means the default column name. */
   trailColumns?: Partial<TrailColumns>;
 }
+
+// Reduced rather than spread into Math.min: a week of Trail is more points than a call takes as arguments.
+const box = (points: Array<[number, number]>): Bounds =>
+  points.reduce<Bounds>(
+    ([[minA, minB], [maxA, maxB]], [a, b]) => [
+      [Math.min(minA, a), Math.min(minB, b)],
+      [Math.max(maxA, a), Math.max(maxB, b)],
+    ],
+    [
+      [Infinity, Infinity],
+      [-Infinity, -Infinity],
+    ]
+  );
 
 /** Places Trails on the map: one coloured feature per Job, and the mower where it was last seen. */
 export function placeTrails(trails: Trail[], origin: DockOrigin): TrailScene {
@@ -85,19 +100,12 @@ export function placeTrails(trails: Trail[], origin: DockOrigin): TrailScene {
   if (all.length === 0) {
     return EMPTY_SCENE;
   }
-  // Reduced rather than spread into Math.min: a week of Trail is more points than a call takes as arguments.
-  scene.bounds = all.reduce<Bounds>(
-    ([[west, south], [east, north]], [lon, lat]) => [
-      [Math.min(west, lon), Math.min(south, lat)],
-      [Math.max(east, lon), Math.max(north, lat)],
-    ],
-    [
-      [Infinity, Infinity],
-      [-Infinity, -Infinity],
-    ]
-  );
+  scene.bounds = box(all);
+  const points = trails.flatMap((t) => t.segments.flat());
+  const [[minX, minY], [maxX, maxY]] = box(points.map((p) => [p.x, p.y]));
+  scene.extent = Math.max(maxX - minX, maxY - minY);
 
-  const last = trails.flatMap((t) => t.segments.flat()).reduce((a, b) => (b.time > a.time ? b : a));
+  const last = points.reduce((a, b) => (b.time > a.time ? b : a));
   scene.mower = {
     position: toLonLat(origin, last.x, last.y),
     bearing: last.heading === undefined ? undefined : headingBearing(origin, last.heading),

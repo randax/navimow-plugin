@@ -10,6 +10,7 @@ import {
   type StyleSpecification,
 } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
+import { nextFraming, type Framing } from '../model/framing';
 import type { MowerMarker, TrailScene } from '../model/trail';
 import { PanelMessage } from './PanelMessage';
 
@@ -114,8 +115,7 @@ const MapCanvas: React.FC<Props> = ({ baseMap, trail, mower, width, height }) =>
   const element = useRef<HTMLDivElement>(null);
   const map = useRef<Map | null>(null);
   const lines = useRef(trail.lines);
-  const fittedFor = useRef<string>(undefined);
-  const fittedWide = useRef(false);
+  const framed = useRef<Framing>(undefined);
   const countPending = useRef(true);
 
   // New data replaces the Trail's source data only. The source exists once the style has loaded;
@@ -161,24 +161,15 @@ const MapCanvas: React.FC<Props> = ({ baseMap, trail, mower, width, height }) =>
     map.current = created;
   }, [baseMap]);
 
-  // Frame the Trail when it first appears and when the dock moves, but never on a refresh, which must
-  // not undo the owner's panning, nor on a rotation, which turns the Trail about the dock while the
-  // owner compares it with the lawn. A single docked position frames nothing but the dock at full
-  // zoom, so the first Trail with any extent is framed once more.
-  const origin = trail.origin && `${trail.origin.lat},${trail.origin.lon}`;
+  // When to frame the Trail is the model's decision (nextFraming); this only carries it out.
   useEffect(() => {
-    if (!map.current || !trail.bounds) {
-      return;
-    }
-    const [[west, south], [east, north]] = trail.bounds;
-    const wide = west !== east || south !== north;
-    if (origin !== fittedFor.current || (wide && !fittedWide.current)) {
-      fittedFor.current = origin;
-      fittedWide.current = wide;
+    const next = nextFraming(trail, framed.current);
+    if (map.current && trail.bounds && next) {
+      framed.current = next;
       // Padding is capped so a small panel still has room left to fit into.
       map.current.fitBounds(trail.bounds, { padding: Math.min(40, width / 4, height / 4), maxZoom: 20, duration: 0 });
     }
-  }, [trail.bounds, origin, width, height]);
+  }, [trail, width, height]);
 
   // The rotating icon and its age label are separate markers, so the label stays upright.
   useEffect(() => {
@@ -214,8 +205,7 @@ const MapCanvas: React.FC<Props> = ({ baseMap, trail, mower, width, height }) =>
       map.current?.remove();
       map.current = null;
       // A remount (React's strict mode does one) gets a fresh map, which must be framed and counted again.
-      fittedFor.current = undefined;
-      fittedWide.current = false;
+      framed.current = undefined;
       countPending.current = true;
     },
     []

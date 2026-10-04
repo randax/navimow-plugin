@@ -4,7 +4,9 @@ Draws a Navimow robotic mower's Trail on a real map of the lawn.
 
 ## Trail data
 
-The panel reads one query with a row per mower position:
+The panel reads one query with a row per mower position. With a SQL data source, set the query to
+**Format as: Table**: the Time series format turns text columns such as `job_id` and `zone` into
+labels, which the panel does not read.
 
 | Column  | Default name | Required | Meaning                                                                                                    |
 | ------- | ------------ | -------- | ---------------------------------------------------------------------------------------------------------- |
