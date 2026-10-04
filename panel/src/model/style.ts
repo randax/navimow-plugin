@@ -10,6 +10,12 @@ export interface MapSources {
   terrain?: RasterDEMSourceSpecification;
 }
 
+// Tiles are drawn as they are, not faded in. MapLibre sets a tile's opacity as it draws a frame and
+// asks whether a fade is still running afterwards; when the fade's end falls between the two, the
+// map comes to rest with its tiles part faded and stays so until something else makes it draw. Seen
+// under software rendering, with every tile left at 38 % opacity.
+const NO_FADE = { 'raster-fade-duration': 0 };
+
 /**
  * The whole map as one style, drawn bottom to top: Base map, Overlay, Trail. The Trail is part of
  * the style, so a Base map switch keeps it and a refresh only diffs its data. So is the Terrain:
@@ -28,9 +34,16 @@ export const mapStyle = (
     trail: { type: 'geojson', data: trail },
   },
   layers: [
-    { id: 'base', type: 'raster', source: 'base' },
+    { id: 'base', type: 'raster', source: 'base', paint: NO_FADE },
     ...(overlay
-      ? [{ id: 'overlay', type: 'raster' as const, source: 'overlay', paint: { 'raster-opacity': overlay.opacity } }]
+      ? [
+          {
+            id: 'overlay',
+            type: 'raster' as const,
+            source: 'overlay',
+            paint: { 'raster-opacity': overlay.opacity, ...NO_FADE },
+          },
+        ]
       : []),
     // A line layer is laid over the Terrain, so the Trail follows the ground.
     {

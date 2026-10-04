@@ -28,13 +28,21 @@ describe('mapStyle', () => {
   test('the Overlay is drawn between the Base map and the Trail, at its opacity', () => {
     const style = mapStyle({ baseMap, overlay }, lines);
     expect(style.layers.map((l) => l.id)).toEqual(['base', 'overlay', 'trail']);
-    expect(style.layers[1]).toEqual({
+    expect(style.layers[1]).toMatchObject({
       id: 'overlay',
       type: 'raster',
       source: 'overlay',
       paint: { 'raster-opacity': 0.3 },
     });
     expect(style.sources.overlay).toEqual(overlay?.source);
+  });
+
+  test('tiles are drawn as they are, not faded in: a slow renderer can come to rest part-way through a fade', () => {
+    const style = mapStyle({ baseMap, overlay }, lines);
+    expect(style.layers.slice(0, 2).map((l) => l.paint)).toEqual([
+      { 'raster-fade-duration': 0 },
+      { 'raster-opacity': 0.3, 'raster-fade-duration': 0 },
+    ]);
   });
 
   test('Terrain is declared in the style itself, so the map starts out on the ground', () => {
