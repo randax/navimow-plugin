@@ -31,8 +31,6 @@ MQTT_OAUTH_ERROR = "CODE_OAUTH_INFO_ILLEGAL"
 # The longest the maintenance loop sleeps, so a rejection reported meanwhile or a new login
 # written beside the service is acted on within a minute.
 POLL_SECONDS = 60
-# How soon a rejection of a just-refreshed token counts as "rejected on first use".
-FIRST_USE_SECONDS = 60
 
 _LOGGER = logging.getLogger(__name__)
 # Vendor prose meaning the grant itself is dead, so only a new login helps...
@@ -312,10 +310,18 @@ class TokenManager:
             return self._token()
 
     def _note_recovery(self, now: float) -> None:
-        """A recovery token that served a while proves refreshing works: reset the ladder.
-        Only a rejection on first use says otherwise; a token the vendor kills after half an
-        hour (another client refreshing on the account, say) is just refreshed again."""
-        if self._minted_for_rejection and now - self._minted_at >= FIRST_USE_SECONDS:
+        """A recovery token that served half its life proves refreshing works: reset the ladder.
+
+        The manager never sees a token's first use, only rejections, and callers present a
+        new token at their own cadence (a REST poll every few minutes, an MQTT reconnect
+        backoff). So "rejected on first use" means rejected within half the token's life: a
+        token the vendor kills after half an hour (another client refreshing on the account,
+        say) is simply refreshed again, while tokens that never work climb the retry ladder.
+        """
+        credential = self._credential
+        if not self._minted_for_rejection or credential is None:
+            return
+        if now - self._minted_at >= (credential.refresh_at() - credential.obtained_at) / 2:
             self._minted_for_rejection = None
             self._failures = 0
 

@@ -616,3 +616,19 @@ def test_tokens_that_serve_a_while_before_rejection_keep_the_ladder_flat(tmp_pat
 
     assert tokens.state is AuthState.FRESH
     assert len(session.forms) == 6
+
+
+@pytest.mark.parametrize("cadence", [61, 300])  # MQTT reconnect backoff, REST poll floor
+def test_first_use_rejections_climb_the_ladder_whatever_the_caller_cadence(
+    tmp_path: Path, cadence: int
+) -> None:
+    clock = Clock(1)
+    session = FakeSession([Response(200, token(f"minted-{n}")) for n in range(20)])
+    tokens = TokenManager(TokenClient(session, "id", "secret"), logged_in(tmp_path), clock=clock)
+
+    current = run(tokens.on_unauthorized("access"))
+    clock.now += cadence
+    run(tokens.on_unauthorized(current))  # the replacement fails on its first use
+
+    assert tokens.state is AuthState.RETRY_PENDING
+    assert len(session.forms) == 1
