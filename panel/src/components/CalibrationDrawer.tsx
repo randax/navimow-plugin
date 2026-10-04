@@ -5,12 +5,13 @@ import { Button, Drawer, Field, IconButton, Input, Slider, Stack, Text, TextArea
 import { resolveBaseMap } from '../model/baseMap';
 import { resolveDockOrigin } from '../model/dockOrigin';
 import { closeDraft, EMPTY_DRAFT, placeVertex, type Click, type Draft, type Ring } from '../model/drawing';
-import { boundaryFeatures, lawnText, nextZoneId, parseLawn, type Lawn, type Zone } from '../model/lawn';
+import { boundaryFeatures, nextZoneId, type Lawn } from '../model/lawn';
 import { resolveOverlay } from '../model/overlay';
 import { EMPTY_SCENE, trailScene } from '../model/trail';
 import type { MapPanelOptions } from '../types';
 import { CalibrationMap } from './CalibrationMap';
 import { PanelMessage } from './PanelMessage';
+import { useLawnDraft } from './useLawnDraft';
 
 interface Props {
   initial: Lawn;
@@ -20,7 +21,7 @@ interface Props {
   onDiscard: () => void;
 }
 
-/** Which polygon is being drawn: the lawn's outline, a new Zone, or a Zone drawn again. */
+/** Which polygon is being drawn: the Boundary's outline, a new Zone, or a Zone drawn again. */
 type Drawing = { kind: 'outline' } | { kind: 'zone'; index?: number };
 
 // Coordinates to a centimetre, rotation to a tenth of a degree: what a drag can mean, and no
@@ -52,39 +53,15 @@ const styles = (theme: GrafanaTheme2) => ({
  */
 export const CalibrationDrawer: React.FC<Props> = ({ initial, options, data, onSave, onDiscard }) => {
   const s = useStyles2(styles);
-  const [lawn, setLawnOnly] = useState<Lawn>(initial);
-  const [text, setText] = useState(() => lawnText(initial));
-  const [textProblem, setTextProblem] = useState<string>();
+  const { lawn, dockOrigin, zones, text, problem, setDock, setZones, setOutline, setText } = useLawnDraft(initial);
   const [drawing, setDrawing] = useState<Drawing>();
   const [draft, setDraft] = useState<Draft>(EMPTY_DRAFT);
   const [drawProblem, setDrawProblem] = useState<string>();
 
-  // Every change from the map or the fields shows up in the text at once; a change typed into the
-  // text is read back into the fields, when it reads.
-  const setLawn = (next: Lawn) => {
-    setLawnOnly(next);
-    setText(lawnText(next));
-    setTextProblem(undefined);
-  };
-  const onText = (value: string) => {
-    setText(value);
-    const parsed = parseLawn(value);
-    if ('problem' in parsed) {
-      setTextProblem(parsed.problem);
-    } else {
-      setTextProblem(undefined);
-      setLawnOnly(parsed.lawn);
-    }
-  };
-
-  const dockOrigin = useMemo(() => lawn.dockOrigin ?? {}, [lawn.dockOrigin]);
-  const setDock = (change: Partial<typeof dockOrigin>) => setLawn({ ...lawn, dockOrigin: { ...dockOrigin, ...change } });
-  const zones = lawn.boundary?.zones ?? [];
-  const setZones = (next: Zone[]) => setLawn({ ...lawn, boundary: { ...lawn.boundary, zones: next } });
-  const setOutline = (outline: Ring | undefined) => setLawn({ ...lawn, boundary: { ...lawn.boundary, outline } });
-
-  const resolved = resolveDockOrigin(dockOrigin);
-  const origin = 'origin' in resolved ? resolved.origin : undefined;
+  const origin = useMemo(() => {
+    const resolved = resolveDockOrigin(dockOrigin);
+    return 'origin' in resolved ? resolved.origin : undefined;
+  }, [dockOrigin]);
   const baseMap = useMemo(() => resolveBaseMap(options?.baseMap), [options?.baseMap]);
   const overlay = useMemo(() => resolveOverlay(options?.overlay), [options?.overlay]);
   const trail = useMemo(() => {
@@ -92,6 +69,7 @@ export const CalibrationDrawer: React.FC<Props> = ({ initial, options, data, onS
     return 'scene' in scene ? scene.scene : EMPTY_SCENE;
   }, [data, options?.trailColumns, dockOrigin]);
   const boundary = useMemo(() => boundaryFeatures(lawn.boundary), [lawn.boundary]);
+  const outline = lawn.boundary?.outline;
 
   const start = (next: Drawing) => {
     setDrawing(next);
@@ -134,6 +112,8 @@ export const CalibrationDrawer: React.FC<Props> = ({ initial, options, data, onS
   const number = (value: number | undefined) => (value === undefined ? '' : String(value));
   const onNumber = (key: 'lat' | 'lon' | 'rotation') => (event: React.ChangeEvent<HTMLInputElement>) =>
     setDock({ [key]: event.target.value === '' ? undefined : event.target.valueAsNumber });
+  const editZone = (index: number, change: Partial<Pick<(typeof zones)[number], 'id' | 'name'>>) =>
+    setZones(zones.map((z, j) => (j === index ? { ...z, ...change } : z)));
 
   return (
     <Drawer title="Dock origin and Boundary" size="lg" onClose={onDiscard} closeOnMaskClick={false}>
@@ -212,13 +192,11 @@ export const CalibrationDrawer: React.FC<Props> = ({ initial, options, data, onS
           <Field label="Boundary" description="Click each corner on the map; double-click the last one to close.">
             <Stack direction="column" gap={1}>
               <Stack direction="row" alignItems="center" gap={1}>
-                <Text>{lawn.boundary?.outline ? `Lawn: ${lawn.boundary.outline.length} corners` : 'Lawn: not drawn'}</Text>
+                <Text>{outline ? `Outline: ${outline.length} corners` : 'Outline: not drawn'}</Text>
                 <Button size="sm" variant="secondary" disabled={!origin || !!drawing} onClick={() => start({ kind: 'outline' })}>
-                  {lawn.boundary?.outline ? 'Redraw lawn' : 'Draw lawn'}
+                  {outline ? 'Redraw outline' : 'Draw outline'}
                 </Button>
-                {lawn.boundary?.outline && (
-                  <IconButton name="trash-alt" tooltip="Remove the lawn outline" onClick={() => setOutline(undefined)} />
-                )}
+                {outline && <IconButton name="trash-alt" tooltip="Remove the outline" onClick={() => setOutline(undefined)} />}
               </Stack>
               {zones.map((zone, i) => (
                 <div className={s.zone} key={i}>
@@ -226,13 +204,13 @@ export const CalibrationDrawer: React.FC<Props> = ({ initial, options, data, onS
                     aria-label={`Zone ${i + 1} identifier`}
                     placeholder="id"
                     value={zone.id}
-                    onChange={(e) => setZones(zones.map((z, j) => (j === i ? { ...z, id: e.currentTarget.value } : z)))}
+                    onChange={(e) => editZone(i, { id: e.currentTarget.value })}
                   />
                   <Input
                     aria-label={`Zone ${i + 1} name`}
                     placeholder="Name"
                     value={zone.name}
-                    onChange={(e) => setZones(zones.map((z, j) => (j === i ? { ...z, name: e.currentTarget.value } : z)))}
+                    onChange={(e) => editZone(i, { name: e.currentTarget.value })}
                   />
                   <IconButton
                     name="pen"
@@ -272,12 +250,12 @@ export const CalibrationDrawer: React.FC<Props> = ({ initial, options, data, onS
 
           <Field
             label="Saved as"
-            description="What Save writes into the panel options. Paste a Lawn here to load it."
-            invalid={textProblem !== undefined}
-            error={textProblem}
+            description="What Save writes into the panel options. Paste saved Dock origin and Boundary JSON here to load it."
+            invalid={problem !== undefined}
+            error={problem}
           >
             <Stack direction="column" gap={0.5}>
-              <TextArea className={s.text} rows={10} value={text} onChange={(e) => onText(e.currentTarget.value)} />
+              <TextArea className={s.text} rows={10} value={text} onChange={(e) => setText(e.currentTarget.value)} />
               <div>
                 <Button
                   size="sm"
@@ -297,7 +275,7 @@ export const CalibrationDrawer: React.FC<Props> = ({ initial, options, data, onS
               <Button variant="secondary" onClick={onDiscard}>
                 Discard
               </Button>
-              <Button variant="primary" disabled={textProblem !== undefined} onClick={() => onSave(lawn)}>
+              <Button variant="primary" disabled={problem !== undefined} onClick={() => onSave(lawn)}>
                 Save
               </Button>
             </Stack>

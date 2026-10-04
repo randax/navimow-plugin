@@ -9,6 +9,7 @@ import { framedBounds, nextFraming } from '../model/framing';
 import { handlePosition, rotationTowards, type BoundaryFeatures } from '../model/lawn';
 import { mapStyle, type MapSources } from '../model/style';
 import type { TrailScene } from '../model/trail';
+import { ATTRIBUTION_STYLE, NORWAY, reportErrors, useByValue } from './MapView';
 
 interface Props extends Omit<MapSources, 'terrain'> {
   origin?: DockOrigin;
@@ -22,16 +23,11 @@ interface Props extends Omit<MapSources, 'terrain'> {
   onDoubleClick: () => void;
 }
 
-// Until a dock is placed there is nothing to look at but Norway, as on the panel.
-const NORWAY: [[number, number], [number, number]] = [
-  [4.5, 57.9],
-  [31.2, 71.2],
-];
 // Close enough to see a dock against a lawn on the national map's finest tiles.
 const DOCK_ZOOM = 18;
 
 const styles = {
-  map: css({ width: '100%', height: '100%', '.maplibregl-ctrl-attrib': { color: 'rgba(0, 0, 0, 0.75)' } }),
+  map: css({ width: '100%', height: '100%', ...ATTRIBUTION_STYLE }),
   dock: css({
     width: 22,
     height: 22,
@@ -87,10 +83,14 @@ const marker = (className: string, label: string): Marker => {
 /**
  * The drawer's own map. Flat, whatever the panel shows: with Terrain the dock marker would float
  * above the ground it is dragged over, and a lawn is judged in plan. One instance for as long as
- * the drawer is open, removed with it.
+ * the drawer is open and its sources are the same by value, removed with it.
  */
 export const CalibrationMap: React.FC<Props> = (props) => {
-  const { baseMap, overlay, origin, trail, boundary, draft, drawing } = props;
+  const { origin, trail, boundary, draft, drawing } = props;
+  // Grafana hands over fresh option objects on every change; the map is remade only for a source
+  // that differs.
+  const baseMap = useByValue(props.baseMap);
+  const overlay = useByValue(props.overlay);
   const element = useRef<HTMLDivElement>(null);
   const map = useRef<Map | null>(null);
   const [ready, setReady] = useState(false);
@@ -118,7 +118,7 @@ export const CalibrationMap: React.FC<Props> = (props) => {
       attributionControl: { compact: false },
     });
     framed.current = start !== undefined;
-    created.on('error', (e) => console.error('[navimow-map]', e.error?.message ?? e));
+    reportErrors(created);
     // Marks a fully drawn map, so browser tests can wait for it before they drag anything on it.
     created.on('idle', () => element.current?.setAttribute('data-map-idle', ''));
     created.on('load', () => {
@@ -156,22 +156,24 @@ export const CalibrationMap: React.FC<Props> = (props) => {
     });
     map.current = created;
     return () => {
+      // The markers go with the map; a new map gets new ones, once it is ready.
       dock.current?.remove();
       handle.current?.remove();
+      dock.current = null;
+      handle.current = null;
       created.remove();
       map.current = null;
       setReady(false);
     };
-    // The Base map and Overlay are fixed while the drawer is open: they come from the options pane behind it.
   }, [baseMap, overlay]);
 
-  // The dock and its rotation handle: made when the dock is first placed, then moved into place.
+  // The dock and its rotation handle: made when the dock is first placed on a ready map, then moved
+  // into place. A marker is placed on the map as it is added, so it needs its position first.
   useEffect(() => {
     const current = map.current;
-    if (!current || !origin) {
+    if (!current || !ready || !origin) {
       return;
     }
-    // A marker is placed on the map as it is added, so it needs its position first.
     if (!dock.current) {
       dock.current = marker(styles.dock, 'Dock').setLngLat([origin.lon, origin.lat]).addTo(current);
       dock.current.on('drag', () => {
@@ -193,7 +195,7 @@ export const CalibrationMap: React.FC<Props> = (props) => {
       framed.current = true;
       current.jumpTo({ center: [origin.lon, origin.lat], zoom: DOCK_ZOOM });
     }
-  }, [origin]);
+  }, [origin, ready]);
 
   const setData = (id: string, data: FeatureCollection) => map.current?.getSource<GeoJSONSource>(id)?.setData(data);
   useEffect(() => void (ready && setData('trail', trail.lines)), [ready, trail.lines]);
@@ -213,7 +215,7 @@ export const CalibrationMap: React.FC<Props> = (props) => {
       current.doubleClickZoom.enable();
     }
     current.getCanvas().style.cursor = drawing ? 'crosshair' : '';
-  }, [drawing]);
+  }, [drawing, ready]);
 
   return <div ref={element} className={styles.map} data-testid="navimow-calibration-map" />;
 };

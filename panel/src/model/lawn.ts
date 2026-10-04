@@ -164,7 +164,8 @@ export function rotationTowards(origin: DockOrigin, [lon, lat]: [number, number]
   if (east === 0 && north === 0) {
     return origin.rotation;
   }
-  return (((Math.atan2(east, north) * 180) / Math.PI + 360) % 360 + 360) % 360;
+  // atan2 is within ±180, so one turn added brings it into [0, 360).
+  return ((Math.atan2(east, north) * 180) / Math.PI + 360) % 360;
 }
 
 /** What the map draws for a Boundary: the outline and each Zone as a labelled polygon. */
@@ -180,7 +181,9 @@ export function boundaryFeatures(boundary: Boundary | undefined): BoundaryFeatur
   return {
     type: 'FeatureCollection',
     features: [
-      ...(outline ? [{ type: 'Feature' as const, properties: { kind: 'outline' as const, label: 'Lawn' }, geometry: polygon(outline) }] : []),
+      ...(outline
+        ? [{ type: 'Feature' as const, properties: { kind: 'outline' as const, label: 'Outline' }, geometry: polygon(outline) }]
+        : []),
       ...zones.map(({ id, name, ring }) => ({
         type: 'Feature' as const,
         properties: { kind: 'zone' as const, label: name && name !== id ? `${name} (${id})` : id || name, id },
@@ -196,14 +199,28 @@ export function nextZoneId(zones: Zone[]): string {
   return String(Math.max(0, ...numbers) + 1);
 }
 
+/** Options as saved by any version of the panel: the Dock origin may still sit at the root. */
+export interface LawnOptions {
+  lawn?: Lawn;
+  /** Where panels saved before the Boundary existed hold the Dock origin. Read through resolveLawn. */
+  dockOrigin?: DockOriginOptions;
+}
+
 /**
  * Panels saved before the Boundary existed hold the Dock origin at the root of their options. It
  * moves under `lawn`, where the drawer can save it together with the Boundary.
  */
-export function migrateLawn<T extends { lawn?: Lawn; dockOrigin?: DockOriginOptions }>(options: T): Omit<T, 'dockOrigin'> {
+export function migrateLawn<T extends LawnOptions>(options: T): Omit<T, 'dockOrigin'> {
   const { dockOrigin, ...rest } = options;
   if (dockOrigin === undefined) {
     return rest;
   }
   return { ...rest, lawn: { ...rest.lawn, dockOrigin: rest.lawn?.dockOrigin ?? dockOrigin } };
 }
+
+/**
+ * The Lawn a panel's options hold, wherever they hold it. Grafana runs the migration handler only
+ * for a panel saved under another plugin version, so a panel saved yesterday still reads from the
+ * root; this is what the panel and the drawer read, and the migration tidies up on the next save.
+ */
+export const resolveLawn = (options: LawnOptions): Lawn | undefined => migrateLawn(options).lawn;

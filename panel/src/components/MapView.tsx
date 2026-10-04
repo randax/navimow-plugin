@@ -13,15 +13,22 @@ declare let __webpack_public_path__: string;
 // The worker is copied into dist/ by webpack.config.ts and served same-origin, beside module.js.
 setWorkerUrl(__webpack_public_path__ + 'maplibre-gl-worker.mjs');
 
-// Until a Dock origin is calibrated there is nothing to centre on, so fit all of Norway.
-const NORWAY: [[number, number], [number, number]] = [
+/** Until a Dock origin is calibrated there is nothing to centre on, so fit all of Norway. */
+export const NORWAY: [[number, number], [number, number]] = [
   [4.5, 57.9],
   [31.2, 71.2],
 ];
 
-// MapLibre colours attribution links but not plain text, which would inherit Grafana's light
-// dark-theme text and vanish on the light attribution strip.
-const container = css({ '.maplibregl-ctrl-attrib': { color: 'rgba(0, 0, 0, 0.75)' } });
+/**
+ * MapLibre colours attribution links but not plain text, which would inherit Grafana's light
+ * dark-theme text and vanish on the light attribution strip.
+ */
+export const ATTRIBUTION_STYLE = { '.maplibregl-ctrl-attrib': { color: 'rgba(0, 0, 0, 0.75)' } };
+const container = css(ATTRIBUTION_STYLE);
+
+/** Logs a map's errors under the plugin's tag, which the browser tests collect. */
+export const reportErrors = (map: Map) =>
+  map.on('error', (e) => console.error('[navimow-map]', e.error?.message ?? e));
 
 const NO_WEBGL =
   'The map needs WebGL, which this browser has turned off or does not support. ' +
@@ -69,7 +76,7 @@ interface Props extends MapSources {
  * its options whenever one changes, so a source is a new object even when nothing about it did; by
  * value, the map is restyled only for a source that differs, and recreated only for a new Terrain.
  */
-const useByValue = <T,>(value: T): T => {
+export const useByValue = <T,>(value: T): T => {
   const json = JSON.stringify(value);
   const [kept, keep] = useState({ value, json });
   if (kept.json !== json) {
@@ -183,7 +190,7 @@ const MapCanvas: React.FC<Props> = ({ baseMap, overlay, terrain, view, trail, bo
       // Attribution is a licence obligation: never collapsed, never hideable.
       attributionControl: { compact: false },
     });
-    created.on('error', (e) => console.error('[navimow-map]', e.error?.message ?? e));
+    reportErrors(created);
     // Only for data that arrived while the style was loading. MapLibre fires this after every restyle
     // in place too, where the Trail is already there and sending it again would re-tile it for nothing.
     topUp.current = false;

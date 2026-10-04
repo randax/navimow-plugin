@@ -541,22 +541,37 @@ test('the calibration drawer saves the Dock origin and Boundary into the options
 
   // Four corners around the middle of the map: three clicks and a double click, which must not
   // add its corner twice.
-  await drawer.getByRole('button', { name: 'Draw lawn' }).click();
+  await drawer.getByRole('button', { name: 'Draw outline' }).click();
   const box = (await map.boundingBox())!;
   const [cx, cy] = [box.width / 2, box.height / 2];
   await map.click({ position: { x: cx - 120, y: cy - 120 } });
   await map.click({ position: { x: cx + 120, y: cy - 120 } });
   await map.click({ position: { x: cx + 120, y: cy + 120 } });
   await map.dblclick({ position: { x: cx - 120, y: cy + 120 } });
-  await expect(drawer.getByText('Lawn: 4 corners')).toBeVisible();
+  await expect(drawer.getByText('Outline: 4 corners')).toBeVisible();
+
+  // A Zone gets the next identifier; blanking it holds Save until it is back.
+  await drawer.getByRole('button', { name: 'Add Zone' }).click();
+  await map.click({ position: { x: cx - 60, y: cy - 60 } });
+  await map.click({ position: { x: cx + 60, y: cy - 60 } });
+  await map.dblclick({ position: { x: cx, y: cy + 60 } });
+  const zoneId = drawer.getByRole('textbox', { name: 'Zone 1 identifier' });
+  await expect(zoneId).toHaveValue('1');
+  const save = drawer.getByRole('button', { name: 'Save' });
+  await zoneId.fill('');
+  await expect(drawer.getByText(/Zone 1 needs the identifier/)).toBeVisible();
+  await expect(save).toBeDisabled();
+  await zoneId.fill('3');
+  await expect(save).toBeEnabled();
 
   // What will be saved is shown as text, with the typed values in it.
   const text = drawer.locator('textarea');
   await expect(text).toHaveValue(/"lat": 59\.965,/);
   await expect(text).toHaveValue(/"rotation": 33\.5/);
   await expect(text).toHaveValue(/"outline": \[/);
+  await expect(text).toHaveValue(/"id": "3"/);
 
-  await drawer.getByRole('button', { name: 'Save' }).click();
+  await save.click();
   await expect(drawer).toHaveCount(0);
   await expect(canvases).toHaveCount(1);
   await expect(options.getNumberInput('Latitude')).toHaveValue('59.965');

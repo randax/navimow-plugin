@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import type { PanelProps } from '@grafana/data';
 import { resolveBaseMap } from '../model/baseMap';
-import { boundaryFeatures } from '../model/lawn';
+import { boundaryFeatures, resolveLawn } from '../model/lawn';
 import { resolveOverlay } from '../model/overlay';
 import { resolveTerrain, type TerrainOptions } from '../model/terrain';
 import { mowerAt, trailScene } from '../model/trail';
@@ -37,7 +37,9 @@ export const MapPanel: React.FC<PanelProps<MapPanelOptions>> = ({ options, data,
   const terrain = useMemo(() => resolveTerrain(options.terrain), [options.terrain]);
   const overlay = useMemo(() => resolveOverlay(options.overlay), [options.overlay]);
   const [view, setView] = useView(options.terrain);
-  const { trailColumns, lawn } = options;
+  const { trailColumns, lawn: saved, dockOrigin: legacy } = options;
+  // Keyed on the two places the Lawn may be saved, so a fresh options object alone changes nothing.
+  const lawn = useMemo(() => resolveLawn({ lawn: saved, dockOrigin: legacy }), [saved, legacy]);
   const dockOrigin = lawn?.dockOrigin;
   const trail = useMemo(
     () => trailScene(data.series, { trailColumns, dockOrigin }),

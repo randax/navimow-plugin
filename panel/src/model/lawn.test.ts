@@ -7,6 +7,7 @@ import {
   migrateLawn,
   nextZoneId,
   parseLawn,
+  resolveLawn,
   rotationTowards,
   type Lawn,
 } from './lawn';
@@ -133,7 +134,7 @@ describe('boundaryFeatures', () => {
   test('the outline and each Zone become closed polygons that name themselves', () => {
     const { features } = boundaryFeatures({ outline: square, zones: [{ id: '3', name: 'Back', ring: square }] });
     expect(features.map((f) => f.properties)).toEqual([
-      { kind: 'outline', label: 'Lawn' },
+      { kind: 'outline', label: 'Outline' },
       { kind: 'zone', label: 'Back (3)', id: '3' },
     ]);
     for (const f of features) {
@@ -157,6 +158,27 @@ describe('nextZoneId', () => {
     expect(nextZoneId([])).toBe('1');
     expect(nextZoneId([{ id: '1', name: '', ring: square }, { id: '7', name: '', ring: square }])).toBe('8');
     expect(nextZoneId([{ id: 'patio', name: '', ring: square }])).toBe('1');
+  });
+});
+
+describe('resolveLawn', () => {
+  test('reads a Dock origin saved at the root, as the migration handler may not have run', () => {
+    expect(resolveLawn({ dockOrigin: { lat: 60, lon: 10, rotation: 20 } })).toEqual({
+      dockOrigin: { lat: 60, lon: 10, rotation: 20 },
+    });
+  });
+
+  test('prefers what is under lawn, and keeps its Boundary', () => {
+    const lawn = { dockOrigin: { lat: 1, lon: 2 }, boundary: { outline: square } };
+    expect(resolveLawn({ lawn, dockOrigin: { lat: 60, lon: 10 } })).toEqual(lawn);
+    expect(resolveLawn({ lawn: { boundary: { outline: square } }, dockOrigin: { lat: 60, lon: 10 } })).toEqual({
+      boundary: { outline: square },
+      dockOrigin: { lat: 60, lon: 10 },
+    });
+  });
+
+  test('is nothing for a panel with neither', () => {
+    expect(resolveLawn({})).toBeUndefined();
   });
 });
 
