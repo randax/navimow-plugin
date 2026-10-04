@@ -79,17 +79,35 @@ export interface CustomSlot {
 export const CUSTOM_BASE_MAP: CustomSlot = { name: 'Base map', wms: true, tileSize: 256, maxzoom: 18 };
 
 // Saved options are JSON that provisioning or a hand may have written, so a field can hold anything.
-// What is not text is no text; a number may come as the text that spells it; null is absent.
+// What is not text is no text.
 const text = (value: unknown): string => (typeof value === 'string' ? value.trim() : '');
-export const numberFrom = (value: unknown): number | undefined =>
-  typeof value === 'number' ? value : text(value) === '' ? undefined : Number(value);
+
+/**
+ * A saved number: itself, or a plain decimal numeral that spells it, as provisioning files sometimes
+ * hold. Absent, null or blank is undefined, for a default to stand in. Anything else is not a
+ * number (NaN), so that it is refused by name rather than quietly replaced.
+ */
+export const numberFrom = (value: unknown): number | undefined => {
+  if (typeof value === 'number') {
+    return value;
+  }
+  if (value === undefined || value === null || (typeof value === 'string' && value.trim() === '')) {
+    return undefined;
+  }
+  return /^[+-]?(\d+\.?\d*|\.\d+)$/.test(text(value)) ? Number(text(value)) : Number.NaN;
+};
 
 // MapLibre fills both kinds of template itself: {z}/{x}/{y} for tile services, {bbox-epsg-3857} for WMS.
+const BBOX = '{bbox-epsg-3857}';
 const isTemplate = (url: string, wms: boolean): boolean =>
-  ['{z}', '{x}', '{y}'].every((p) => url.includes(p)) || (wms && url.includes('{bbox-epsg-3857}'));
+  ['{z}', '{x}', '{y}'].every((p) => url.includes(p)) || (wms && url.includes(BBOX));
 
-// Every placeholder MapLibre fills in a tile URL. Any other is requested as written, and nothing is drawn.
-const PLACEHOLDERS = ['{z}', '{x}', '{y}', '{quadkey}', '{prefix}', '{ratio}', '{bbox-epsg-3857}'];
+// Every placeholder MapLibre fills in a tile URL. Any other is requested as written, and in the host
+// or path that draws nothing. The query is left alone: a filter value there may hold braces of its own.
+const placeholders = (slot: CustomSlot): string[] => [
+  ...['{z}', '{x}', '{y}', '{quadkey}', '{prefix}', '{ratio}'],
+  ...(slot.wms ? [BBOX] : []),
+];
 const list = (items: string[]): string =>
   [items.slice(0, -1).join(', '), ...items.slice(-1)].filter(Boolean).join(' and ');
 
@@ -119,10 +137,11 @@ export function customTiles(slot: CustomSlot, custom?: CustomSourceOptions | nul
   const attribution = text(custom?.attribution);
   const tileSize = numberFrom(custom?.tileSize) ?? slot.tileSize;
   const maxzoom = numberFrom(custom?.maxzoom) ?? slot.maxzoom;
-  const unfilled = [...new Set(url.match(/\{[^}]*\}/g))].filter((p) => !PLACEHOLDERS.includes(p));
+  const filled = placeholders(slot);
+  const unfilled = [...new Set(url.split('?')[0].match(/\{[^}]*\}/g))].filter((p) => !filled.includes(p));
   if (isTemplate(url, slot.wms) && unfilled.length > 0) {
     return {
-      problem: `A custom ${slot.name} URL has ${list(unfilled)}, which the map cannot fill in. It fills ${list(PLACEHOLDERS)}.`,
+      problem: `A custom ${slot.name} URL has ${list(unfilled)}, which the map cannot fill in. It fills ${list(filled)}.`,
     };
   }
   const request = isTemplate(url, slot.wms) ? filledIn(url) : undefined;

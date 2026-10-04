@@ -96,6 +96,20 @@ describe('resolveTerrain', () => {
       });
     });
 
+    test.each([
+      ['https://{s}.terrain.example.com/{z}/{x}/{y}.png', '{s}'],
+      ['https://terrain.example.com/{bbox-epsg-3857}/{z}/{x}/{y}.png', '{bbox-epsg-3857}'],
+    ])('%p is refused for %s, and told only what a Terrain URL may hold', (template, unknown) => {
+      expect(custom({ url: template })).toEqual({
+        problem: `A custom Terrain URL has ${unknown}, which the map cannot fill in. It fills {z}, {x}, {y}, {quadkey}, {prefix} and {ratio}.`,
+      });
+    });
+
+    test('braces in the query are left as they are', () => {
+      const template = 'https://terrain.example.com/{z}/{x}/{y}.png?set={set}';
+      expect(custom({ url: template })).toMatchObject({ source: { tiles: [template] } });
+    });
+
     test('custom attribution is shown as text, never interpreted as markup', () => {
       expect(custom({ attribution: '<b>Me</b>' })).toMatchObject({ source: { attribution: '&lt;b&gt;Me&lt;/b&gt;' } });
     });

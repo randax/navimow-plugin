@@ -56,8 +56,19 @@ describe('resolveOverlay', () => {
       ['0.25', 0.25],
       ['faint', 0.5],
       [null, 0.5],
+      // Nothing but a plain decimal numeral is read as a number.
+      [true, 0.5],
+      ['1e0', 0.5],
+      ['0x1', 0.5],
     ])('%p from panel JSON, which bypasses the slider, is drawn as %p', (saved, drawn) => {
       expect(opacityOf(saved)).toMatchObject({ overlay: { opacity: drawn } });
+    });
+  });
+
+  test("braces in a custom URL's query are left as they are", () => {
+    const url = 'https://wms.example.com/wms?BBOX={bbox-epsg-3857}&CQL_FILTER=name%3D%27{park}%27';
+    expect(resolveOverlay({ preset: 'custom', custom: { url, attribution: '© Me' } })).toMatchObject({
+      overlay: { source: { tiles: [url] } },
     });
   });
 

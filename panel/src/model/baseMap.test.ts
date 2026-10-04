@@ -153,9 +153,28 @@ describe('resolveBaseMap', () => {
       expect(custom({ url: 'https://tiles.example.com/{z}/{x}/{y}.png', tileSize: null, maxzoom: '' })).toMatchObject({
         source: { tileSize: 256, maxzoom: 18 },
       });
-      expect(custom({ url: 'https://tiles.example.com/{z}/{x}/{y}.png', tileSize: 'large' })).toEqual({
-        problem: expect.stringContaining('Tile size'),
+      expect(custom({ url: 'https://tiles.example.com/{z}/{x}/{y}.png', tileSize: '512.0' })).toMatchObject({
+        source: { tileSize: 512 },
       });
+    });
+
+    // Only a plain decimal numeral is a number; the rest is refused by name, never swapped for the default.
+    test.each(['large', true, false, ['512'], {}, '1e3', '0x100', '0b100000000', '512px'])(
+      'a tile size or max zoom saved as %p is refused',
+      (saved) => {
+        expect(custom({ url: 'https://tiles.example.com/{z}/{x}/{y}.png', tileSize: saved })).toEqual({
+          problem: 'Tile size must be a whole number of pixels from 64 to 1024.',
+        });
+        expect(custom({ url: 'https://tiles.example.com/{z}/{x}/{y}.png', maxzoom: saved })).toEqual({
+          problem: 'Max zoom must be a whole number from 0 to 24.',
+        });
+      }
+    );
+
+    test('braces in the query are left as they are, as a filter saved before this check may hold them', () => {
+      const url =
+        'https://wms.example.com/wms?REQUEST=GetMap&BBOX={bbox-epsg-3857}&CQL_FILTER=name%3D%27{park}%27&v={v}';
+      expect(custom({ url })).toMatchObject({ source: { tiles: [url] } });
     });
 
     test('every placeholder the map fills is accepted', () => {
@@ -165,8 +184,9 @@ describe('resolveBaseMap', () => {
 
     test.each([
       ['https://{s}.tile.example.com/{z}/{x}/{y}.png', '{s}'],
-      ['https://tiles.example.com/{z}/{x}/{y}.png?key={key}&v={v}&again={key}', '{key} and {v}'],
-    ])('%p is refused for %s, which the map would request as written', (url, unknown) => {
+      ['https://tiles.example.com/{s}/{z}/{x}/{y}.png?v={v}', '{s}'],
+      ['https://{s}.example.com/{style}/{z}/{x}/{y}/{s}.png', '{s} and {style}'],
+    ])('%p is refused for %s in its host or path, which the map would request as written', (url, unknown) => {
       expect(custom({ url })).toEqual({
         problem: `A custom Base map URL has ${unknown}, which the map cannot fill in. It fills {z}, {x}, {y}, {quadkey}, {prefix}, {ratio} and {bbox-epsg-3857}.`,
       });
