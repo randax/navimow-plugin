@@ -73,7 +73,7 @@ const test = base.extend<{
     use(await readProvisionedDashboard({ fileName: 'navimow-trail.json' })),
   openTrail: async ({ gotoDashboardPage, trailDashboard }, use) =>
     use(async (title) => (await gotoDashboardPage(trailDashboard)).getPanelByTitle(title).locator),
-  // The same real Trail, with Terrain or an Overlay.
+  // The same real Trail, with Terrain.
   openTerrain: async ({ gotoDashboardPage, readProvisionedDashboard }, use) => {
     const dashboard = await readProvisionedDashboard({ fileName: 'navimow-terrain.json' });
     await use(async (title) => (await gotoDashboardPage(dashboard)).getPanelByTitle(title).locator);
@@ -334,9 +334,18 @@ test('a Trail drawn on Terrain follows the ground', async ({ openTerrain, page }
   expect((await pixelsOf(page, panel)).trail).toBeGreaterThan(100);
 });
 
-test('the Overlay is drawn over the Base map and under the Trail', async ({ openTerrain, page }) => {
+test('the Overlay is drawn over the Base map and under the Trail', async ({
+  gotoDashboardPage,
+  readProvisionedDashboard,
+  page,
+}) => {
   test.skip(LIVE_TILES, NEEDS_FIXTURE_TILES);
-  const [panel] = await Promise.all([openTerrain('Overlay'), tileFrom(page, 'wms.geonorge.no', /BBOX=-?\d/)]);
+  // On a dashboard of its own, so the slow hillshade service is not loaded beside the Terrain panels.
+  const [dashboardPage] = await Promise.all([
+    gotoDashboardPage(await readProvisionedDashboard({ fileName: 'navimow-overlay.json' })),
+    tileFrom(page, 'wms.geonorge.no', /BBOX=-?\d/),
+  ]);
+  const panel = dashboardPage.getPanelByTitle('Overlay').locator;
   await expectDrawn(panel);
   await expect(panel.getByTestId('navimow-map')).toHaveAttribute('data-trails-drawn', '1');
   // At full opacity the Overlay hides the Base map, and the Trail still shows on top of it. Retried:

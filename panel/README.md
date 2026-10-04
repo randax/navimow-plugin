@@ -18,8 +18,8 @@ Provisioned dashboards (`provisioning/`, development only):
 - `/d/navimow-map-lifecycle`: one map inside a collapsible row, used to check maps are released.
 - `/d/navimow-trail`: a slice of the real Trail in `fixtures/trail-2026-09-21.csv` (from 13:30 UTC,
   in delivery order) fed through TestData, and the same data without matching column names.
-- `/d/navimow-terrain`: the same Trail with Terrain, starting flat and starting in terrain, and with
-  the hillshade Overlay at full opacity.
+- `/d/navimow-terrain`: the same Trail with Terrain, starting flat and starting in terrain.
+- `/d/navimow-overlay`: the same Trail with the hillshade Overlay at full opacity.
 
 `plugin.json` changes need a Grafana restart: `docker compose restart`.
 
