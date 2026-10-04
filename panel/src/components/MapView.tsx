@@ -163,6 +163,10 @@ const MapCanvas: React.FC<Props> = ({ baseMap, trail, mower, width, height }) =>
 
   // When to frame the Trail is the model's decision (nextFraming); this only carries it out.
   useEffect(() => {
+    // A panel with no size yet cannot be framed; recording it as framed would mean it never is.
+    if (width <= 0 || height <= 0) {
+      return;
+    }
     const next = nextFraming(trail, framed.current);
     if (map.current && trail.origin && next) {
       framed.current = next;

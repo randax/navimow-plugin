@@ -23,20 +23,34 @@ const scene = (points: TrailPoint[], origin = ORIGIN) => placeTrails([{ segments
 const contains = ([[minX, minY], [maxX, maxY]]: Box, [[x0, y0], [x1, y1]]: Box) =>
   minX <= x0 && minY <= y0 && maxX >= x1 && maxY >= y1;
 
-/** Replays the Trail growing `step` rows at a time, as refreshes would, and returns every framing made. */
+/**
+ * Replays the Trail growing `step` points per refresh and returns every framing made. Framing reads
+ * only the scene's local box and origin, so the box is kept up as it grows rather than placing the
+ * whole Trail again on every refresh.
+ */
 const replay = (points: TrailPoint[], step = 1, origin = ORIGIN) => {
   const framings: Framing[] = [];
   let framed: Framing | undefined;
-  for (let n = step; n < points.length + step; n += step) {
-    const sofar = scene(points.slice(0, n), origin);
-    const next = nextFraming(sofar, framed);
+  let box: Box = [
+    [Infinity, Infinity],
+    [-Infinity, -Infinity],
+  ];
+  points.forEach(({ x, y }, i) => {
+    box = [
+      [Math.min(box[0][0], x), Math.min(box[0][1], y)],
+      [Math.max(box[1][0], x), Math.max(box[1][1], y)],
+    ];
+    if ((i + 1) % step !== 0 && i !== points.length - 1) {
+      return;
+    }
+    const next = nextFraming({ ...EMPTY_SCENE, localBox: box, origin }, framed);
     if (next) {
       framings.push(next);
       framed = next;
     }
     // Whatever happened, the Trail so far is in view.
-    expect(contains(framed!.box, sofar.localBox!)).toBe(true);
-  }
+    expect(contains(framed!.box, box)).toBe(true);
+  });
   return framings;
 };
 
@@ -54,16 +68,40 @@ describe('nextFraming', () => {
   });
 
   test('the whole real Job, about 48 by 58 m, stays inside the view framed while it was docked', () => {
-    const framings = replay(FIXTURE, 10);
+    const framings = replay(FIXTURE);
     expect(framings).toHaveLength(1);
     expect(contains(framings[0].box, scene(FIXTURE).localBox!)).toBe(true);
   });
 
   test('a Trail that leaves the view is framed again, once, around all of it', () => {
     const excursion = [70, 80, 90].map((x, i) => ({ time: FIXTURE.at(-1)!.time + (i + 1) * 2000, x, y: 0 }));
-    const framings = replay([...FIXTURE, ...excursion], 10);
+    const framings = replay([...FIXTURE, ...excursion]);
     expect(framings).toHaveLength(2);
     expect(contains(framings[1].box, scene([...FIXTURE, ...excursion]).localBox!)).toBe(true);
+  });
+
+  test('a lawn wider than the view is framed only a handful of times as it is mowed', () => {
+    // 100 by 100 m, mowed in 50 stripes 2 m apart, one refresh per stripe.
+    const stripes = Array.from({ length: 50 }, (_, i) => [
+      { time: i * 2, x: 0, y: 2 * i },
+      { time: i * 2 + 1, x: 100, y: 2 * i },
+    ]).flat();
+    expect(replay(stripes, 2).length).toBeLessThanOrEqual(5);
+  });
+
+  test('the same Trail refreshed again never frames again, whatever its decimals', () => {
+    const same = {
+      ...EMPTY_SCENE,
+      origin: ORIGIN,
+      localBox: [
+        [0.123, 0],
+        [80.456, 5],
+      ] as Box,
+    };
+    const framed = nextFraming(same, undefined);
+    for (let i = 0; i < 10; i++) {
+      expect(nextFraming(same, framed)).toBeUndefined();
+    }
   });
 
   test.each([

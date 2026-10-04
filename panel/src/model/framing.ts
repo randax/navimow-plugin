@@ -10,16 +10,22 @@ export interface Framing {
 // The least the view shows around the centre of the Trail, so a docked mower is seen with its
 // garden rather than at full zoom on a few centimetres of jitter.
 const MIN_HALF_SIDE_METRES = 40;
+// Room left on each side, as a share of the Trail's size, so a lawn larger than the least view is
+// not framed again for every new stripe at its edge.
+const MARGIN = 0.25;
+
+/** One axis of the framed box. Grown outward from the Trail's own edges, so it always holds them exactly. */
+const padAxis = (min: number, max: number): [number, number] => {
+  const centre = (min + max) / 2;
+  const half = Math.max((max - min) * (0.5 + MARGIN), MIN_HALF_SIDE_METRES);
+  return [Math.min(min, centre - half), Math.max(max, centre + half)];
+};
 
 const pad = ([[minX, minY], [maxX, maxY]]: Box): Box => {
-  const [cx, cy] = [(minX + maxX) / 2, (minY + maxY) / 2];
-  const [hx, hy] = [
-    Math.max((maxX - minX) / 2, MIN_HALF_SIDE_METRES),
-    Math.max((maxY - minY) / 2, MIN_HALF_SIDE_METRES),
-  ];
+  const [[x0, x1], [y0, y1]] = [padAxis(minX, maxX), padAxis(minY, maxY)];
   return [
-    [cx - hx, cy - hy],
-    [cx + hx, cy + hy],
+    [x0, y0],
+    [x1, y1],
   ];
 };
 
