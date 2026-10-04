@@ -31,6 +31,7 @@ MQTT_OAUTH_ERROR = "CODE_OAUTH_INFO_ILLEGAL"
 # The longest the maintenance loop sleeps, so a rejection reported meanwhile or a new login
 # written beside the service is acted on within a minute.
 POLL_SECONDS = 60
+DEFAULT_LIFETIME_SECONDS = 3600
 
 _LOGGER = logging.getLogger(__name__)
 # Vendor prose meaning the grant itself is dead, so only a new login helps...
@@ -201,8 +202,10 @@ class TokenClient:
     ) -> Credential:
         async with self._session.request("POST", TOKEN_URL, data=form) as response:
             body = await response.text()
+        # Vendor text is logged, so it must not carry anything we sent or it handed back.
+        secrets = [form[key] for key in ("code", "refresh_token", "client_secret") if key in form]
         if response.status < 200 or response.status >= 300:
-            detail = f"HTTP {response.status}: {body}".rstrip(": ")
+            detail = _redact(f"HTTP {response.status}: {body}".rstrip(": "), secrets)
             if response.status >= 500 or response.status in (408, 429):
                 # A gateway or overload answer is transient whatever its page says (Apache's
                 # stock 502 says "invalid"); only the vendor's own 4xx prose can mean re-login.
@@ -214,10 +217,12 @@ class TokenClient:
             # A credential object cut short (never log its token); anything else is prose.
             if body.lstrip().startswith("{") and '"access_token"' in body:
                 raise TokenRequestError("truncated token response", relogin=False) from error
-            raise TokenRequestError.from_vendor(body) from error
+            raise TokenRequestError.from_vendor(_redact(body, secrets)) from error
+        if isinstance(parsed, dict):
+            secrets += [str(parsed.get(key)) for key in ("access_token", "refresh_token")]
         if not isinstance(parsed, dict) or not isinstance(parsed.get("access_token"), str):
             # Vendor errors can arrive with status 200: their prose decides.
-            raise TokenRequestError.from_vendor(body)
+            raise TokenRequestError.from_vendor(_redact(body, secrets))
         try:
             # A refresh response may omit the refresh token; the previous one then still holds.
             refresh_token = parsed.get("refresh_token") or previous_refresh_token
@@ -226,7 +231,7 @@ class TokenClient:
             return Credential(
                 access_token=_required_string(parsed, "access_token"),
                 refresh_token=refresh_token,
-                expires_in=_required_int(parsed, "expires_in"),
+                expires_in=_lifetime(parsed),
                 obtained_at=now,
             )
         except (TypeError, ValueError) as error:
@@ -284,7 +289,7 @@ class TokenManager:
             now = self._clock()
             self._adopt_new_login()
             self._note_recovery(now)
-            if self.state is not AuthState.RELOGIN_REQUIRED and self._due(now):
+            if self._due(now):
                 await self._refresh(now)
             return self._token()
 
@@ -355,6 +360,8 @@ class TokenManager:
     def _due(self, now: float) -> bool:
         if self._credential is None or not self._may_attempt(now):
             return False
+        if self.state is AuthState.RELOGIN_REQUIRED:
+            return True  # the hourly probe, in case the rejection was a gateway's, not Navimow's
         known_dead = self._rejected == self._credential.access_token
         return known_dead or self._credential.refresh_at() <= now
 
@@ -398,14 +405,15 @@ class TokenManager:
         # Replacing a token reported dead is an attempt at recovery, not proof of it: the
         # retry ladder keeps climbing until a token survives to its proactive refresh.
         recovering = after_rejection or self._rejected == self._credential.access_token
+        probing = self.state is AuthState.RELOGIN_REQUIRED
         self.state = AuthState.REFRESHING
         try:
             refreshed = await self._client.refresh(self._credential, now=now)
         except TokenRequestError as error:
-            self._record_failure(str(error), now, relogin=error.relogin)
+            self._record_failure(str(error), now, relogin=error.relogin or probing)
             return
         except Exception as error:  # Transport errors, whatever their wording, are transient.
-            self._record_failure(str(error), now, relogin=False)
+            self._record_failure(str(error), now, relogin=probing)
             return
         # Adopt before saving: the old refresh token may already be spent, so the new pair
         # must keep serving even if the disk refuses it.
@@ -432,7 +440,8 @@ class TokenManager:
     def _record_failure(self, detail: str, now: float, *, relogin: bool) -> None:
         if relogin:
             self.state = AuthState.RELOGIN_REQUIRED
-            self.next_attempt_at = None
+            # Still probed hourly: a gateway's 401/403 page can look like a dead grant.
+            self.next_attempt_at = now + RETRY_DELAYS[-1]
             _LOGGER.error(
                 "Navimow rejected the stored login (%s); run `navimow-collector login`", detail
             )
@@ -441,7 +450,17 @@ class TokenManager:
         self._failures += 1
         self.next_attempt_at = now + delay
         self.state = AuthState.RETRY_PENDING
-        _LOGGER.warning("Navimow token refresh failed; retrying in %s seconds: %s", delay, detail)
+        if delay == RETRY_DELAYS[-1]:
+            # Hours of failure may be a dead grant in words we do not recognise.
+            _LOGGER.error(
+                "Navimow token refresh keeps failing (%s); retrying hourly. If this persists, "
+                "run `navimow-collector login`",
+                detail,
+            )
+        else:
+            _LOGGER.warning(
+                "Navimow token refresh failed; retrying in %s seconds: %s", delay, detail
+            )
 
 
 def authorization_url(client_id: str, redirect_uri: str, state: str) -> str:
@@ -533,6 +552,27 @@ def _required_string(value: dict[str, Any], name: str) -> str:
     if not isinstance(result, str) or not result:
         raise ValueError(f"{name} must be a non-empty string")
     return result
+
+
+def _lifetime(value: dict[str, Any]) -> int:
+    """A usable credential is never discarded over its lifetime field: that would spend a
+    rotated refresh token. An odd or missing value falls back to the documented hour."""
+    raw = value.get("expires_in")
+    try:
+        lifetime = int(raw) if isinstance(raw, int | str) and not isinstance(raw, bool) else 0
+    except ValueError:
+        lifetime = 0
+    if lifetime > 0:
+        return lifetime
+    _LOGGER.warning("Navimow token response has no usable expires_in (%r); assuming 3600", raw)
+    return DEFAULT_LIFETIME_SECONDS
+
+
+def _redact(text: str, secrets: list[str]) -> str:
+    for secret in secrets:
+        if len(secret) >= 8:  # long enough to be a credential, not an ordinary word
+            text = text.replace(secret, "<redacted>")
+    return text
 
 
 def _required_int(value: dict[str, Any], name: str) -> int:

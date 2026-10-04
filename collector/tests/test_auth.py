@@ -227,7 +227,7 @@ def test_refresh_failures_are_classified_by_vendor_prose(
 
     assert run(tokens.access_token()) == "access"  # the existing token keeps serving
     assert tokens.state is expected
-    assert tokens.next_attempt_at == (3360 if expected is AuthState.RETRY_PENDING else None)
+    assert tokens.next_attempt_at == (3360 if expected is AuthState.RETRY_PENDING else 6900)
 
 
 def test_a_network_error_is_transient_whatever_its_wording(tmp_path: Path) -> None:
@@ -695,3 +695,49 @@ def test_an_exchange_without_a_refresh_token_names_the_missing_field() -> None:
         run(client.exchange("code", "http://localhost:1/callback"))
 
     assert "secret-access" not in str(raised.value)
+
+
+def test_relogin_required_still_probes_hourly_and_heals_if_it_was_transient(
+    tmp_path: Path,
+) -> None:
+    clock = Clock(3300)
+    session = FakeSession([Response(403, "Attention Required!"), Response(200, token("healed"))])
+    tokens = TokenManager(TokenClient(session, "id", "secret"), logged_in(tmp_path), clock=clock)
+    run(tokens.access_token())
+    assert tokens.state.value == "relogin-required"
+
+    clock.now += 3599
+    run(tokens.access_token())
+    assert len(session.forms) == 1  # no hammering a grant that is probably dead
+
+    clock.now += 1
+    assert run(tokens.access_token()) == "healed"
+    assert tokens.state is AuthState.FRESH
+
+
+def test_vendor_prose_never_logs_a_token(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    store = TokenStore(tmp_path / "token.json")
+    store.save(Credential("ACCESS-SECRET", "REFRESH-SECRET", 3600, 0))
+    echoed = json.dumps({"desc": "refresh_token REFRESH-SECRET is invalid"})
+    half_formed = json.dumps({"access_token": None, "refresh_token": "LIVE-SECRET"})
+    tokens = manager(store, Response(400, echoed))
+    run(tokens.access_token())
+    client = TokenClient(FakeSession([Response(200, half_formed)]), "id", "secret")
+    with pytest.raises(TokenRequestError) as raised:
+        run(client.exchange("code", "http://localhost:1/callback"))
+
+    logged = " ".join(record.getMessage() for record in caplog.records) + str(raised.value)
+    assert "SECRET" not in logged
+
+
+@pytest.mark.parametrize("expires_in", ["3600", None])
+def test_a_usable_credential_with_an_odd_lifetime_is_kept(
+    tmp_path: Path, expires_in: str | None
+) -> None:
+    body: dict[str, Any] = {"access_token": "new", "refresh_token": "rotated"}
+    if expires_in is not None:
+        body["expires_in"] = expires_in
+    store = logged_in(tmp_path)
+
+    assert run(manager(store, Response(200, json.dumps(body))).access_token()) == "new"
+    assert stored(store) == Credential("new", "rotated", 3600, 3300)
