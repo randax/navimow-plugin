@@ -13,7 +13,7 @@ import pytest
 
 from navimow_collector.cli import main
 
-from .conftest import FIXTURE
+from .conftest import FIXTURE, gaps
 
 Row = tuple[str, datetime, datetime, float, float, float, int | None]
 
@@ -137,11 +137,7 @@ def test_a_gap_recorded_again_with_a_later_end_is_extended(
         capture.write_text(json.dumps({"kind": "gap", "mower_id": "DEVICE_1", **gap}) + "\n")
         assert main(["--config", str(config_file), "replay", str(capture)]) == 0
 
-    with psycopg.connect(database) as conn:
-        rows = conn.execute(
-            "SELECT mower_id, start_time, end_time, reason FROM collector_gap"
-        ).fetchall()
-    assert rows == [("DEVICE_1", ms(1788084160000), ms(1788084900000), "restart")]
+    assert gaps(database) == [("DEVICE_1", ms(1788084160000), ms(1788084900000), "restart")]
 
 
 def test_a_state_the_schema_cannot_hold_is_stored_as_unknown(
@@ -178,8 +174,4 @@ def test_a_gap_record_becomes_a_gap_row(config_file: Path, database: str, tmp_pa
     assert main(["--config", str(config_file), "replay", str(capture)]) == 0
     assert main(["--config", str(config_file), "replay", str(capture)]) == 0  # idempotent
 
-    with psycopg.connect(database) as conn:
-        rows = conn.execute(
-            "SELECT mower_id, start_time, end_time, reason FROM collector_gap"
-        ).fetchall()
-    assert rows == [("DEVICE_1", ms(1788084160000), ms(1788084400000), "reconnect")]
+    assert gaps(database) == [("DEVICE_1", ms(1788084160000), ms(1788084400000), "reconnect")]

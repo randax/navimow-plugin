@@ -15,6 +15,7 @@ import socket
 import subprocess
 import uuid
 from collections.abc import Iterator
+from datetime import datetime
 from pathlib import Path
 
 import psycopg
@@ -23,6 +24,25 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 REPO = Path(__file__).resolve().parents[2]
 FIXTURE = REPO / "fixtures" / "synthetic-job.jsonl.gz"
+
+
+class Clock:
+    """An injected clock, which a test moves by hand."""
+
+    def __init__(self, now: float = 0) -> None:
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def gaps(dsn: str) -> list[tuple[str, datetime, datetime, str]]:
+    """Every stored gap, in the order they began."""
+    with psycopg.connect(dsn) as conn:
+        return conn.execute(
+            "SELECT mower_id, start_time, end_time, reason FROM collector_gap"
+            " ORDER BY start_time, mower_id"
+        ).fetchall()
 
 
 def _pg_bindir() -> Path | None:

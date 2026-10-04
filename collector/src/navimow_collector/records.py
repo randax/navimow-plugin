@@ -6,6 +6,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import StrEnum
 
 LOCATION_TOPIC = re.compile(r"^/downlink/vehicle/([^/]+)/realtimeDate/location$")
 
@@ -21,6 +22,13 @@ class TrailPoint:
     vehicle_state: int | None
 
 
+class GapReason(StrEnum):
+    """Why a mower went unrecorded: the broker connection dropped, or the collector was down."""
+
+    RECONNECT = "reconnect"
+    RESTART = "restart"
+
+
 @dataclass(frozen=True)
 class Gap:
     """A period one mower went unrecorded; nothing can backfill it, so it is stored as a gap."""
@@ -28,7 +36,7 @@ class Gap:
     mower_id: str
     start_time: datetime
     end_time: datetime
-    reason: str
+    reason: GapReason
 
 
 @dataclass(frozen=True)
@@ -75,7 +83,10 @@ def _gap(record: Mapping[str, object]) -> Gap | None:
     start, end = _timestamp(record.get("start_ms")), _timestamp(record.get("recv_ms"))
     if not isinstance(mower_id, str) or not isinstance(reason, str) or not start or not end:
         return None
-    return Gap(mower_id, start, end, reason)
+    try:
+        return Gap(mower_id, start, end, GapReason(reason))
+    except ValueError:  # a reason this collector does not know
+        return None
 
 
 def _point(

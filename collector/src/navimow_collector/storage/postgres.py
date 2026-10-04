@@ -147,7 +147,7 @@ class PostgresStorage:
                     SET end_time = EXCLUDED.end_time, reason = EXCLUDED.reason
                     WHERE collector_gap.end_time < EXCLUDED.end_time
                 """,
-                [(gap.mower_id, gap.start_time, gap.end_time, gap.reason) for gap in gaps],
+                [(gap.mower_id, gap.start_time, gap.end_time, gap.reason.value) for gap in gaps],
             )
             return max(cursor.rowcount, 0)
 

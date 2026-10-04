@@ -14,19 +14,13 @@ import psycopg
 import pytest
 
 from navimow_collector.config import Secret, StorageConfig
-from navimow_collector.records import Gap, TrailPoint
+from navimow_collector.records import Gap, GapReason, TrailPoint
 from navimow_collector.storage import Storage, StorageError, open_storage, postgres
 from navimow_collector.storage.buffered import RETRY_SECONDS, BufferedStorage
 
+from .conftest import Clock, gaps
+
 START = datetime(2026, 9, 30, 12, tzinfo=UTC)
-
-
-class Clock:
-    def __init__(self, now: float = 0) -> None:
-        self.now = now
-
-    def __call__(self) -> float:
-        return self.now
 
 
 class Database:
@@ -59,12 +53,6 @@ class Database:
         with psycopg.connect(self.dsn) as conn:
             rows = conn.execute("SELECT device_time FROM trail_point ORDER BY device_time")
             return [int((row[0] - START).total_seconds()) for row in rows]
-
-    def gaps(self) -> list[tuple[str, datetime, datetime, str]]:
-        with psycopg.connect(self.dsn) as conn:
-            return conn.execute(
-                "SELECT mower_id, start_time, end_time, reason FROM collector_gap"
-            ).fetchall()
 
 
 class Observed:
@@ -165,7 +153,7 @@ def test_rows_written_during_an_outage_arrive_when_the_database_returns(
 ) -> None:
     db, clock = Database(database), Clock()
     storage = buffered(db, tmp_path, clock)
-    gap = Gap("DEVICE_1", START, START + timedelta(minutes=4), "reconnect")
+    gap = Gap("DEVICE_1", START, START + timedelta(minutes=4), GapReason.RECONNECT)
 
     assert storage.write_trail(points(1)) == 1
     db.go_down()
@@ -180,7 +168,7 @@ def test_rows_written_during_an_outage_arrive_when_the_database_returns(
     storage.flush()
 
     assert db.trail() == [1, 2, 3]
-    assert db.gaps() == [(gap.mower_id, gap.start_time, gap.end_time, gap.reason)]
+    assert gaps(database) == [(gap.mower_id, gap.start_time, gap.end_time, gap.reason)]
     assert (storage.buffered, storage.reachable) == (0, True)
 
 
@@ -240,7 +228,7 @@ def test_shutting_down_during_an_outage_keeps_what_memory_held(
 ) -> None:
     db, clock = Database(database), Clock()
     storage = buffered(db, tmp_path, clock)
-    gap = Gap("DEVICE_1", START, START + timedelta(minutes=4), "restart")
+    gap = Gap("DEVICE_1", START, START + timedelta(minutes=4), GapReason.RESTART)
     db.go_down()
     storage.write_trail(points(1, 2))
     storage.write_gaps([gap])
@@ -251,14 +239,14 @@ def test_shutting_down_during_an_outage_keeps_what_memory_held(
     restarted.flush()
 
     assert db.trail() == [1, 2]
-    assert db.gaps() == [(gap.mower_id, gap.start_time, gap.end_time, gap.reason)]
+    assert gaps(database) == [(gap.mower_id, gap.start_time, gap.end_time, gap.reason)]
 
 
 def test_a_gap_held_during_an_outage_is_on_disk_at_once(database: str, tmp_path: Path) -> None:
     # The collector forgets when a gap started as soon as it has handed the gap over.
     db, clock = Database(database), Clock()
     storage = buffered(db, tmp_path, clock)
-    gap = Gap("DEVICE_1", START, START + timedelta(minutes=4), "reconnect")
+    gap = Gap("DEVICE_1", START, START + timedelta(minutes=4), GapReason.RECONNECT)
     db.go_down()
     storage.write_gaps([gap])
     del storage  # the process dies with the database still away
@@ -266,7 +254,7 @@ def test_a_gap_held_during_an_outage_is_on_disk_at_once(database: str, tmp_path:
     db.down = False
     buffered(db, tmp_path, clock).flush()
 
-    assert db.gaps() == [(gap.mower_id, gap.start_time, gap.end_time, gap.reason)]
+    assert gaps(database) == [(gap.mower_id, gap.start_time, gap.end_time, gap.reason)]
 
 
 def test_the_disk_buffer_never_exceeds_its_limit(database: str, tmp_path: Path) -> None:

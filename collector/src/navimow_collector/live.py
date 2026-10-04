@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
@@ -18,8 +17,9 @@ from mower_sdk.http import HTTPSession
 from mower_sdk.models import Device
 from mower_sdk.mqtt import NavimowMQTT
 
-from .auth import RETRY_DELAYS, TokenManager
+from .auth import RETRY_DELAYS, TokenManager, redact, replace_file
 from .ingest import Ingestor
+from .records import GapReason
 from .storage.buffered import BufferedStorage
 
 API_URL = "https://navimow-fra.ninebot.com"
@@ -125,7 +125,7 @@ class Collector:
         # disconnected it is the start of the gap the next connection will record.
         self._marker = state_dir / "connected-until"
         self._flowed_until = _read_marker(self._marker)
-        self._gap_reason = "restart"
+        self._gap_reason = GapReason.RESTART
 
     async def collect(self, stop: asyncio.Event) -> None:
         """Collect until `stop` is set."""
@@ -144,7 +144,7 @@ class Collector:
             await self._keep_credentials(token)
         now = self._clock()
         if self.connected and now - (self._flowed_until or 0) >= HEARTBEAT_SECONDS:
-            self._mark(now)
+            self._remember_flow(now)
         self._storage.flush()
 
     def stop(self) -> None:
@@ -154,7 +154,7 @@ class Collector:
             broker.disconnect()
         if self.connected:
             self.connected = False
-            self._mark(self._clock())
+            self._remember_flow(self._clock())
 
     async def _keep_credentials(self, token: str) -> None:
         """Fetch broker credentials only when the cached ones cannot be right.
@@ -187,9 +187,9 @@ class Collector:
         if self.connected:
             self._fetches = 0
         self._credentials = credentials
-        self._use(credentials, now)
+        self._apply_credentials(credentials, now)
 
-    def _use(self, credentials: BrokerCredentials, now: float) -> None:
+    def _apply_credentials(self, credentials: BrokerCredentials, now: float) -> None:
         """Hand fresh credentials to the broker connection, opening it if there is none."""
         address = (credentials.host, credentials.ws_path)
         if self._broker is not None and address != self._address and not self.connected:
@@ -254,25 +254,24 @@ class Collector:
                 )
         # Only now may the start of that gap be forgotten: a crash before this line finds
         # it still on disk, and records the same gap again, extended.
-        self._mark(now)
+        self._remember_flow(now)
         await self._poll_status()
 
     async def _on_disconnected(self) -> None:
         if not self.connected:
             return  # a failed attempt to reconnect: the gap is already open
         self.connected = False
-        self._gap_reason = "reconnect"
+        self._gap_reason = GapReason.RECONNECT
         self._down_since = self._clock()
-        self._mark(self._down_since)
+        self._remember_flow(self._down_since)
         _LOGGER.warning("Broker connection lost; reconnecting")
 
-    def _mark(self, now: float) -> None:
+    def _remember_flow(self, now: float) -> None:
+        """Note, on disk too, that the stream flowed until `now`."""
         self._flowed_until = now
         try:
             self._marker.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            temporary = self._marker.with_name(f".{self._marker.name}.tmp")
-            temporary.write_text(repr(now), encoding="utf-8")
-            os.replace(temporary, self._marker)
+            replace_file(self._marker, repr(now))
         except OSError as error:
             _LOGGER.warning("Could not note the connection in %s: %s", self._marker, error)
 
@@ -336,7 +335,7 @@ class Collector:
         except Exception as error:  # Transport errors, whatever their type, are transient.
             raise RestError(str(error)) from error
         if response.status >= 400:
-            raise RestError(_prose(f"HTTP {response.status}: {text}", token), response.status)
+            raise RestError(_loggable(f"HTTP {response.status}: {text}", token), response.status)
         try:
             answer = json.loads(text)
         except ValueError:
@@ -344,13 +343,13 @@ class Collector:
         if not isinstance(answer, dict) or answer.get("code") != 1:
             # The vendor reports errors in prose, often with status 200.
             desc = answer.get("desc") if isinstance(answer, dict) else None
-            raise RestError(_prose(str(desc or text), token))
+            raise RestError(_loggable(str(desc or text), token))
         return answer
 
 
-def _prose(text: str, token: str) -> str:
+def _loggable(text: str, token: str) -> str:
     """Vendor error text is logged: keep it short and free of the token it was sent."""
-    return text.replace(token, "<redacted>").rstrip(": ")[:300]
+    return redact(text, [token]).rstrip(": ")[:300]
 
 
 def _read_marker(path: Path) -> float | None:

@@ -33,9 +33,9 @@ from navimow_collector.live import (
 )
 from navimow_collector.storage.buffered import RETRY_SECONDS, BufferedStorage
 
-from .conftest import FIXTURE
+from .conftest import FIXTURE, Clock, gaps
 from .test_auth import Request, Response, logged_in, token
-from .test_buffer import Clock, Database
+from .test_buffer import Database
 
 NOW = 1_790_000_000.0
 LOCATION = "/downlink/vehicle/{}/realtimeDate/location"
@@ -254,14 +254,6 @@ def test_live_messages_produce_exactly_the_rows_replay_produces(
     assert live.trail() == replayed
 
 
-def gaps(live: Live) -> list[tuple[Any, ...]]:
-    with psycopg.connect(live.db.dsn) as conn:
-        return conn.execute(
-            "SELECT mower_id, start_time, end_time, reason FROM collector_gap"
-            " ORDER BY start_time, mower_id"
-        ).fetchall()
-
-
 def test_one_process_records_every_mower_on_the_account(database: str, tmp_path: Path) -> None:
     live = Live(database, tmp_path, "DEVICE_1", "DEVICE_2")
 
@@ -290,7 +282,7 @@ def test_a_reconnection_writes_a_gap_with_its_start_end_and_reason(
 
     asyncio.run(scenario())
 
-    assert gaps(live) == [
+    assert gaps(live.db.dsn) == [
         ("DEVICE_1", at(NOW + 100), at(NOW + 340), "reconnect"),
         ("DEVICE_2", at(NOW + 100), at(NOW + 340), "reconnect"),
     ]
@@ -310,7 +302,7 @@ def test_a_gap_starts_when_the_connection_was_lost_not_at_a_failed_attempt_to_re
 
     asyncio.run(scenario())
 
-    assert gaps(live) == [("DEVICE_1", at(NOW + 100), at(NOW + 340), "reconnect")]
+    assert gaps(live.db.dsn) == [("DEVICE_1", at(NOW + 100), at(NOW + 340), "reconnect")]
 
 
 def test_a_reconnection_is_recorded_even_when_no_time_is_seen_to_pass(live: Live) -> None:
@@ -323,7 +315,7 @@ def test_a_reconnection_is_recorded_even_when_no_time_is_seen_to_pass(live: Live
 
     asyncio.run(scenario())
 
-    assert gaps(live) == [("DEVICE_1", at(NOW + 100), at(NOW + 100), "reconnect")]
+    assert gaps(live.db.dsn) == [("DEVICE_1", at(NOW + 100), at(NOW + 100), "reconnect")]
 
 
 def test_a_crash_while_recording_a_gap_does_not_lose_the_outage(live: Live) -> None:
@@ -345,7 +337,7 @@ def test_a_crash_while_recording_a_gap_does_not_lose_the_outage(live: Live) -> N
 
     asyncio.run(scenario())
 
-    assert gaps(live) == [("DEVICE_1", at(NOW + 100), at(NOW + 3600), "restart")]
+    assert gaps(live.db.dsn) == [("DEVICE_1", at(NOW + 100), at(NOW + 3600), "restart")]
 
 
 def test_a_restart_writes_a_gap_from_when_the_stream_last_flowed(live: Live) -> None:
@@ -358,7 +350,7 @@ def test_a_restart_writes_a_gap_from_when_the_stream_last_flowed(live: Live) -> 
 
     asyncio.run(scenario())
 
-    assert gaps(live) == [("DEVICE_1", at(NOW + 600), at(NOW + 3600), "restart")]
+    assert gaps(live.db.dsn) == [("DEVICE_1", at(NOW + 600), at(NOW + 3600), "restart")]
 
 
 def test_a_clean_shutdown_ends_the_recorded_stream_at_the_shutdown(live: Live) -> None:
@@ -372,7 +364,7 @@ def test_a_clean_shutdown_ends_the_recorded_stream_at_the_shutdown(live: Live) -
     asyncio.run(scenario())
 
     assert not live.brokers[0].connecting
-    assert gaps(live) == [("DEVICE_1", at(NOW + 45), at(NOW + 3600), "restart")]
+    assert gaps(live.db.dsn) == [("DEVICE_1", at(NOW + 45), at(NOW + 3600), "restart")]
 
 
 def test_a_restart_while_disconnected_keeps_the_start_of_the_gap(live: Live) -> None:
@@ -388,13 +380,13 @@ def test_a_restart_while_disconnected_keeps_the_start_of_the_gap(live: Live) -> 
 
     asyncio.run(scenario())
 
-    assert gaps(live) == [("DEVICE_1", at(NOW + 100), at(NOW + 3600), "restart")]
+    assert gaps(live.db.dsn) == [("DEVICE_1", at(NOW + 100), at(NOW + 3600), "restart")]
 
 
 def test_a_first_start_has_no_gap_to_record(live: Live) -> None:
     asyncio.run(live.connected())
 
-    assert gaps(live) == []
+    assert gaps(live.db.dsn) == []
 
 
 def test_every_connection_polls_status_once(live: Live) -> None:
@@ -423,7 +415,7 @@ def test_reconnections_reuse_the_cached_broker_credentials(live: Live) -> None:
 
     asyncio.run(scenario())
 
-    assert len(gaps(live)) == 5
+    assert len(gaps(live.db.dsn)) == 5
     assert live.vendor.count(CREDENTIALS) == 1
     assert len(live.brokers) == 1
 
@@ -511,7 +503,7 @@ def test_a_rotated_access_token_brings_the_broker_new_credentials_without_a_reco
 
     assert live.broker.credentials.access_token == "access-1"
     assert live.broker.credentials.password == "password-for-access-1"
-    assert collector.connected and len(live.brokers) == 1 and gaps(live) == []
+    assert collector.connected and len(live.brokers) == 1 and gaps(live.db.dsn) == []
 
 
 def test_a_connection_that_stays_down_is_given_fresh_credentials(live: Live) -> None:
@@ -534,7 +526,7 @@ def test_a_connection_that_stays_down_is_given_fresh_credentials(live: Live) -> 
 
     assert live.vendor.count(CREDENTIALS) == 2
     assert len(live.trail()) == 1
-    assert gaps(live) == [("DEVICE_1", at(NOW + 100), at(NOW + 160), "reconnect")]
+    assert gaps(live.db.dsn) == [("DEVICE_1", at(NOW + 100), at(NOW + 160), "reconnect")]
 
 
 def test_a_broker_that_moved_is_followed(live: Live) -> None:
@@ -554,7 +546,7 @@ def test_a_broker_that_moved_is_followed(live: Live) -> None:
         "mqtt-2.example",
     ]
     assert [broker.connecting for broker in live.brokers] == [False, True]
-    assert gaps(live) == [("DEVICE_1", at(NOW + 100), at(NOW + 160), "reconnect")]
+    assert gaps(live.db.dsn) == [("DEVICE_1", at(NOW + 100), at(NOW + 160), "reconnect")]
 
 
 def test_a_working_connection_is_kept_when_the_broker_moves_and_followed_once_it_drops(
@@ -576,7 +568,7 @@ def test_a_working_connection_is_kept_when_the_broker_moves_and_followed_once_it
     asyncio.run(scenario())
 
     assert live.broker.credentials.host == "mqtt-2.example"
-    assert gaps(live) == [("DEVICE_1", at(NOW + 3400), at(NOW + 3460), "reconnect")]
+    assert gaps(live.db.dsn) == [("DEVICE_1", at(NOW + 3400), at(NOW + 3460), "reconnect")]
 
 
 def test_a_retired_broker_connection_cannot_speak_for_its_replacement(live: Live) -> None:
@@ -599,7 +591,7 @@ def test_a_retired_broker_connection_cannot_speak_for_its_replacement(live: Live
 
     assert not collector.connected
     assert live.vendor.count("smarthome/getVehicleStatus") == 1
-    assert live.trail() == [] and gaps(live) == []
+    assert live.trail() == [] and gaps(live.db.dsn) == []
 
 
 def test_nothing_is_recorded_once_the_collector_has_stopped(live: Live) -> None:
@@ -619,7 +611,7 @@ def test_nothing_is_recorded_once_the_collector_has_stopped(live: Live) -> None:
     asyncio.run(scenario())
 
     assert live.trail() == []
-    assert gaps(live) == [("DEVICE_1", at(NOW + 45), at(NOW + 3600), "restart")]
+    assert gaps(live.db.dsn) == [("DEVICE_1", at(NOW + 45), at(NOW + 3600), "restart")]
 
 
 def test_a_slow_mower_discovery_does_not_shorten_the_wait_between_credential_fetches(
@@ -726,7 +718,7 @@ def test_collecting_continues_until_stopped_then_disconnects(live: Live) -> None
     asyncio.run(scenario())
 
     assert not live.brokers[0].connecting
-    assert gaps(live) == [("DEVICE_1", at(NOW + 45), at(NOW + 3600), "restart")]
+    assert gaps(live.db.dsn) == [("DEVICE_1", at(NOW + 45), at(NOW + 3600), "restart")]
 
 
 def test_the_broker_connection_keeps_alive_well_inside_the_idle_drop() -> None:

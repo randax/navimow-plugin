@@ -13,7 +13,7 @@ from pathlib import Path
 from time import monotonic
 from typing import Any, BinaryIO
 
-from ..records import Gap, TrailPoint
+from ..records import Gap, GapReason, TrailPoint
 from .base import RejectedError, Storage, StorageError
 
 RETRY_SECONDS = 10
@@ -240,6 +240,8 @@ def _decode(line: bytes) -> Row | None:
         for key in values:
             if key.endswith("_time"):
                 values[key] = datetime.fromisoformat(values[key])
+        if kind is Gap:
+            values["reason"] = GapReason(values["reason"])
         return kind(**values)
     except (AttributeError, KeyError, TypeError, ValueError):
         return None
