@@ -1,4 +1,4 @@
-"""Turn raw capture records into the Trail values this slice can persist."""
+"""Turn raw capture records into the Trail and gap values this slice can persist."""
 
 from __future__ import annotations
 
@@ -22,13 +22,27 @@ class TrailPoint:
 
 
 @dataclass(frozen=True)
+class Gap:
+    """A period one mower went unrecorded; nothing can backfill it, so it is stored as a gap."""
+
+    mower_id: str
+    start_time: datetime
+    end_time: datetime
+    reason: str
+
+
+@dataclass(frozen=True)
 class ParsedRecord:
     points: tuple[TrailPoint, ...]
     placeholders_discarded: int = 0
+    gaps: tuple[Gap, ...] = ()
 
 
 def parse_record(record: Mapping[str, object]) -> ParsedRecord:
-    """Parse location poses; all other capture records are intentionally ignored."""
+    """Parse location poses and gaps; all other capture records are intentionally ignored."""
+    if record.get("kind") == "gap":
+        gap = _gap(record)
+        return ParsedRecord((), gaps=(gap,) if gap else ())
     topic = record.get("topic")
     if record.get("kind") != "mqtt" or not isinstance(topic, str):
         return ParsedRecord(())
@@ -53,6 +67,15 @@ def parse_record(record: Mapping[str, object]) -> ParsedRecord:
             continue
         points.append(point)
     return ParsedRecord(tuple(points), placeholders)
+
+
+def _gap(record: Mapping[str, object]) -> Gap | None:
+    """A gap record is written by the live transport: it ends when it is received."""
+    mower_id, reason = record.get("mower_id"), record.get("reason")
+    start, end = _timestamp(record.get("start_ms")), _timestamp(record.get("recv_ms"))
+    if not isinstance(mower_id, str) or not isinstance(reason, str) or not start or not end:
+        return None
+    return Gap(mower_id, start, end, reason)
 
 
 def _point(

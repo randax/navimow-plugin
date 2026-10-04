@@ -123,3 +123,25 @@ def test_migration_can_be_disabled(
     assert "migrat" in capsys.readouterr().err.lower()
     with psycopg.connect(database) as conn:
         assert conn.execute("SELECT to_regclass('trail_point')").fetchone() == (None,)
+
+
+def test_a_gap_record_becomes_a_gap_row(config_file: Path, database: str, tmp_path: Path) -> None:
+    # What the live transport feeds the core on every reconnection or restart.
+    capture = tmp_path / "gap.jsonl"
+    gap = {
+        "recv_ms": 1788084400000,
+        "kind": "gap",
+        "mower_id": "DEVICE_1",
+        "start_ms": 1788084160000,
+        "reason": "reconnect",
+    }
+    capture.write_text(json.dumps(gap) + "\n")
+
+    assert main(["--config", str(config_file), "replay", str(capture)]) == 0
+    assert main(["--config", str(config_file), "replay", str(capture)]) == 0  # idempotent
+
+    with psycopg.connect(database) as conn:
+        rows = conn.execute(
+            "SELECT mower_id, start_time, end_time, reason FROM collector_gap"
+        ).fetchall()
+    assert rows == [("DEVICE_1", ms(1788084160000), ms(1788084400000), "reconnect")]

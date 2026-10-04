@@ -3,10 +3,17 @@
 from __future__ import annotations
 
 from ..config import StorageConfig
-from .base import SchemaError, Storage, StorageError
+from .base import SchemaError, Storage, StorageError, Writer
 from .postgres import PostgresStorage
 
-__all__ = ["STORAGE_BACKENDS", "SchemaError", "Storage", "StorageError", "open_storage"]
+__all__ = [
+    "STORAGE_BACKENDS",
+    "SchemaError",
+    "Storage",
+    "StorageError",
+    "Writer",
+    "open_storage",
+]
 
 STORAGE_BACKENDS = {"postgres": PostgresStorage}
 

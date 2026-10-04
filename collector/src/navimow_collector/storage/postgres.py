@@ -1,4 +1,4 @@
-"""PostgreSQL storage for the provisional Trail schema."""
+"""PostgreSQL storage for the provisional Trail and gap schema."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from contextlib import contextmanager
 import psycopg
 
 from ..config import StorageConfig
-from ..records import TrailPoint
+from ..records import Gap, TrailPoint
 from .base import SchemaError, StorageError
 
 
@@ -38,11 +38,22 @@ MIGRATIONS = (
         PRIMARY KEY (mower_id, device_time)
     )
     """,
+    # One row per mower and outage: a gap starts once, so a redelivered gap is skipped.
+    """
+    CREATE TABLE IF NOT EXISTS collector_gap (
+        mower_id text NOT NULL,
+        start_time timestamptz NOT NULL,
+        end_time timestamptz NOT NULL,
+        reason text NOT NULL,
+        PRIMARY KEY (mower_id, start_time)
+    )
+    """,
 )
+TABLES = ("trail_point", "collector_gap")
 
 
 class PostgresStorage:
-    """Persist Trail points with idempotent inserts."""
+    """Persist Trail points and gaps with idempotent inserts."""
 
     def __init__(self, config: StorageConfig) -> None:
         if config.dsn is None:
@@ -73,12 +84,13 @@ class PostgresStorage:
                     )
 
     def check_schema(self) -> None:
-        with _translated():
-            row = self._connection.execute("SELECT to_regclass('trail_point')").fetchone()
-        if row is None or row[0] is None:
-            raise SchemaError(
-                "collector schema is missing; enable storage.migrate or apply migrations"
-            )
+        for table in TABLES:
+            with _translated():
+                row = self._connection.execute("SELECT to_regclass(%s)", (table,)).fetchone()
+            if row is None or row[0] is None:
+                raise SchemaError(
+                    "collector schema is missing; enable storage.migrate or apply migrations"
+                )
 
     def write_trail(self, points: Sequence[TrailPoint]) -> int:
         with _translated(), self._connection.transaction(), self._connection.cursor() as cursor:
@@ -101,6 +113,18 @@ class PostgresStorage:
                     )
                     for point in points
                 ],
+            )
+            return max(cursor.rowcount, 0)
+
+    def write_gaps(self, gaps: Sequence[Gap]) -> int:
+        with _translated(), self._connection.transaction(), self._connection.cursor() as cursor:
+            cursor.executemany(
+                """
+                INSERT INTO collector_gap (mower_id, start_time, end_time, reason)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+                """,
+                [(gap.mower_id, gap.start_time, gap.end_time, gap.reason) for gap in gaps],
             )
             return max(cursor.rowcount, 0)
 
