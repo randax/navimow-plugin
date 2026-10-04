@@ -102,14 +102,25 @@ const BBOX = '{bbox-epsg-3857}';
 const isTemplate = (url: string, wms: boolean): boolean =>
   ['{z}', '{x}', '{y}'].every((p) => url.includes(p)) || (wms && url.includes(BBOX));
 
-// Every placeholder MapLibre fills in a tile URL. Any other is requested as written, and in the host
-// or path that draws nothing. The query is left alone: a filter value there may hold braces of its own.
+// Every placeholder MapLibre fills in a tile URL, less the one a slot does not take. Any other is
+// requested as written.
 const placeholders = (slot: CustomSlot): string[] => [
   ...['{z}', '{x}', '{y}', '{quadkey}', '{prefix}', '{ratio}'],
   ...(slot.wms ? [BBOX] : []),
 ];
 const list = (items: string[]): string =>
   [items.slice(0, -1).join(', '), ...items.slice(-1)].filter(Boolean).join(' and ');
+
+/**
+ * The placeholders left unfilled in a template's host name and port, as written, past any user
+ * name. Only there is a leftover brace sure to be a mistake, such as the {s} of other map
+ * libraries: the request goes to a host of that name and nothing is drawn. Anywhere after it a
+ * brace can be harmless, in a filter value, a fragment, or a path segment the browser folds away.
+ */
+const unfilledInHost = (template: string, slot: CustomSlot): string[] => {
+  const host = /^https?:[/\\]*([^/\\?#]*)/i.exec(template)?.[1].replace(/^.*@/, '') ?? '';
+  return [...new Set(host.match(/\{[^}]*\}/g))].filter((p) => !placeholders(slot).includes(p));
+};
 
 /** The URL as a browser would request it for one tile, if it is an http(s) URL a browser can parse. */
 const filledIn = (template: string): URL | undefined => {
@@ -137,11 +148,10 @@ export function customTiles(slot: CustomSlot, custom?: CustomSourceOptions | nul
   const attribution = text(custom?.attribution);
   const tileSize = numberFrom(custom?.tileSize) ?? slot.tileSize;
   const maxzoom = numberFrom(custom?.maxzoom) ?? slot.maxzoom;
-  const filled = placeholders(slot);
-  const unfilled = [...new Set(url.split('?')[0].match(/\{[^}]*\}/g))].filter((p) => !filled.includes(p));
+  const unfilled = unfilledInHost(url, slot);
   if (isTemplate(url, slot.wms) && unfilled.length > 0) {
     return {
-      problem: `A custom ${slot.name} URL has ${list(unfilled)}, which the map cannot fill in. It fills ${list(filled)}.`,
+      problem: `A custom ${slot.name} URL has ${list(unfilled)} in its host name, which a custom ${slot.name} does not fill in. It fills ${list(placeholders(slot))}.`,
     };
   }
   const request = isTemplate(url, slot.wms) ? filledIn(url) : undefined;

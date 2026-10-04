@@ -65,10 +65,20 @@ describe('resolveOverlay', () => {
     });
   });
 
-  test("braces in a custom URL's query are left as they are", () => {
-    const url = 'https://wms.example.com/wms?BBOX={bbox-epsg-3857}&CQL_FILTER=name%3D%27{park}%27';
+  test.each([
+    'https://wms.example.com/wms?BBOX={bbox-epsg-3857}&CQL_FILTER=name%3D%27{park}%27',
+    'https://tiles.example.com/{style}/{z}/{x}/{y}.png#{park}',
+  ])('%p is accepted, braces past the host name being left as they are', (url) => {
     expect(resolveOverlay({ preset: 'custom', custom: { url, attribution: '© Me' } })).toMatchObject({
       overlay: { source: { tiles: [url] } },
+    });
+  });
+
+  test('a placeholder in the host name that an Overlay does not fill is refused by name', () => {
+    const url = 'https://{s}.tiles.example.com/{z}/{x}/{y}.png';
+    expect(resolveOverlay({ preset: 'custom', custom: { url, attribution: '© Me' } })).toEqual({
+      problem:
+        'A custom Overlay URL has {s} in its host name, which a custom Overlay does not fill in. It fills {z}, {x}, {y}, {quadkey}, {prefix}, {ratio} and {bbox-epsg-3857}.',
     });
   });
 

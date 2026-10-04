@@ -98,15 +98,17 @@ describe('resolveTerrain', () => {
 
     test.each([
       ['https://{s}.terrain.example.com/{z}/{x}/{y}.png', '{s}'],
-      ['https://terrain.example.com/{bbox-epsg-3857}/{z}/{x}/{y}.png', '{bbox-epsg-3857}'],
-    ])('%p is refused for %s, and told only what a Terrain URL may hold', (template, unknown) => {
+      ['https://{bbox-epsg-3857}.terrain.example.com/{z}/{x}/{y}.png', '{bbox-epsg-3857}'],
+    ])('%p is refused for %s in its host name, and told only what a Terrain fills', (template, unknown) => {
       expect(custom({ url: template })).toEqual({
-        problem: `A custom Terrain URL has ${unknown}, which the map cannot fill in. It fills {z}, {x}, {y}, {quadkey}, {prefix} and {ratio}.`,
+        problem: `A custom Terrain URL has ${unknown} in its host name, which a custom Terrain does not fill in. It fills {z}, {x}, {y}, {quadkey}, {prefix} and {ratio}.`,
       });
     });
 
-    test('braces in the query are left as they are', () => {
-      const template = 'https://terrain.example.com/{z}/{x}/{y}.png?set={set}';
+    test.each([
+      'https://terrain.example.com/{z}/{x}/{y}.png?set={set}',
+      'https://terrain.example.com/{set}/{z}/{x}/{y}.png#{note}',
+    ])('%p is accepted, braces past the host name being left as they are', (template) => {
       expect(custom({ url: template })).toMatchObject({ source: { tiles: [template] } });
     });
 

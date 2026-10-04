@@ -171,24 +171,35 @@ describe('resolveBaseMap', () => {
       }
     );
 
-    test('braces in the query are left as they are, as a filter saved before this check may hold them', () => {
-      const url =
-        'https://wms.example.com/wms?REQUEST=GetMap&BBOX={bbox-epsg-3857}&CQL_FILTER=name%3D%27{park}%27&v={v}';
+    // Past the host name a brace can be harmless, and a URL saved with one drew before this check
+    // existed: the map sends it as written, the browser drops a fragment and folds "/x/../" away.
+    test.each([
+      'https://wms.example.com/wms?REQUEST=GetMap&BBOX={bbox-epsg-3857}&CQL_FILTER=name%3D%27{park}%27&v={v}',
+      'https://tiles.example.com/{z}/{x}/{y}.png#{park}',
+      'https://tiles.example.com/{z}/{x}/{y}.png?a=1#{b}',
+      'https://tiles.example.com/{park}/../{z}/{x}/{y}.png',
+      'https://tiles.example.com/{z}/{x}/{y}{r}.png',
+      'https://tiles.example.com/{style}/{z}/{x}/{y}.png',
+      'https://tiles.example.com/{}/{z}/{x}/{y}.png',
+      'https://tiles.example.com/{{z}/../{z}/{x}/{y}/{.png',
+      'https://tiles.example.com\\{park}/{z}/{x}/{y}.png',
+    ])('%p is accepted, braces past the host name being left as they are', (url) => {
       expect(custom({ url })).toMatchObject({ source: { tiles: [url] } });
     });
 
-    test('every placeholder the map fills is accepted', () => {
-      const url = 'https://tiles.example.com/{prefix}/{z}/{x}/{y}{ratio}.png?q={quadkey}&bbox={bbox-epsg-3857}';
+    test('every placeholder the map fills is accepted, in the host name too', () => {
+      const url =
+        'https://{prefix}.tiles.example.com/{prefix}/{z}/{x}/{y}{ratio}.png?q={quadkey}&bbox={bbox-epsg-3857}';
       expect(custom({ url })).toMatchObject({ source: { tiles: [url] } });
     });
 
     test.each([
       ['https://{s}.tile.example.com/{z}/{x}/{y}.png', '{s}'],
-      ['https://tiles.example.com/{s}/{z}/{x}/{y}.png?v={v}', '{s}'],
-      ['https://{s}.example.com/{style}/{z}/{x}/{y}/{s}.png', '{s} and {style}'],
-    ])('%p is refused for %s in its host or path, which the map would request as written', (url, unknown) => {
+      ['https://{a}.{b}.example.com/{a}/{z}/{x}/{y}.png?v={v}', '{a} and {b}'],
+      ['https://tiles.example.com:{port}/{z}/{x}/{y}.png', '{port}'],
+    ])('%p is refused for %s in its host name, which no request could ever have reached', (url, unknown) => {
       expect(custom({ url })).toEqual({
-        problem: `A custom Base map URL has ${unknown}, which the map cannot fill in. It fills {z}, {x}, {y}, {quadkey}, {prefix}, {ratio} and {bbox-epsg-3857}.`,
+        problem: `A custom Base map URL has ${unknown} in its host name, which a custom Base map does not fill in. It fills {z}, {x}, {y}, {quadkey}, {prefix}, {ratio} and {bbox-epsg-3857}.`,
       });
     });
 
