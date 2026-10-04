@@ -58,7 +58,11 @@ class BufferedStorage:
         self._clock = clock
         self._storage: Storage | None = None
         self._memory: list[Row] = []
-        self._spilled = _count_lines(spill)  # left by a previous process
+        # What a previous process left. A file that is there but cannot be read owes rows
+        # all the same: it stands for one until the first read can count them.
+        waiting = _count_lines(spill)
+        self._uncounted = waiting is None
+        self._spilled = 1 if waiting is None else waiting
         # How far into the file this process has sent, and which file that was: a backlog
         # is sent a slice at a time, and a file that was sent cannot always be removed.
         self._replayed = 0
@@ -252,6 +256,8 @@ class BufferedStorage:
         try:
             with self._spill.open("rb") as spill:
                 self._forget_position_in_another_file(spill)
+                if self._uncounted:
+                    self._spilled, self._uncounted = sum(1 for _ in spill), False
                 spill.seek(self._replayed)
                 lines = list(islice(spill, limit))
                 self._unreadable_until = None
@@ -262,9 +268,12 @@ class BufferedStorage:
                     self._spilled = max(self._spilled - len(lines), 1)  # more for a later call
                     return len(lines)
         except (FileNotFoundError, NotADirectoryError):
-            _LOGGER.error("Buffer file %s is gone, and its unsent rows with it", self._spill)
-            self.dropped += self._spilled
-            self._spilled = self._replayed = 0
+            # A file never read was never counted: its loss is said, not given a number.
+            lost = "an unknown number of" if self._uncounted else self._spilled
+            _LOGGER.error("Buffer file %s is gone, and %s unsent rows with it", self._spill, lost)
+            if not self._uncounted:
+                self.dropped += self._spilled
+            self._spilled, self._replayed, self._uncounted = 0, 0, False
             return 0
         except OSError as error:
             if self._unreadable_until is None:  # said once, not once per retry
@@ -309,16 +318,15 @@ class BufferedStorage:
             self._replayed = 0
 
 
-def _count_lines(path: Path) -> int:
-    """How many rows a previous process left waiting. A file that is there but cannot be
-    read owes rows all the same: it counts as one, and reading it later corrects that."""
+def _count_lines(path: Path) -> int | None:
+    """How many rows the file holds: none if it is not there, unknown if it cannot be read."""
     try:
         with path.open("rb") as spill:
             return sum(1 for _ in spill)
     except (FileNotFoundError, NotADirectoryError):
         return 0
     except OSError:
-        return 1
+        return None
 
 
 def _identity(spill: BinaryIO) -> tuple[int, int]:

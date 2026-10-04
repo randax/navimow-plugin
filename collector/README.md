@@ -84,6 +84,11 @@ or the connection has stayed down for a minute, never twice within a minute,
 and at growing intervals (1, 5, 15, then 60 minutes) while the connection stays
 down or the fetch keeps failing: that endpoint rate-limits aggressively.
 
+Trail points are stored only from the current broker connection. When the
+collector replaces a connection, for new credentials or a moved broker, whatever
+the old one still delivers is not recorded: it lies inside the gap that the new
+connection closes.
+
 **Gaps.** Nothing can backfill what was missed while disconnected, so every
 reconnection or restart writes one `collector_gap` row per mower with its
 `start_time`, `end_time` and `reason` (`reconnect` or `restart`). A consumer

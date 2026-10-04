@@ -671,6 +671,45 @@ def test_a_buffer_file_unreadable_at_startup_still_owes_its_rows(
     assert restarted.buffered == 0
 
 
+def test_a_buffer_file_unreadable_at_startup_is_counted_once_it_can_be_read(
+    database: str, tmp_path: Path
+) -> None:
+    db, clock = Database(database), Clock()
+    storage = buffered(db, tmp_path, clock, memory_rows=10)
+    backlog = 2 * REPLAY_ROWS + 8
+    db.go_down()
+    storage.write_trail(points(*range(backlog)))
+    storage.close()
+    restore = unreadable(tmp_path / "buffer.jsonl")
+    db.down = False
+    restarted = buffered(db, tmp_path, clock)
+
+    restore()
+    restarted.flush()
+
+    assert len(db.trail()) == REPLAY_ROWS
+    assert restarted.buffered == backlog - REPLAY_ROWS
+
+
+def test_rows_lost_with_a_file_that_was_never_read_are_not_given_a_made_up_count(
+    database: str, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    db, clock = Database(database), Clock()
+    storage = buffered(db, tmp_path, clock)
+    db.go_down()
+    storage.write_trail(points(*range(5)))
+    storage.close()
+    unreadable(tmp_path / "buffer.jsonl")
+    db.down = False
+    restarted = buffered(db, tmp_path, clock)
+
+    (tmp_path / "buffer.jsonl").rmdir()  # removed by hand before it could ever be read
+    restarted.flush()
+
+    assert (restarted.buffered, restarted.dropped) == (0, 0)
+    assert any("unknown number" in message for message in messages(caplog))
+
+
 def test_a_database_outage_is_reported_while_a_buffer_file_is_waiting_to_be_read(
     database: str, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:

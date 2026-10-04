@@ -587,18 +587,24 @@ def test_a_retired_broker_connection_cannot_speak_for_its_replacement(live: Live
         await collector.tick()
         assert live.broker is not retired and retired.on_connected and retired.on_raw
 
-        # Callbacks the SDK had queued before the connection was retired still run. What
-        # they say about the connection is no longer true; the position they carry is.
+        # Callbacks the SDK had queued before the connection was retired still run. The
+        # collector never saw that connection, so nothing from it is recorded: its
+        # position lies inside the gap the replacement's connection closes.
+        position = json.dumps(pose(at(NOW + 150))).encode()
         await retired.on_connected()
-        await retired.on_raw(LOCATION.format("DEVICE_1"), json.dumps(pose(at(NOW))).encode())
+        await retired.on_raw(LOCATION.format("DEVICE_1"), position)
+        assert not collector.connected
+        assert live.vendor.count("smarthome/getVehicleStatus") == 1
+
+        live.clock.now = NOW + 200
+        await live.broker.accept()
         return collector
 
     collector = asyncio.run(scenario())
 
-    assert not collector.connected
-    assert live.vendor.count("smarthome/getVehicleStatus") == 1
-    assert gaps(live.db.dsn) == []
-    assert [(row[0], row[1]) for row in live.trail()] == [("DEVICE_1", at(NOW))]
+    assert collector.connected
+    assert live.trail() == []
+    assert gaps(live.db.dsn) == [("DEVICE_1", at(NOW + 100), at(NOW + 200), "reconnect")]
 
 
 def test_nothing_is_recorded_once_the_collector_has_stopped(live: Live) -> None:
