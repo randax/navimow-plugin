@@ -3,6 +3,7 @@ import { css } from '@emotion/css';
 import { GPUInitializationError, Map, Marker, setWorkerUrl, type GeoJSONSource } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { framedBounds, nextFraming, type Framing } from '../model/framing';
+import type { BoundaryFeatures } from '../model/lawn';
 import { mapStyle, type MapSources } from '../model/style';
 import type { MowerMarker, TrailScene } from '../model/trail';
 import { cameraFor, type Camera, type View } from '../model/view';
@@ -57,6 +58,7 @@ const mowerIcon = ({ bearing, stale }: MowerMarker): string => {
 interface Props extends MapSources {
   view: View;
   trail: TrailScene;
+  boundary: BoundaryFeatures;
   mower?: MowerMarker;
   width: number;
   height: number;
@@ -125,35 +127,43 @@ class WebGLBoundary extends Component<{ width: number; height: number; children:
 /** Clears the drawn mark until the map next goes idle with the new style or data in. */
 const redrawing = (element: HTMLElement | null) => element?.removeAttribute('data-map-idle');
 
-const MapCanvas: React.FC<Props> = ({ baseMap, overlay, terrain, view, trail, mower, width, height }) => {
+const MapCanvas: React.FC<Props> = ({ baseMap, overlay, terrain, view, trail, boundary, mower, width, height }) => {
   const element = useRef<HTMLDivElement>(null);
   const map = useRef<Map | null>(null);
   const drawn = useRef({ view, terrain });
   const lines = useRef(trail.lines);
+  const rings = useRef(boundary);
   const topUp = useRef(false);
   const framed = useRef<Framing>(undefined);
   const countPending = useRef(true);
 
-  // New data replaces the Trail's source data only. The source exists once the style has loaded;
-  // until then the style carries the data it was made with, topped up on load below.
-  useEffect(() => {
-    lines.current = trail.lines;
-    countPending.current = true;
-    const source = map.current?.getSource<GeoJSONSource>('trail');
+  // New data replaces a source's data only. The source exists once the style has loaded; until
+  // then the style carries the data it was made with, topped up on load below.
+  const replaceData = (id: 'trail' | 'boundary', data: GeoJSON.FeatureCollection) => {
+    const source = map.current?.getSource<GeoJSONSource>(id);
     if (source) {
       redrawing(element.current);
-      source.setData(trail.lines);
+      source.setData(data);
     } else if (map.current) {
       topUp.current = true;
     }
+  };
+  useEffect(() => {
+    lines.current = trail.lines;
+    countPending.current = true;
+    replaceData('trail', trail.lines);
   }, [trail.lines]);
+  useEffect(() => {
+    rings.current = boundary;
+    replaceData('boundary', boundary);
+  }, [boundary]);
 
   // Create the map on first draw, then restyle it in place: a second style set before the first
   // has loaded makes MapLibre rebuild from scratch. A change of Terrain is the exception. Terrain
   // has to be in a map's first style (see mapStyle), so the map is recreated where the last one
   // was looking; the model decides the camera (cameraFor).
   useEffect(() => {
-    const style = mapStyle({ baseMap, overlay, terrain }, lines.current);
+    const style = mapStyle({ baseMap, overlay, terrain }, lines.current, rings.current);
     const previous = map.current;
     redrawing(element.current);
     if (previous && drawn.current.terrain === terrain) {
@@ -181,6 +191,7 @@ const MapCanvas: React.FC<Props> = ({ baseMap, overlay, terrain, view, trail, mo
       if (topUp.current) {
         topUp.current = false;
         created.getSource<GeoJSONSource>('trail')?.setData(lines.current);
+        created.getSource<GeoJSONSource>('boundary')?.setData(rings.current);
       }
     });
     // Marks a fully drawn map, how many Trails it drew and where it looks from, so browser tests can

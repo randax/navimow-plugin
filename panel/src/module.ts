@@ -1,6 +1,8 @@
 import { PanelPlugin, type PanelOptionsEditorBuilder } from '@grafana/data';
+import { CalibrationEditor } from './components/CalibrationEditor';
 import { MapPanel } from './components/MapPanel';
 import { BASE_MAP_PRESETS, CUSTOM_BASE_MAP, MAX_ZOOM, TILE_SIZE, type CustomSlot } from './model/baseMap';
+import { migrateLawn, type Lawn } from './model/lawn';
 import { CUSTOM_OVERLAY, DEFAULT_OVERLAY_OPACITY, OVERLAY_PRESETS } from './model/overlay';
 import { CUSTOM_TERRAIN, TERRAIN_ENCODINGS, TERRAIN_PRESETS, terrainEnabled } from './model/terrain';
 import { DEFAULT_TRAIL_COLUMNS, type TrailColumns } from './model/trailFrame';
@@ -96,7 +98,10 @@ const TRAIL_COLUMN_EDITORS: Array<{ key: keyof TrailColumns; name: string; descr
   },
 ];
 
-export const plugin = new PanelPlugin<MapPanelOptions>(MapPanel).setPanelOptions((builder) => {
+export const plugin = new PanelPlugin<MapPanelOptions>(MapPanel)
+  // Panels saved with the Dock origin at the root of their options, before there was a Boundary.
+  .setMigrationHandler((panel) => migrateLawn(panel.options))
+  .setPanelOptions((builder) => {
   builder.addSelect({
     path: 'baseMap.preset',
     name: 'Base map',
@@ -184,27 +189,37 @@ export const plugin = new PanelPlugin<MapPanelOptions>(MapPanel).setPanelOptions
     });
   addCustomSlot(builder, 'overlay', CUSTOM_OVERLAY, (options) => options.overlay?.preset === 'custom');
 
+  const lawn = ['Dock origin and Boundary'];
   builder
+    .addCustomEditor<unknown, Lawn | undefined>({
+      id: 'lawn',
+      path: 'lawn',
+      name: 'On the map',
+      description:
+        'Drag the dock into place, turn the Trail onto the lawn, and trace the lawn and its Zones. The fields below hold the same values.',
+      category: lawn,
+      editor: CalibrationEditor,
+    })
     .addNumberInput({
-      path: 'dockOrigin.lat',
+      path: 'lawn.dockOrigin.lat',
       name: 'Latitude',
       description: 'Of the charging dock, in decimal degrees.',
-      category: ['Dock origin'],
+      category: lawn,
       settings: { min: -85, max: 85 },
     })
     .addNumberInput({
-      path: 'dockOrigin.lon',
+      path: 'lawn.dockOrigin.lon',
       name: 'Longitude',
       description: 'Of the charging dock, in decimal degrees.',
-      category: ['Dock origin'],
+      category: lawn,
       settings: { min: -180, max: 180 },
     })
     .addNumberInput({
-      path: 'dockOrigin.rotation',
+      path: 'lawn.dockOrigin.rotation',
       name: 'Rotation',
       description:
         "Compass bearing of the mower's x-axis, in degrees clockwise from north. Turn it until the Trail lies on the lawn.",
-      category: ['Dock origin'],
+      category: lawn,
       defaultValue: 0,
     });
   // Blank means the default name, shown as the placeholder, so a database that names things the

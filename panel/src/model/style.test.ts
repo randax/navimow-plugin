@@ -1,4 +1,5 @@
 import { resolveBaseMap } from './baseMap';
+import { boundaryFeatures } from './lawn';
 import { resolveOverlay } from './overlay';
 import { mapStyle } from './style';
 import { resolveTerrain } from './terrain';
@@ -15,19 +16,27 @@ const terrain = source(resolveTerrain({ enabled: true }));
 const hillshade = resolveOverlay({ preset: 'kartverket-hillshade', opacity: 0.3 });
 const overlay = 'overlay' in hillshade ? hillshade.overlay : undefined;
 const { lines } = EMPTY_SCENE;
+const boundary = boundaryFeatures({
+  outline: [
+    [10, 60],
+    [10.001, 60],
+    [10, 60.001],
+  ],
+});
 
 describe('mapStyle', () => {
-  test('a Base map alone is drawn under the Trail, with no Terrain', () => {
-    const style = mapStyle({ baseMap }, lines);
-    expect(style.layers.map((l) => l.id)).toEqual(['base', 'trail']);
+  test('a Base map alone is drawn under the Boundary and the Trail, with no Terrain', () => {
+    const style = mapStyle({ baseMap }, lines, boundary);
+    expect(style.layers.map((l) => l.id)).toEqual(['base', 'boundary-fill', 'boundary-line', 'trail']);
     expect(style.sources.base).toEqual(baseMap);
     expect(style.sources.trail).toEqual({ type: 'geojson', data: lines });
+    expect(style.sources.boundary).toEqual({ type: 'geojson', data: boundary });
     expect(style.terrain).toBeUndefined();
   });
 
-  test('the Overlay is drawn between the Base map and the Trail, at its opacity', () => {
-    const style = mapStyle({ baseMap, overlay }, lines);
-    expect(style.layers.map((l) => l.id)).toEqual(['base', 'overlay', 'trail']);
+  test('the Overlay is drawn between the Base map and the Boundary, at its opacity', () => {
+    const style = mapStyle({ baseMap, overlay }, lines, boundary);
+    expect(style.layers.map((l) => l.id)).toEqual(['base', 'overlay', 'boundary-fill', 'boundary-line', 'trail']);
     expect(style.layers[1]).toMatchObject({
       id: 'overlay',
       type: 'raster',
@@ -51,13 +60,20 @@ describe('mapStyle', () => {
     expect(style.terrain).toEqual({ source: 'terrain' });
   });
 
-  test('the Trail is a line layer, which the map lays over the Terrain', () => {
-    const style = mapStyle({ baseMap, overlay, terrain }, lines);
+  test('the Boundary and the Trail are fill and line layers, which the map lays over the Terrain', () => {
+    const style = mapStyle({ baseMap, overlay, terrain }, lines, boundary);
     expect(style.layers.map((l) => [l.id, l.type])).toEqual([
       ['base', 'raster'],
       ['overlay', 'raster'],
+      ['boundary-fill', 'fill'],
+      ['boundary-line', 'line'],
       ['trail', 'line'],
     ]);
+  });
+
+  test('the Boundary is drawn even when it is empty, so a first Zone needs no restyle', () => {
+    const style = mapStyle({ baseMap }, lines);
+    expect(style.sources.boundary).toEqual({ type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
   });
 
   test('the pickers are independent: any Base map combines with any Terrain and Overlay, each with its attribution', () => {
@@ -69,6 +85,7 @@ describe('mapStyle', () => {
       '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
       '<a href="https://www.kartverket.no/">© Kartverket</a>',
       'Norway terrain data © Kartverket',
+      undefined,
       undefined,
     ]);
   });
