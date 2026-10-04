@@ -1,5 +1,5 @@
 import type { DataFrame } from '@grafana/data';
-import type { FeatureCollection, LineString } from 'geojson';
+import type { FeatureCollection, MultiLineString } from 'geojson';
 import { headingBearing, resolveDockOrigin, toLonLat, type DockOrigin, type DockOriginOptions } from './dockOrigin';
 import { recency, type Recency } from './recency';
 import { readTrails, type Trail, type TrailColumns } from './trailFrame';
@@ -16,16 +16,21 @@ const colourOf = (job: string): string =>
 
 export type Bounds = [[number, number], [number, number]];
 
-export type MowerMarker = {
+/** Where the mower was last seen, and when. */
+export interface LastPosition {
   position: [number, number];
   /** Compass bearing of the mower's heading, when the data has one. */
   bearing?: number;
-} & Recency;
+  time: number;
+}
+
+export type MowerMarker = LastPosition & Recency;
 
 /** Everything the map draws for the Trail, already in longitude and latitude. */
 export interface TrailScene {
-  lines: FeatureCollection<LineString, { job: string | null; colour: string }>;
-  mower?: MowerMarker;
+  /** One feature per Trail, its parts the unbroken runs between gaps in the data. */
+  lines: FeatureCollection<MultiLineString, { job: string | null; colour: string }>;
+  mower?: LastPosition;
   bounds?: Bounds;
   /** What placed it; a new Dock origin can move the Trail far enough to need framing again. */
   origin?: DockOrigin;
@@ -40,19 +45,20 @@ export interface TrailOptions {
   trailColumns?: Partial<TrailColumns>;
 }
 
-/** Places Trails on the map: one coloured line per Job, and the mower where it was last seen. */
-export function placeTrails(trails: Trail[], origin: DockOrigin, now: number): TrailScene {
-  const placed = trails.map((t) => t.points.map((p) => toLonLat(origin, p.x, p.y)));
+/** Places Trails on the map: one coloured feature per Job, and the mower where it was last seen. */
+export function placeTrails(trails: Trail[], origin: DockOrigin): TrailScene {
+  const placed = trails.map((t) => t.segments.map((s) => s.map((p) => toLonLat(origin, p.x, p.y))));
   const scene: TrailScene = {
     lines: {
       type: 'FeatureCollection',
-      features: trails.flatMap((trail, i) =>
-        // A single position is not a line; it still counts towards the mower and the bounds.
-        placed[i].length < 2
+      features: trails.flatMap((trail, i) => {
+        // A lone position is not a line; it still counts towards the mower and the bounds.
+        const parts = placed[i].filter((part) => part.length > 1);
+        return parts.length === 0
           ? []
           : [
               {
-                type: 'Feature',
+                type: 'Feature' as const,
                 // A numeric id survives into rendered features, so drawn Trails can be counted across tiles.
                 id: i,
                 properties: {
@@ -60,15 +66,15 @@ export function placeTrails(trails: Trail[], origin: DockOrigin, now: number): T
                   // Without a Job column there is no identifier; such Trails are told apart by position.
                   colour: trail.job === undefined ? TRAIL_COLOURS[i % TRAIL_COLOURS.length] : colourOf(trail.job),
                 },
-                geometry: { type: 'LineString', coordinates: placed[i] },
+                geometry: { type: 'MultiLineString' as const, coordinates: parts },
               },
-            ]
-      ),
+            ];
+      }),
     },
     origin,
   };
 
-  const all = placed.flat();
+  const all = placed.flat(2);
   if (all.length === 0) {
     return EMPTY_SCENE;
   }
@@ -84,24 +90,25 @@ export function placeTrails(trails: Trail[], origin: DockOrigin, now: number): T
     ]
   );
 
-  const last = trails.flatMap((t) => t.points).reduce((a, b) => (b.time > a.time ? b : a));
+  const last = trails.flatMap((t) => t.segments.flat()).reduce((a, b) => (b.time > a.time ? b : a));
   scene.mower = {
     position: toLonLat(origin, last.x, last.y),
     bearing: last.heading === undefined ? undefined : headingBearing(origin, last.heading),
-    ...recency(last.time, now),
+    time: last.time,
   };
   return scene;
 }
 
+/** The mower as shown at `now`: current, or faded with its age. */
+export const mowerAt = (last: LastPosition, now: number): MowerMarker => ({ ...last, ...recency(last.time, now) });
+
 /**
  * The panel's whole Trail pipeline, from query frames and options to what the map draws, or to the
  * problem to show instead. With nothing to draw, a missing Dock origin is not a problem yet.
- * `now` is when the data was fetched; without it, the wall clock (see recency).
  */
 export function trailScene(
   frames: DataFrame[],
-  { trailColumns, dockOrigin }: TrailOptions,
-  now = Date.now()
+  { trailColumns, dockOrigin }: TrailOptions
 ): { scene: TrailScene } | { problem: string } {
   const read = readTrails(frames, trailColumns);
   if ('problem' in read) {
@@ -111,5 +118,5 @@ export function trailScene(
     return { scene: EMPTY_SCENE };
   }
   const resolved = resolveDockOrigin(dockOrigin);
-  return 'problem' in resolved ? resolved : { scene: placeTrails(read.trails, resolved.origin, now) };
+  return 'problem' in resolved ? resolved : { scene: placeTrails(read.trails, resolved.origin) };
 }

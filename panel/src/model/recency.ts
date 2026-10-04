@@ -4,16 +4,17 @@ export type Recency = { stale: false } | { stale: true; lastSeen: string };
 // alternate with a placeholder the collector drops (#4), so a healthy mower can go 10 min between
 // stored positions. 15 min tolerates that plus delivery lag without flickering, and is still far
 // short of the hour-old position, shown as current, that this exists to prevent.
-const STALE_AFTER_MS = 15 * 60_000;
+export const STALE_AFTER_MS = 15 * 60_000;
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
 const DAY = 24 * HOUR;
 
 /**
- * Whether a position from `time` still describes the mower at `now`. `now` is the wall clock rather
- * than the end of the dashboard's range: in a range that ended in the past, the last position is
- * history, and must not look current just because the mower was busy when the range closed.
+ * Whether a position from `time` still describes the mower at `now`. `now` is the wall clock, which
+ * the panel re-reads every minute, not the fetch time or the end of the dashboard's range: with
+ * refresh off, a mower that stops reporting must still go stale, and in a range that ended in the
+ * past, the last position is history and must not look current.
  */
 export function recency(time: number, now: number): Recency {
   const age = now - time;

@@ -71,6 +71,7 @@ const mowerIcon = ({ bearing, stale }: MowerMarker): string => {
 interface Props {
   baseMap: RasterSourceSpecification;
   trail: TrailScene;
+  mower?: MowerMarker;
   width: number;
   height: number;
 }
@@ -109,8 +110,7 @@ class WebGLBoundary extends Component<{ width: number; height: number; children:
 /** Clears the drawn mark until the map next goes idle with the new style or data in. */
 const redrawing = (element: HTMLElement | null) => element?.removeAttribute('data-map-idle');
 
-const MapCanvas: React.FC<Props> = ({ baseMap, trail, width, height }) => {
-  const { mower } = trail;
+const MapCanvas: React.FC<Props> = ({ baseMap, trail, mower, width, height }) => {
   const element = useRef<HTMLDivElement>(null);
   const map = useRef<Map | null>(null);
   const lines = useRef(trail.lines);
@@ -160,9 +160,10 @@ const MapCanvas: React.FC<Props> = ({ baseMap, trail, width, height }) => {
     map.current = created;
   }, [baseMap]);
 
-  // Frame the Trail when it first appears and when a new Dock origin moves it, but never on a refresh,
-  // which must not undo the owner's panning.
-  const origin = trail.origin && `${trail.origin.lat},${trail.origin.lon},${trail.origin.rotation}`;
+  // Frame the Trail when it first appears and when the dock moves, but never on a refresh, which must
+  // not undo the owner's panning, nor on a rotation, which turns the Trail about the dock while the
+  // owner compares it with the lawn.
+  const origin = trail.origin && `${trail.origin.lat},${trail.origin.lon}`;
   useEffect(() => {
     if (map.current && trail.bounds && origin !== fittedFor.current) {
       fittedFor.current = origin;
@@ -204,6 +205,9 @@ const MapCanvas: React.FC<Props> = ({ baseMap, trail, width, height }) => {
     () => () => {
       map.current?.remove();
       map.current = null;
+      // A remount (React's strict mode does one) gets a fresh map, which must be framed and counted again.
+      fittedFor.current = undefined;
+      countPending.current = true;
     },
     []
   );

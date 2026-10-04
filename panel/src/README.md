@@ -18,7 +18,8 @@ The panel reads one query with a row per mower position:
 
 If your columns are named differently, set their names under **Trail columns** in the panel
 options. A missing optional column means less is drawn. Without a Job column, each query result is
-one Trail.
+one Trail; with a Mower column, each mower's Jobs are kept apart. A silence of more than 15 minutes,
+or a row without a position, is drawn as a gap rather than a straight line.
 
 The mower is drawn at its last position, as an arrow when the heading is known. A position older
 than 15 minutes is faded and labelled with its age, such as "Last seen 3 h ago".

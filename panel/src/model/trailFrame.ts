@@ -1,4 +1,5 @@
 import type { DataFrame } from '@grafana/data';
+import { STALE_AFTER_MS } from './recency';
 
 /** Which column holds each value. Defaults follow the collector's schema. */
 export interface TrailColumns {
@@ -34,23 +35,33 @@ export interface TrailPoint {
   mower?: string;
 }
 
-/** One Job's positions in time order; `job` is absent when the data has no Job column. */
+/**
+ * One Job's positions in time order, as the unbroken runs between gaps in the data. `job` is absent
+ * when the data has no Job column, or for positions recorded outside any Job.
+ */
 export interface Trail {
   job?: string;
-  points: TrailPoint[];
+  segments: TrailPoint[][];
 }
 
 const REQUIRED = ['time', 'x', 'y'] as const;
 
+// Longer than a docked mower's 5-minute heartbeat, so a charging break inside a Job stays one line,
+// and the same span after which a position counts as stale.
+const GAP_MS = STALE_AFTER_MS;
+
 const toNumber = (v: unknown): number =>
   typeof v === 'number' ? v : typeof v === 'string' && v.trim() !== '' ? Number(v) : NaN;
 
-// Grafana time fields hold epoch milliseconds; a text column may hold either that or a date. A date
+// Epoch milliseconds passed 1e11 in 1973, and epoch seconds will not reach it for three thousand years.
+const toEpochMs = (n: number): number => (Math.abs(n) < 1e11 ? n * 1000 : n);
+
+// Grafana time fields hold epoch milliseconds; a text column may hold epoch milliseconds or seconds, or a date. A date
 // with a time of day but no zone is UTC, as Grafana reads SQL timestamps; Date.parse would take the
 // browser's zone.
 const toTime = (v: unknown): number => {
   if (typeof v !== 'string' || !Number.isNaN(Number(v))) {
-    return toNumber(v);
+    return toEpochMs(toNumber(v));
   }
   const text = v.trim();
   const zoneless = !/(Z|[+-]\d\d:?\d\d)$/i.test(text) && /\d:\d\d(:\d\d(\.\d+)?)?$/.test(text);
@@ -103,29 +114,54 @@ export function readTrails(
     const [time, x, y, heading, job, zone, status, mower] = (
       ['time', 'x', 'y', 'heading', 'job', 'zone', 'status', 'mower'] as const
     ).map((c) => values(frame, c));
+
+    // Every timed row in time order, since the mower delivers some positions seconds or hours late.
+    // Rows without a position stay in: they mark where the line must break.
+    const rows = [];
     for (let row = 0; row < frame.length; row++) {
-      const point = { time: toTime(time![row]), x: toNumber(x![row]), y: toNumber(y![row]) };
-      if (![point.time, point.x, point.y].every(Number.isFinite)) {
+      const t = toTime(time![row]);
+      if (!Number.isFinite(t)) {
         continue;
       }
-      const jobId = toText(job?.[row]);
-      // Without a Job column, a frame is the only grouping the data offers.
-      const key = job ? `job:${jobId ?? ''}` : `frame:${index}`;
-      if (!trails.has(key)) {
-        trails.set(key, { job: jobId, points: [] });
-      }
-      trails.get(key)!.points.push({
-        ...point,
+      const [mowerId, jobId] = [toText(mower?.[row]), toText(job?.[row])];
+      const point: TrailPoint = {
+        time: t,
+        x: toNumber(x![row]),
+        y: toNumber(y![row]),
         heading: optionalNumber(heading?.[row]),
         zone: toText(zone?.[row]),
         status: toText(status?.[row]),
-        mower: toText(mower?.[row]),
+        mower: mowerId,
+      };
+      rows.push({
+        time: t,
+        point: Number.isFinite(point.x) && Number.isFinite(point.y) ? point : undefined,
+        mower: mowerId ?? '',
+        jobId,
+        // One Trail per Job of each mower; without a Job column, a frame is the only grouping on offer.
+        key: job ? `job:${mowerId ?? ''}:${jobId ?? ''}` : `frame:${index}:${mowerId ?? ''}`,
       });
+    }
+    rows.sort((a, b) => a.time - b.time);
+
+    // A line only continues from the same mower's previous row when that row is this Trail's own
+    // position and not long ago, so a gap in the data is drawn as a gap.
+    const previous = new Map<string, (typeof rows)[number]>();
+    for (const row of rows) {
+      const before = previous.get(row.mower);
+      previous.set(row.mower, row);
+      if (!row.point) {
+        continue;
+      }
+      const trail = trails.get(row.key) ?? { job: row.jobId, segments: [] };
+      trails.set(row.key, trail);
+      if (before?.key === row.key && before.point && row.time - before.time <= GAP_MS) {
+        trail.segments.at(-1)!.push(row.point);
+      } else {
+        trail.segments.push([row.point]);
+      }
     }
   });
 
-  // The mower delivers some positions seconds or hours late, so arrival order is not time order.
-  const result = [...trails.values()];
-  result.forEach((t) => t.points.sort((a, b) => a.time - b.time));
-  return { trails: result.sort((a, b) => a.points[0].time - b.points[0].time) };
+  return { trails: [...trails.values()].sort((a, b) => a.segments[0][0].time - b.segments[0][0].time) };
 }
