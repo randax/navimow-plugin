@@ -169,6 +169,9 @@ const MapCanvas: React.FC<Props> = ({ baseMap, trail, mower, width, height }) =>
     }
     const next = nextFraming(trail, framed.current);
     if (map.current && trail.origin && next) {
+      // MapLibre learns of a new panel size from a throttled observer, which may not have run yet;
+      // fitting against the old size would frame the Trail wrongly, and for good.
+      map.current.resize();
       framed.current = next;
       // Padding is capped so a small panel still has room left to fit into.
       map.current.fitBounds(framedBounds(next, trail.origin), {

@@ -161,5 +161,22 @@ export function readTrails(
     }
   }
 
+  // Rows that all came back unreadable, from a decimal comma or an unfamiliar date, would otherwise be
+  // an empty map that looks like an empty range.
+  if (trails.size === 0) {
+    for (const column of REQUIRED) {
+      const read = column === 'time' ? toTime : toNumber;
+      const given = usable.flatMap((f) => Array.from(values(f, column)!)).filter((v) => toText(v) !== undefined);
+      if (given.length > 0 && given.every((v) => !Number.isFinite(read(v)))) {
+        return {
+          problem:
+            `The "${names[column]}" column has no value the Trail can read, such as "${String(given[0])}". ` +
+            (column === 'time'
+              ? 'Times must be epoch milliseconds or seconds, or dates like 2026-09-21T10:23:07Z.'
+              : 'Positions must be numbers of metres, written with a decimal point.'),
+        };
+      }
+    }
+  }
   return { trails: [...trails.values()].sort((a, b) => a.segments[0][0].time - b.segments[0][0].time) };
 }

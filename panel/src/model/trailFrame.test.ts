@@ -205,6 +205,16 @@ describe('readTrails', () => {
     expect(trails(frames)).toEqual([]);
   });
 
+  test.each([
+    ['x', { time: at(0, SEC), x: ['-0,31', '1,0'], y: [0, 0] }, '-0,31'],
+    ['time', { time: ['21.09.2026 10:23:07'], x: [0], y: [0] }, '21.09.2026 10:23:07'],
+    ['time', { time: ['2026-09-21T10:00:00+02'], x: [0], y: [0] }, '2026-09-21T10:00:00+02'],
+  ])('a "%s" column with nothing readable says so, with an example', (column, columns, example) => {
+    expect(readTrails([frame(columns)])).toEqual({
+      problem: expect.stringContaining(`"${column}" column has no value the Trail can read, such as "${example}"`),
+    });
+  });
+
   test('frames without the Trail columns, such as another query, are ignored', () => {
     const result = trails([frame({ zone: [1], progress: [50] }), frame({ time: at(0), x: [1], y: [1] })]);
     expect(result).toHaveLength(1);
