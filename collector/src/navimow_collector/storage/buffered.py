@@ -54,6 +54,7 @@ class BufferedStorage:
         self._memory: list[Row] = []
         self._spilled = _count_lines(spill)  # left by a previous process
         self._retry_at = 0.0
+        self._dropping = False  # whether this outage's loss has been reported yet
         self.dropped = 0
 
     @property
@@ -91,6 +92,7 @@ class BufferedStorage:
             self._spill.unlink(missing_ok=True)
             self._spilled = 0
         self._memory.clear()
+        self._dropping = False
         _LOGGER.info("Database reachable again; wrote %d buffered rows", waiting)
 
     def close(self) -> None:
@@ -142,12 +144,13 @@ class BufferedStorage:
                 spill.writelines(_encode(row) + "\n" for row in self._memory)
             self._spilled += len(self._memory)
         except OSError as error:
-            if not self.dropped:  # said once, not once per batch
+            if not self._dropping:
                 _LOGGER.error(
                     "Cannot buffer to %s; dropping rows until the database returns: %s",
                     self._spill,
                     error,
                 )
+            self._dropping = True
             self.dropped += len(self._memory)
         self._memory.clear()
 
