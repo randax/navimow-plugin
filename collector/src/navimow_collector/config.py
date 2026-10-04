@@ -94,7 +94,7 @@ class Config:
 
 def load_config(config_path: Path | None = None) -> Config:
     """Resolve TOML and environment values into the typed collector configuration."""
-    path = config_path or _environment_path()
+    path = resolve_config_path(config_path)
     values = _load_toml(path) if path is not None else {}
     _validate_sections(values)
     defaults = Config()
@@ -110,11 +110,14 @@ def load_config(config_path: Path | None = None) -> Config:
     # automatic; mypy cannot infer the dynamically assembled field names.
     config = replace(defaults, **sections)
     _validate_backend(config.storage.backend)
-    config.health.address()
+    config.health.address()  # only to validate: a bad address fails here, not at bind time
     return config
 
 
-def _environment_path() -> Path | None:
+def resolve_config_path(config_path: Path | None = None) -> Path | None:
+    """The configuration file in use: the one given, or the one NAVIMOW_CONFIG names."""
+    if config_path is not None:
+        return config_path
     value = os.environ.get("NAVIMOW_CONFIG")
     return Path(value) if value else None
 

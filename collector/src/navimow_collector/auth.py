@@ -251,12 +251,7 @@ class TokenManager:
         self._on_disk = self._credential
         self.state = AuthState.FRESH if self._credential else AuthState.RELOGIN_REQUIRED
         if self._credential is None:
-            _LOGGER.error(
-                "No usable Navimow login in %s; run `%s`",
-                store.path,
-                login_command,
-                extra={"command": login_command},
-            )
+            self._ask_for_login(logging.ERROR, "No usable Navimow login in %s", store.path)
         self.next_attempt_at: float | None = None
         self._failures = 0
         # The access token a caller has reported as rejected, until a refresh replaces it.
@@ -430,19 +425,16 @@ class TokenManager:
             self.next_attempt_at = now + RETRY_DELAYS[-1]
             _LOGGER.warning("Navimow login still unverified; hourly probe failed: %s", detail)
             return
-        command = {"command": self.login_command}
         if relogin:
             self.state = AuthState.RELOGIN_REQUIRED
             # Still probed hourly: a gateway's 401/403 page can look like a dead grant.
             self.next_attempt_at = now + RETRY_DELAYS[-1]
             # An error once, on entering the state; the hourly probe only reminds.
-            _LOGGER.log(
+            self._ask_for_login(
                 logging.WARNING if probing else logging.ERROR,
-                "Navimow %s the stored login (%s); run `%s`",
+                "Navimow %s the stored login (%s)",
                 "still rejects" if probing else "rejected",
                 detail,
-                self.login_command,
-                extra=command,
             )
             return
         delay = RETRY_DELAYS[min(self._failures, len(RETRY_DELAYS) - 1)]
@@ -451,17 +443,26 @@ class TokenManager:
         self.state = AuthState.RETRY_PENDING
         if delay == RETRY_DELAYS[-1]:
             # Hours of failure may be a dead grant in words we do not recognise.
-            _LOGGER.error(
-                "Navimow token refresh keeps failing (%s); retrying hourly. If this persists, "
-                "run `%s`",
+            self._ask_for_login(
+                logging.ERROR,
+                "Navimow token refresh keeps failing (%s); retrying hourly, but if this "
+                "persists a new login is needed",
                 detail,
-                self.login_command,
-                extra=command,
             )
         else:
             _LOGGER.warning(
                 "Navimow token refresh failed; retrying in %s seconds: %s", delay, detail
             )
+
+    def _ask_for_login(self, level: int, message: str, *args: object) -> None:
+        """Log `message`, then the exact login to run, in the text and as a `command` field."""
+        _LOGGER.log(
+            level,
+            f"{message}; run `%s`",
+            *args,
+            self.login_command,
+            extra={"command": self.login_command},
+        )
 
 
 def authorization_url(client_id: str, redirect_uri: str, state: str) -> str:

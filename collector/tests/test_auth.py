@@ -582,6 +582,19 @@ def test_login_no_browser_keeps_the_config_in_the_follow_up_command(
     assert f"navimow-collector --config '{config}' login --code" in capsys.readouterr().out
 
 
+def test_login_no_browser_keeps_a_config_named_by_the_environment(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A fresh shell has no NAVIMOW_CONFIG: the follow-up must name the file itself.
+    config = tmp_path / "my collector.toml"
+    config.write_text("[auth]\n")
+    monkeypatch.setenv("NAVIMOW_CONFIG", str(config))
+
+    assert main(["login", "--no-browser"]) == 0
+
+    assert f"navimow-collector --config '{config}' login --code" in capsys.readouterr().out
+
+
 def test_a_refresh_is_saved_even_after_the_state_file_was_deleted(tmp_path: Path) -> None:
     store = logged_in(tmp_path)
     tokens = manager(store, Response(200, token("new", "rotated")))

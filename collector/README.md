@@ -190,7 +190,9 @@ running, 503 only when it has not completed a tick for 120 seconds**, the one
 fault a restart fixes. A broker that is down, a database that is away and a
 login that needs renewing are all reported in the body and the metrics but
 answered with 200: reconnection and the buffer already deal with the first two,
-and no credential problem may ever restart the collector. Use it as it is:
+and no credential problem may ever restart the collector. A Navimow request
+that hangs, such as a token refresh, cannot stall the loop either: each tick waits
+at most 5 seconds for it, and the request carries on in the background. Use it as it is:
 
 ```dockerfile
 HEALTHCHECK CMD curl -fsS http://127.0.0.1:9477/health || exit 1

@@ -28,7 +28,7 @@ from .auth import (
     TokenStore,
     authorization_url,
 )
-from .config import Config, ConfigError, HealthConfig, Secret, load_config
+from .config import Config, ConfigError, HealthConfig, Secret, load_config, resolve_config_path
 from .health import HealthServer, Probe
 from .ingest import Ingestor, read_capture
 from .live import Collector
@@ -46,6 +46,8 @@ def main(
     parser = _parser()
     try:
         args = parser.parse_args(argv)
+        # Named in commands this one prints, which a fresh shell without NAVIMOW_CONFIG runs.
+        args.config = resolve_config_path(args.config)
         config = load_config(args.config)
         if args.command == "config":
             print(_format_config(config))

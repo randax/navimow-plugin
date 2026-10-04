@@ -33,6 +33,12 @@ HEARTBEAT_SECONDS = 60
 TICK_SECONDS = 10
 # The pause between ticks while buffered rows are being written out a slice per tick.
 DRAIN_SECONDS = 0.1
+# How long a tick waits on the vendor (token refresh, mower discovery, broker credentials)
+# before carrying on. The SDK's 30 s timeout applies to each socket operation, not to a
+# request, and a tick can make four requests in a row: unbounded, a hung vendor would stop
+# the buffer draining and look like a stalled loop. The work is left running, not cancelled:
+# a refresh cut short could spend the rotated refresh token it is about to return.
+VENDOR_WAIT_SECONDS = 5
 # Every topic the broker delivers for a mower, whatever the channel.
 MOWER_TOPIC = re.compile(r"^/downlink/vehicle/([^/]+)/")
 
@@ -145,6 +151,7 @@ class Collector:
         # so startup is not a stall), and when each mower was last heard from.
         self._ticked_at = clock()
         self._heard: dict[str, float] = {}
+        self._vendor_work: asyncio.Future[None] | None = None
 
     async def collect(
         self,
@@ -159,18 +166,30 @@ class Collector:
                 # while rows remain the next tick follows at once.
                 await wait(stop, DRAIN_SECONDS if self._storage.draining else TICK_SECONDS)
         finally:
+            if self._vendor_work is not None:
+                self._vendor_work.cancel()
             self.stop()
 
     async def tick(self) -> None:
         """Do whatever is due; called every few seconds for the life of the process."""
-        token = await self._tokens.access_token()
-        if token is not None:
-            await self._keep_credentials(token)
+        work = self._vendor_work
+        if work is None or work.done():
+            if work is not None:
+                work.result()  # what went wrong in the background is raised here, as inline
+            work = self._vendor_work = asyncio.ensure_future(self._keep_access())
+        with suppress(TimeoutError):
+            await asyncio.wait_for(asyncio.shield(work), VENDOR_WAIT_SECONDS)
         now = self._clock()
         if self.connected and now - (self._flowed_until or 0) >= HEARTBEAT_SECONDS:
             self._remember_flow(now)
         self._storage.flush()
         self._ticked_at = self._clock()
+
+    async def _keep_access(self) -> None:
+        """Keep the access token fresh and the broker supplied with credentials for it."""
+        token = await self._tokens.access_token()
+        if token is not None:
+            await self._keep_credentials(token)
 
     def snapshot(self) -> Snapshot:
         """Every signal the health endpoint reports, read from another thread.

@@ -26,6 +26,7 @@ import psycopg
 import pytest
 from mower_sdk.http import HTTPClientError
 
+from navimow_collector import live as live_module
 from navimow_collector.auth import (
     RETRY_DELAYS,
     AuthState,
@@ -786,6 +787,46 @@ def test_health_fails_once_the_collection_loop_stops_ticking(live: Live) -> None
     assert (collector.snapshot().seconds_since_tick, status_code(collector.snapshot())) == (0, 200)
 
 
+def test_a_hung_vendor_call_neither_stalls_the_loop_nor_is_abandoned(
+    live: Live, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tick waits only briefly on the vendor, so a hung token refresh cannot fail the health
+    check; the refresh carries on meanwhile, since cutting it short could spend the rotated
+    refresh token it is about to return."""
+    monkeypatch.setattr(live_module, "VENDOR_WAIT_SECONDS", 0.01)
+    answered = asyncio.Event()
+    asked = live.vendor.request
+
+    class Held(Request):
+        async def __aenter__(self) -> Response:
+            await answered.wait()
+            return self.response
+
+    def request(method: str, url: str, **kwargs: Any) -> Request:
+        sent = asked(method, url, **kwargs)
+        return Held(sent.response) if url.endswith("oauth/getAccessToken") else sent
+
+    monkeypatch.setattr(live.vendor, "request", request)
+    live.clock.now = NOW + 3400  # the token is due for its refresh
+
+    async def scenario() -> tuple[Snapshot, Collector]:
+        collector = live.start()
+        live.clock.now += STALL_SECONDS + 60
+        await collector.tick()  # the refresh hangs; the tick completes all the same
+        hung = collector.snapshot()
+        assert live.brokers == []
+        answered.set()
+        await collector.tick()
+        return hung, collector
+
+    hung, collector = asyncio.run(scenario())
+
+    assert (hung.seconds_since_tick, status_code(hung)) == (0, 200)
+    assert live.brokers  # the refresh finished and collection went on with its token
+    stored = live.store.load()
+    assert stored is not None and stored.access_token == "access-1"
+
+
 def test_a_required_login_is_reported_apart_from_liveness(live: Live) -> None:
     live.store.path.unlink()
     collector = live.start()
@@ -1021,12 +1062,20 @@ def test_the_collect_command_collects_until_it_is_signalled(
     assert "smarthome/authList" in live.vendor.calls  # it got as far as looking for mowers
 
 
+@pytest.mark.parametrize("named_by", ["option", "environment"])
 def test_the_collect_command_serves_health_and_names_the_login_to_run(
     live: Live,
     config_file: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    named_by: str,
 ) -> None:
+    # A systemd unit or container names its configuration in NAVIMOW_CONFIG, which the
+    # operator's shell lacks: the login to run must name the file either way.
+    argv = ["--config", str(config_file), "collect"]
+    if named_by == "environment":
+        monkeypatch.setenv("NAVIMOW_CONFIG", str(config_file))
+        argv = ["collect"]
     live.store.path.unlink()  # no login yet: the collector waits for one, healthy all along
     port = free_port()
     monkeypatch.setenv("NAVIMOW_AUTH_STATE_FILE", str(live.store.path))
@@ -1049,7 +1098,7 @@ def test_the_collect_command_serves_health_and_names_the_login_to_run(
 
     checker = threading.Thread(target=check_then_stop)
     checker.start()
-    assert main(["--config", str(config_file), "collect"], session_factory=lambda: live.vendor) == 0
+    assert main(argv, session_factory=lambda: live.vendor) == 0
     checker.join()
 
     [(status, body, metrics)] = answers
