@@ -10,7 +10,7 @@ import {
   type StyleSpecification,
 } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
-import { nextFraming, type Framing } from '../model/framing';
+import { framedBounds, nextFraming, type Framing } from '../model/framing';
 import type { MowerMarker, TrailScene } from '../model/trail';
 import { PanelMessage } from './PanelMessage';
 
@@ -164,10 +164,13 @@ const MapCanvas: React.FC<Props> = ({ baseMap, trail, mower, width, height }) =>
   // When to frame the Trail is the model's decision (nextFraming); this only carries it out.
   useEffect(() => {
     const next = nextFraming(trail, framed.current);
-    if (map.current && trail.bounds && next) {
+    if (map.current && trail.origin && next) {
       framed.current = next;
       // Padding is capped so a small panel still has room left to fit into.
-      map.current.fitBounds(trail.bounds, { padding: Math.min(40, width / 4, height / 4), maxZoom: 20, duration: 0 });
+      map.current.fitBounds(framedBounds(next, trail.origin), {
+        padding: Math.min(20, width / 4, height / 4),
+        duration: 0,
+      });
     }
   }, [trail, width, height]);
 

@@ -17,7 +17,8 @@ const OUTSIDE_JOB_COLOUR = '#8E8E8E';
 const colourOf = (job: string): string =>
   TRAIL_COLOURS[[...job].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % TRAIL_COLOURS.length, 0)];
 
-export type Bounds = [[number, number], [number, number]];
+/** A box as its two corners, [[minA, minB], [maxA, maxB]]: [lon, lat] on the map, or [x, y] in metres. */
+export type Box = [[number, number], [number, number]];
 
 /** Where the mower was last seen, and when. */
 export interface LastPosition {
@@ -34,9 +35,8 @@ export interface TrailScene {
   /** One feature per Trail, its parts the unbroken runs between gaps in the data. */
   lines: FeatureCollection<MultiLineString, { job: string | null; colour: string }>;
   mower?: LastPosition;
-  bounds?: Bounds;
-  /** The longer side of the Trail's box on the mower's own axes, in metres. */
-  extent?: number;
+  /** The box around the Trail on the mower's own axes, in metres, which no rotation changes. */
+  localBox?: Box;
   /** What placed it; a new Dock origin can move the Trail far enough to need framing again. */
   origin?: DockOrigin;
 }
@@ -51,8 +51,8 @@ export interface TrailOptions {
 }
 
 // Reduced rather than spread into Math.min: a week of Trail is more points than a call takes as arguments.
-const box = (points: Array<[number, number]>): Bounds =>
-  points.reduce<Bounds>(
+const box = (points: Array<[number, number]>): Box =>
+  points.reduce<Box>(
     ([[minA, minB], [maxA, maxB]], [a, b]) => [
       [Math.min(minA, a), Math.min(minB, b)],
       [Math.max(maxA, a), Math.max(maxB, b)],
@@ -70,7 +70,7 @@ export function placeTrails(trails: Trail[], origin: DockOrigin): TrailScene {
     lines: {
       type: 'FeatureCollection',
       features: trails.flatMap((trail, i) => {
-        // A lone position is not a line; it still counts towards the mower and the bounds.
+        // A lone position is not a line; it still counts towards the mower and the box.
         const parts = placed[i].filter((part) => part.length > 1);
         return parts.length === 0
           ? []
@@ -96,14 +96,11 @@ export function placeTrails(trails: Trail[], origin: DockOrigin): TrailScene {
     origin,
   };
 
-  const all = placed.flat(2);
-  if (all.length === 0) {
+  const points = trails.flatMap((t) => t.segments.flat());
+  if (points.length === 0) {
     return EMPTY_SCENE;
   }
-  scene.bounds = box(all);
-  const points = trails.flatMap((t) => t.segments.flat());
-  const [[minX, minY], [maxX, maxY]] = box(points.map((p) => [p.x, p.y]));
-  scene.extent = Math.max(maxX - minX, maxY - minY);
+  scene.localBox = box(points.map((p) => [p.x, p.y]));
 
   const last = points.reduce((a, b) => (b.time > a.time ? b : a));
   scene.mower = {

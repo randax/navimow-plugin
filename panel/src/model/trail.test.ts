@@ -36,7 +36,7 @@ describe('placeTrails', () => {
     const lone = [at(40, 50, 50)];
     const after = [at(20, 100, 0), at(19, 101, 0)];
     const { lines } = placeTrails([{ job: 'a', segments: [before, lone, after] }], ORIGIN);
-    // A lone position between gaps is not a line; it still counts towards the mower and the bounds.
+    // A lone position between gaps is not a line; it still counts towards the mower and the box.
     expect(lines.features).toEqual([
       expect.objectContaining({ geometry: { type: 'MultiLineString', coordinates: [place(before), place(after)] } }),
     ]);
@@ -103,20 +103,14 @@ describe('placeTrails', () => {
     expect(placeTrails([run([at(1, 0, 0)])], ORIGIN).mower?.bearing).toBeUndefined();
   });
 
-  test('the bounds cover every point', () => {
-    const north = { ...ORIGIN, rotation: 0 };
-    const scene = placeTrails([run([at(3, -10, 0), at(2, 10, 0)]), run([at(1, 0, 30)])], north);
-    // With x pointing north, y points west.
-    expect(scene.bounds).toEqual([
-      [toLonLat(north, 0, 30)[0], toLonLat(north, -10, 0)[1]],
-      [ORIGIN.lon, toLonLat(north, 10, 0)[1]],
-    ]);
-  });
-
-  test("the extent is the Trail's longer side in metres, whatever the rotation", () => {
+  test("the local box covers every point on the mower's own axes, whatever the rotation", () => {
     const trails = [run([at(3, -10, 0), at(2, 10, 1)]), run([at(1, 0, 6)])];
-    expect(placeTrails(trails, ORIGIN).extent).toBe(20);
-    expect(placeTrails(trails, { ...ORIGIN, rotation: 45 }).extent).toBe(20);
+    const box = [
+      [-10, 0],
+      [10, 6],
+    ];
+    expect(placeTrails(trails, ORIGIN).localBox).toEqual(box);
+    expect(placeTrails(trails, { ...ORIGIN, rotation: 45 }).localBox).toEqual(box);
   });
 
   test('an empty range draws nothing', () => {
