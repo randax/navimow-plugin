@@ -144,7 +144,20 @@ class TokenStore:
 
 
 class TokenRequestError(Exception):
-    """The vendor declined a token request and supplied human-readable text."""
+    """A token request failed; `relogin` says whether only a new login can help.
+
+    Decided where the facts are: the vendor's own prose is classified, while text we
+    compose ourselves (a malformed or truncated credential) never is, since it can contain
+    digits such as a byte offset of 401.
+    """
+
+    def __init__(self, message: str, *, relogin: bool) -> None:
+        super().__init__(message)
+        self.relogin = relogin
+
+    @classmethod
+    def from_vendor(cls, prose: str) -> TokenRequestError:
+        return cls(prose, relogin=_means_relogin(prose))
 
 
 class TokenClient:
@@ -189,11 +202,17 @@ class TokenClient:
         async with self._session.request("POST", TOKEN_URL, data=form) as response:
             body = await response.text()
         if response.status < 200 or response.status >= 300:
-            raise TokenRequestError(f"HTTP {response.status}: {body}".rstrip(": "))
+            raise TokenRequestError.from_vendor(f"HTTP {response.status}: {body}".rstrip(": "))
         try:
             parsed = json.loads(body)
-            if not isinstance(parsed, dict):
-                raise ValueError("token response is not an object")
+        except json.JSONDecodeError as error:
+            if "access_token" in body:  # a credential cut short; never log its token
+                raise TokenRequestError("truncated token response", relogin=False) from error
+            raise TokenRequestError.from_vendor(body) from error
+        if not isinstance(parsed, dict) or not isinstance(parsed.get("access_token"), str):
+            # Vendor errors can arrive with status 200: their prose decides.
+            raise TokenRequestError.from_vendor(body)
+        try:
             # A refresh response may omit the refresh token; the previous one then still holds.
             refresh_token = parsed.get("refresh_token") or previous_refresh_token
             if not isinstance(refresh_token, str):
@@ -204,12 +223,9 @@ class TokenClient:
                 expires_in=_required_int(parsed, "expires_in"),
                 obtained_at=now,
             )
-        except (TypeError, ValueError, json.JSONDecodeError) as error:
-            # Vendor errors can arrive with status 200, so classification needs their prose;
-            # the wording here must not itself match a re-login word, and must not log
-            # a token from a half-formed credential.
-            detail = f"malformed credential ({error})" if "access_token" in body else body
-            raise TokenRequestError(f"unexpected token response: {detail}") from error
+        except (TypeError, ValueError) as error:
+            # Names the bad field, never the token it would otherwise echo.
+            raise TokenRequestError(f"malformed credential: {error}", relogin=False) from error
 
 
 class AuthState(StrEnum):
@@ -380,7 +396,7 @@ class TokenManager:
         try:
             refreshed = await self._client.refresh(self._credential, now=now)
         except TokenRequestError as error:
-            self._record_failure(str(error), now, relogin=_means_relogin(str(error)))
+            self._record_failure(str(error), now, relogin=error.relogin)
             return
         except Exception as error:  # Transport errors, whatever their wording, are transient.
             self._record_failure(str(error), now, relogin=False)

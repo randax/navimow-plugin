@@ -189,6 +189,14 @@ def test_does_not_refresh_before_the_margin(tmp_path: Path) -> None:
         ),
         (502, "Bad gateway, ray id 8a4013f2", AuthState.RETRY_PENDING),
         (200, json.dumps({"code": 401, "desc": "token has expired"}), AuthState.RELOGIN_REQUIRED),
+        # Vendor prose naming the field is still prose...
+        (
+            200,
+            json.dumps({"code": 401, "desc": "access_token invalid"}),
+            AuthState.RELOGIN_REQUIRED,
+        ),
+        # ...but a credential cut short (here a JSON error reporting "char 401") is transient.
+        (200, " " * 384 + '{"access_token": "abc', AuthState.RETRY_PENDING),
     ],
 )
 def test_refresh_failures_are_classified_by_vendor_prose(
