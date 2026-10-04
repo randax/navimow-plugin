@@ -10,7 +10,7 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from ..config import StorageConfig
 from ..records import Gap, TrailPoint
-from .base import SchemaError, StorageError
+from .base import RejectedError, SchemaError, StorageError
 
 # Live collection writes from its event loop, so no database call may wait for long: a
 # connection attempt, a statement held up by a lock and a server that vanished mid-statement
@@ -30,6 +30,8 @@ def _translated() -> Iterator[None]:
     """Keep psycopg's exceptions behind the storage boundary."""
     try:
         yield
+    except (psycopg.DataError, psycopg.IntegrityError) as error:
+        raise RejectedError(f"postgres: {error}".strip()) from error
     except psycopg.Error as error:
         raise StorageError(f"postgres: {error}".strip()) from error
 

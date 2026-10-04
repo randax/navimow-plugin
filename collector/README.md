@@ -111,6 +111,11 @@ at once, and the note of when a gap started is kept until its row has been
 handed over, so a crash at any point records the gap again rather than losing
 it. Only a buffer file that cannot be written can cost a gap.
 
+A row the database refuses for what it holds is logged and dropped, never
+retried, so it cannot hold up the rows behind it. Trouble with the buffer file
+itself (unreadable, or not removable after its rows were written) is logged and
+costs at most the rows in that file; it never stops collection.
+
 A slow database counts as an outage too. The collector gives a connection
 attempt 5 seconds and a statement 5 seconds (a lock held by maintenance
 included), and uses TCP keep-alives to notice a server that vanished, so no

@@ -5,16 +5,16 @@ from __future__ import annotations
 import json
 import logging
 import os
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import asdict
 from datetime import datetime
 from itertools import islice
 from pathlib import Path
 from time import monotonic
-from typing import Any
+from typing import Any, BinaryIO
 
 from ..records import Gap, TrailPoint
-from .base import Storage, StorageError
+from .base import RejectedError, Storage, StorageError
 
 RETRY_SECONDS = 10
 # About half an hour of one mower's Trail; a longer outage continues on disk.
@@ -34,6 +34,9 @@ class BufferedStorage:
     Rows wait in memory, spill to a file once memory holds `memory_rows`, and are written
     when the database returns. Every insert is idempotent and every row carries its own
     time, so neither a repeated row nor the order of a flush can corrupt a Trail.
+
+    Nothing here stops collection: a database that is away is waited for, a row it rejects
+    is dropped, and a buffer file that misbehaves costs rows, never the process.
     """
 
     def __init__(
@@ -53,9 +56,12 @@ class BufferedStorage:
         self._storage: Storage | None = None
         self._memory: list[Row] = []
         self._spilled = _count_lines(spill)  # left by a previous process
+        # How far into the file this process has already sent, when it could not remove it.
+        self._replayed = 0
         self._retry_at = 0.0
         self._dropping = False  # whether this outage's loss has been reported yet
         self.dropped = 0
+        self.rejected = 0
 
     @property
     def reachable(self) -> bool:
@@ -82,15 +88,12 @@ class BufferedStorage:
             return
         waiting = self.buffered
         try:
-            for batch in self._spilled_batches():
-                self._send(batch)
+            if self._spilled:
+                self._replay_spill()
             self._send(self._memory)
         except StorageError as error:
             self._outage(error)
             return
-        if self._spilled:
-            self._spill.unlink(missing_ok=True)
-            self._spilled = 0
         self._memory.clear()
         self._dropping = False
         _LOGGER.info("Database reachable again; wrote %d buffered rows", waiting)
@@ -120,12 +123,22 @@ class BufferedStorage:
         return 0
 
     def _send(self, rows: Sequence[Row]) -> int:
+        """Write rows now, raising StorageError only when the database cannot be reached."""
         if self._storage is None:
             self._storage = self._open()
         points = [row for row in rows if isinstance(row, TrailPoint)]
         gaps = [row for row in rows if isinstance(row, Gap)]
-        written = self._storage.write_trail(points) if points else 0
-        return written + (self._storage.write_gaps(gaps) if gaps else 0)
+        try:
+            written = self._storage.write_trail(points) if points else 0
+            return written + (self._storage.write_gaps(gaps) if gaps else 0)
+        except RejectedError as error:
+            # Retrying cannot help a row the database refuses for what it holds, and it
+            # would keep every row behind it waiting: find it, drop it, keep the rest.
+            if len(rows) > 1:
+                return sum(self._send([row]) for row in rows)
+            self.rejected += 1
+            _LOGGER.error("Dropping a row the database rejected (%s): %r", error, rows[0])
+            return 0
 
     def _outage(self, error: StorageError) -> None:
         if self._storage is not None:
@@ -136,35 +149,61 @@ class BufferedStorage:
         self._retry_at = self._clock() + RETRY_SECONDS
 
     def _spill_memory(self) -> None:
-        """Move memory to disk. Once the disk holds its limit, or fails, the rows are dropped
+        """Move memory to disk. Rows the file has no room for, or cannot take, are dropped
         instead: memory stays bounded whatever happens, and it is the newest rows that lose."""
+        kept, problem = 0, "it has reached its size limit"
         try:
             self._spill.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            with self._spill.open("a", encoding="utf-8") as spill:
-                if os.fstat(spill.fileno()).st_size >= self._disk_bytes:
-                    raise OSError("it has reached its size limit")
-                spill.writelines(_encode(row) + "\n" for row in self._memory)
-                spill.flush()
+            with self._spill.open("ab+", buffering=0) as spill:
+                room = self._disk_bytes - _end_torn_line(spill)
+                lines: list[bytes] = []
+                for row in self._memory:
+                    line = _encode(row)
+                    if len(line) > room:
+                        break
+                    lines.append(line)
+                    room -= len(line)
+                data = b"".join(lines)
+                # Unbuffered, so the count is what reached the file: a disk that fills up
+                # mid-write keeps the rows that fitted, and the torn one is ended next time.
+                written = spill.write(data) or 0
+                kept = data[:written].count(b"\n")
                 os.fsync(spill.fileno())
-            self._spilled += len(self._memory)
+                if written < len(data):
+                    problem = "the write was cut short"
         except OSError as error:
+            problem = str(error)
+        self._spilled += kept
+        lost = len(self._memory) - kept
+        if lost:
             if not self._dropping:
                 _LOGGER.error(
-                    "Cannot buffer to %s; dropping rows until the database returns: %s",
+                    "Cannot buffer to %s (%s); dropping rows until the database returns",
                     self._spill,
-                    error,
+                    problem,
                 )
             self._dropping = True
-            self.dropped += len(self._memory)
+            self.dropped += lost
         self._memory.clear()
 
-    def _spilled_batches(self) -> Iterator[list[Row]]:
-        if not self._spilled:
-            return
-        with self._spill.open(encoding="utf-8") as spill:
-            while lines := list(islice(spill, _BATCH_ROWS)):
-                # A line cut short by a crash is skipped rather than blocking the rest.
-                yield [row for row in map(_decode, lines) if row is not None]
+    def _replay_spill(self) -> None:
+        """Send what the buffer file holds, then remove it.
+
+        A file that cannot be read keeps its rows for the next start; one that cannot be
+        removed (a filesystem gone read-only) is remembered as sent up to where it ends.
+        """
+        try:
+            with self._spill.open("rb") as spill:
+                spill.seek(self._replayed)
+                while lines := list(islice(spill, _BATCH_ROWS)):
+                    # A line cut short by a crash is skipped rather than blocking the rest.
+                    self._send([row for row in map(_decode, lines) if row is not None])
+                self._replayed = spill.tell()
+            self._spill.unlink()
+            self._replayed = 0
+        except OSError as error:
+            _LOGGER.error("Buffer file %s could not be read and removed: %s", self._spill, error)
+        self._spilled = 0
 
 
 def _count_lines(path: Path) -> int:
@@ -175,15 +214,26 @@ def _count_lines(path: Path) -> int:
         return 0
 
 
-def _encode(row: Row) -> str:
+def _end_torn_line(spill: BinaryIO) -> int:
+    """End a last line that an interrupted write left unfinished, so that the next row
+    starts a line of its own; return the size of the file."""
+    size = spill.seek(0, os.SEEK_END)
+    if size:
+        spill.seek(size - 1)
+        if spill.read(1) != b"\n":
+            size += spill.write(b"\n")
+    return size
+
+
+def _encode(row: Row) -> bytes:
     values = {
         key: value.isoformat() if isinstance(value, datetime) else value
         for key, value in asdict(row).items()
     }
-    return json.dumps({"row": type(row).__name__, **values})
+    return json.dumps({"row": type(row).__name__, **values}).encode() + b"\n"
 
 
-def _decode(line: str) -> Row | None:
+def _decode(line: bytes) -> Row | None:
     try:
         values: dict[str, Any] = json.loads(line)
         kind = _ROWS[values.pop("row")]

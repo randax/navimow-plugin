@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import errno
 import socket
 import threading
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -34,6 +36,7 @@ class Database:
         self.dsn = dsn
         self.down = False
         self.attempts = 0
+        self.sent = 0  # rows the database took, repeats included
         self.crash: BaseException | None = None  # raised by the next write, as a dying process
 
     def open(self) -> Storage:
@@ -86,7 +89,9 @@ class Observed:
     def write_trail(self, points: Sequence[TrailPoint]) -> int:
         if self._db.crash:
             raise self._db.crash
-        return self._storage.write_trail(points)
+        written = self._storage.write_trail(points)
+        self._db.sent += len(points)
+        return written
 
     def write_gaps(self, gaps: Sequence[Gap]) -> int:
         if self._db.crash:
@@ -264,25 +269,111 @@ def test_a_gap_held_during_an_outage_is_on_disk_at_once(database: str, tmp_path:
     assert db.gaps() == [(gap.mower_id, gap.start_time, gap.end_time, gap.reason)]
 
 
-def test_the_disk_buffer_is_bounded_too(database: str, tmp_path: Path) -> None:
+def test_the_disk_buffer_never_exceeds_its_limit(database: str, tmp_path: Path) -> None:
     db, clock = Database(database), Clock()
-    storage = buffered(db, tmp_path, clock, memory_rows=1, disk_bytes=1000)
+    storage = buffered(db, tmp_path, clock, disk_bytes=1000)
     db.go_down()
-    for second in range(100):
-        storage.write_trail(points(second))
-    size, held = (tmp_path / "buffer.jsonl").stat().st_size, storage.buffered
-    for second in range(100, 200):
+    storage.write_trail(points(*range(1500)))  # one batch far larger than the limit
+    size = (tmp_path / "buffer.jsonl").stat().st_size
+    for second in range(1500, 3000):
         storage.write_trail(points(second))
 
-    assert (tmp_path / "buffer.jsonl").stat().st_size == size < 2000
-    assert storage.buffered <= held + 1  # at most the row still in memory
-    assert storage.dropped >= 100
+    assert 0 < size <= 1000
+    assert (tmp_path / "buffer.jsonl").stat().st_size == size
+    assert storage.dropped >= 1990
 
     db.down = False
     clock.now += RETRY_SECONDS
     storage.flush()
     kept = db.trail()
-    assert kept[:4] == [0, 1, 2, 3] and len(kept) < 100  # the oldest rows are the ones kept
+    assert kept[:4] == [0, 1, 2, 3]  # the oldest rows are the ones kept
+    assert len(kept) < 1000
+
+
+def test_a_row_the_database_rejects_is_dropped_and_the_rest_arrive(
+    database: str, tmp_path: Path
+) -> None:
+    db, clock = Database(database), Clock()
+    storage = buffered(db, tmp_path, clock)
+    impossible = replace(points(2)[0], vehicle_state=2**40)  # no integer column holds it
+    db.go_down()
+    storage.write_trail(points(1))
+    storage.write_trail([impossible])
+    storage.write_trail(points(3))
+
+    db.down = False
+    clock.now += RETRY_SECONDS
+    storage.flush()
+
+    assert db.trail() == [1, 3]
+    assert (storage.buffered, storage.rejected, storage.reachable) == (0, 1, True)
+
+
+def test_a_rejected_row_does_not_start_an_outage(database: str, tmp_path: Path) -> None:
+    db, clock = Database(database), Clock()
+    storage = buffered(db, tmp_path, clock)
+    impossible = replace(points(2)[0], vehicle_state=2**40)
+
+    assert storage.write_trail([*points(1), impossible, *points(3)]) == 2
+
+    assert db.trail() == [1, 3]
+    assert (storage.buffered, storage.rejected, storage.reachable) == (0, 1, True)
+
+
+def test_rows_spilled_after_a_torn_line_are_not_lost_with_it(database: str, tmp_path: Path) -> None:
+    db, clock = Database(database), Clock()
+    storage = buffered(db, tmp_path, clock, memory_rows=1)
+    db.go_down()
+    storage.write_trail(points(1, 2))
+    with (tmp_path / "buffer.jsonl").open("a") as spill:  # a write the disk cut short
+        spill.write('{"row": "TrailPoint", "mower_id": "DEVICE_1", "device_ti')
+    storage.write_trail(points(3, 4))
+
+    db.down = False
+    clock.now += RETRY_SECONDS
+    storage.flush()
+
+    assert db.trail() == [1, 2, 3, 4]
+
+
+def test_a_buffer_file_that_cannot_be_removed_neither_stops_collection_nor_repeats(
+    database: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def read_only(self: Path, missing_ok: bool = False) -> None:
+        raise OSError(errno.EROFS, "Read-only file system", str(self))
+
+    monkeypatch.setattr(Path, "unlink", read_only)
+    db, clock = Database(database), Clock()
+    storage = buffered(db, tmp_path, clock, memory_rows=1)
+    for outage in ((1, 2), (3, 4)):
+        db.go_down()
+        storage.write_trail(points(*outage))
+        db.down = False
+        clock.now += RETRY_SECONDS
+        storage.flush()
+        assert storage.buffered == 0
+
+    assert db.trail() == [1, 2, 3, 4]
+    assert db.sent == 4
+
+
+def test_a_buffer_file_that_cannot_be_read_does_not_stop_collection(
+    database: str, tmp_path: Path
+) -> None:
+    db, clock = Database(database), Clock()
+    storage = buffered(db, tmp_path, clock, memory_rows=1)
+    db.go_down()
+    storage.write_trail(points(1, 2))
+    (tmp_path / "buffer.jsonl").unlink()
+    (tmp_path / "buffer.jsonl").mkdir()  # whatever now sits there, it cannot be read as a file
+    storage.write_trail(points(3))
+
+    db.down = False
+    clock.now += RETRY_SECONDS
+    storage.flush()
+    storage.write_trail(points(4))
+
+    assert db.trail() == [3, 4]
 
 
 def test_a_line_cut_short_by_a_crash_does_not_block_the_rest(database: str, tmp_path: Path) -> None:

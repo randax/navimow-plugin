@@ -12,6 +12,10 @@ class StorageError(Exception):
     """The database could not be reached or refused a write."""
 
 
+class RejectedError(StorageError):
+    """The database was reached but refuses these rows for what they hold; a retry cannot help."""
+
+
 class SchemaError(StorageError):
     """The configured database does not have the collector schema."""
 
