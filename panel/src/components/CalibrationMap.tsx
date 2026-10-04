@@ -119,6 +119,8 @@ export const CalibrationMap: React.FC<Props> = (props) => {
     });
     framed.current = start !== undefined;
     created.on('error', (e) => console.error('[navimow-map]', e.error?.message ?? e));
+    // Marks a fully drawn map, so browser tests can wait for it before they drag anything on it.
+    created.on('idle', () => element.current?.setAttribute('data-map-idle', ''));
     created.on('load', () => {
       created.addSource('axis', { type: 'geojson', data: EMPTY });
       created.addSource('draft', { type: 'geojson', data: EMPTY });
@@ -169,22 +171,24 @@ export const CalibrationMap: React.FC<Props> = (props) => {
     if (!current || !origin) {
       return;
     }
+    // A marker is placed on the map as it is added, so it needs its position first.
     if (!dock.current) {
-      dock.current = marker(styles.dock, 'Dock').addTo(current);
+      dock.current = marker(styles.dock, 'Dock').setLngLat([origin.lon, origin.lat]).addTo(current);
       dock.current.on('drag', () => {
         const { lng, lat } = dock.current!.getLngLat();
         latest.current.onDock(lat, lng);
       });
-      handle.current = marker(styles.handle, 'Rotation handle').addTo(current);
+      handle.current = marker(styles.handle, 'Rotation handle').setLngLat(handlePosition(origin)).addTo(current);
       handle.current.on('drag', () => {
         const at = latest.current.origin;
         if (at) {
           latest.current.onRotation(rotationTowards(at, handle.current!.getLngLat().toArray()));
         }
       });
+    } else {
+      dock.current.setLngLat([origin.lon, origin.lat]);
+      handle.current?.setLngLat(handlePosition(origin));
     }
-    dock.current.setLngLat([origin.lon, origin.lat]);
-    handle.current?.setLngLat(handlePosition(origin));
     if (!framed.current) {
       framed.current = true;
       current.jumpTo({ center: [origin.lon, origin.lat], zoom: DOCK_ZOOM });

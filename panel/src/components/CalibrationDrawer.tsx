@@ -165,10 +165,26 @@ export const CalibrationDrawer: React.FC<Props> = ({ initial, options, data, onS
           </Text>
           <div className={s.pair}>
             <Field label="Latitude" description="Of the charging dock">
-              <Input type="number" step="any" min={-85} max={85} value={number(dockOrigin.lat)} onChange={onNumber('lat')} />
+              <Input
+                id="calibration-lat"
+                type="number"
+                step="any"
+                min={-85}
+                max={85}
+                value={number(dockOrigin.lat)}
+                onChange={onNumber('lat')}
+              />
             </Field>
             <Field label="Longitude" description="Of the charging dock">
-              <Input type="number" step="any" min={-180} max={180} value={number(dockOrigin.lon)} onChange={onNumber('lon')} />
+              <Input
+                id="calibration-lon"
+                type="number"
+                step="any"
+                min={-180}
+                max={180}
+                value={number(dockOrigin.lon)}
+                onChange={onNumber('lon')}
+              />
             </Field>
           </div>
           <Field label="Rotation" description="Bearing of the mower's x-axis, in degrees clockwise from north">
