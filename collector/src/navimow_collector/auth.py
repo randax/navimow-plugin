@@ -34,10 +34,10 @@ POLL_SECONDS = 60
 
 _LOGGER = logging.getLogger(__name__)
 # Vendor prose meaning the grant itself is dead, so only a new login helps...
-_RELOGIN_WORDS = ("invalid", "expired", "unauthorized", "forbidden")
+_RELOGIN_WORDS = ("invalid", "expired", "unauthorized", "forbidden", "illegal")
 # ...as does a 401/403, whether the status line or a code in the body, but not those digits
-# inside a longer number or id (an epoch timestamp, a hex ray id).
-_RELOGIN_STATUS = re.compile(r"(?<![0-9a-z])40[13](?![0-9a-z])")
+# inside a longer number or id (an epoch timestamp, a hex ray id, "a1b2-401-c3d4").
+_RELOGIN_STATUS = re.compile(r"(?<![\w-])40[13](?![\w-])")
 # The gateway's throttling can arrive as a 403 and passes on its own.
 _THROTTLED_PHRASES = ("too frequent", "circuit breaker")
 
@@ -202,11 +202,17 @@ class TokenClient:
         async with self._session.request("POST", TOKEN_URL, data=form) as response:
             body = await response.text()
         if response.status < 200 or response.status >= 300:
-            raise TokenRequestError.from_vendor(f"HTTP {response.status}: {body}".rstrip(": "))
+            detail = f"HTTP {response.status}: {body}".rstrip(": ")
+            if response.status >= 500 or response.status in (408, 429):
+                # A gateway or overload answer is transient whatever its page says (Apache's
+                # stock 502 says "invalid"); only the vendor's own 4xx prose can mean re-login.
+                raise TokenRequestError(detail, relogin=False)
+            raise TokenRequestError.from_vendor(detail)
         try:
             parsed = json.loads(body)
         except json.JSONDecodeError as error:
-            if "access_token" in body:  # a credential cut short; never log its token
+            # A credential object cut short (never log its token); anything else is prose.
+            if body.lstrip().startswith("{") and '"access_token"' in body:
                 raise TokenRequestError("truncated token response", relogin=False) from error
             raise TokenRequestError.from_vendor(body) from error
         if not isinstance(parsed, dict) or not isinstance(parsed.get("access_token"), str):

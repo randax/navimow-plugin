@@ -195,6 +195,27 @@ def test_does_not_refresh_before_the_margin(tmp_path: Path) -> None:
             json.dumps({"code": 401, "desc": "access_token invalid"}),
             AuthState.RELOGIN_REQUIRED,
         ),
+        (200, "access_token invalid", AuthState.RELOGIN_REQUIRED),
+        # A gateway's own error page is transient whatever it says (Apache's stock 502 here).
+        (
+            502,
+            "The proxy server received an invalid response from an upstream server.",
+            AuthState.RETRY_PENDING,
+        ),
+        (429, "Too many requests: token invalid", AuthState.RETRY_PENDING),
+        # A request id with a numeric segment is not a status.
+        (
+            200,
+            json.dumps({"code": 0, "desc": "system busy", "requestId": "a1b2-401-c3d4"}),
+            AuthState.RETRY_PENDING,
+        ),
+        # The vendor's own OAuth error family.
+        (
+            400,
+            json.dumps({"code": 0, "desc": "CODE_OAUTH_INFO_ILLEGAL"}),
+            AuthState.RELOGIN_REQUIRED,
+        ),
+        (200, '{"desc": "access_token invalid', AuthState.RELOGIN_REQUIRED),
         # ...but a credential cut short (here a JSON error reporting "char 401") is transient.
         (200, " " * 384 + '{"access_token": "abc', AuthState.RETRY_PENDING),
     ],
