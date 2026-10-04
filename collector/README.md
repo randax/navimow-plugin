@@ -112,10 +112,15 @@ started is kept until its row has been handed over, so a crash at any point
 records the gap again rather than losing it. Only when the file cannot take it
 does a gap wait in memory with the Trail points, exposed to a crash like them.
 
+A backlog is written back 200 rows at a time, a slice every tenth of a second,
+so collection, token refresh and shutdown carry on while it drains; a stop in
+the middle leaves the rest in the file for the next start.
+
 A row the database refuses for what it holds is logged and dropped, never
 retried, so it cannot hold up the rows behind it. Trouble with the buffer file
 itself (unreadable, or not removable after its rows were written) is logged and
-costs at most the rows in that file; it never stops collection.
+costs at most the rows in that file; it never stops collection. Emptying or
+deleting the file by hand is safe at any time and costs only the rows in it.
 
 A slow database counts as an outage too. The collector gives a connection
 attempt 5 seconds and a statement 5 seconds (a lock held by maintenance

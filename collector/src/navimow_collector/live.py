@@ -29,6 +29,8 @@ KEEPALIVE_SECONDS = 60
 # How often a live connection is noted on disk; a restart's gap starts at the last note.
 HEARTBEAT_SECONDS = 60
 TICK_SECONDS = 10
+# The pause between ticks while buffered rows are being written out a slice per tick.
+DRAIN_SECONDS = 0.1
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -90,6 +92,12 @@ class RestError(Exception):
         self.status = status
 
 
+async def _wait(stop: asyncio.Event, seconds: float) -> None:
+    """Pause between ticks, cut short by `stop`."""
+    with suppress(TimeoutError):
+        await asyncio.wait_for(stop.wait(), seconds)
+
+
 class Collector:
     """Record every mower on one account, from the broker into the ingestion core."""
 
@@ -127,13 +135,18 @@ class Collector:
         self._flowed_until = _read_marker(self._marker)
         self._gap_reason = GapReason.RESTART
 
-    async def collect(self, stop: asyncio.Event) -> None:
+    async def collect(
+        self,
+        stop: asyncio.Event,
+        wait: Callable[[asyncio.Event, float], Awaitable[None]] = _wait,
+    ) -> None:
         """Collect until `stop` is set."""
         try:
             while not stop.is_set():
                 await self.tick()
-                with suppress(TimeoutError):
-                    await asyncio.wait_for(stop.wait(), TICK_SECONDS)
+                # Each tick writes one slice of a backlog, leaving the loop free in between;
+                # while rows remain the next tick follows at once.
+                await wait(stop, DRAIN_SECONDS if self._storage.draining else TICK_SECONDS)
         finally:
             self.stop()
 

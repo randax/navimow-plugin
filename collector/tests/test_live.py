@@ -25,17 +25,19 @@ from mower_sdk.http import HTTPClientError
 from navimow_collector.auth import RETRY_DELAYS, Credential, TokenClient, TokenManager
 from navimow_collector.cli import main
 from navimow_collector.live import (
+    DRAIN_SECONDS,
     KEEPALIVE_SECONDS,
+    TICK_SECONDS,
     Broker,
     BrokerCredentials,
     Collector,
     connect_broker,
 )
-from navimow_collector.storage.buffered import RETRY_SECONDS, BufferedStorage
+from navimow_collector.storage.buffered import REPLAY_ROWS, RETRY_SECONDS, BufferedStorage
 
 from .conftest import FIXTURE, Clock, gaps
 from .test_auth import Request, Response, logged_in, token
-from .test_buffer import Database
+from .test_buffer import Database, points
 
 NOW = 1_790_000_000.0
 LOCATION = "/downlink/vehicle/{}/realtimeDate/location"
@@ -719,6 +721,27 @@ def test_collecting_continues_until_stopped_then_disconnects(live: Live) -> None
 
     assert not live.brokers[0].connecting
     assert gaps(live.db.dsn) == [("DEVICE_1", at(NOW + 45), at(NOW + 3600), "restart")]
+
+
+def test_a_backlog_is_drained_promptly_without_holding_the_loop(live: Live) -> None:
+    backlog = 2 * REPLAY_ROWS + 150
+    live.db.go_down()
+    outage = BufferedStorage(live.db.open, live.state / "buffer.jsonl", clock=live.clock)
+    outage.write_trail(points(*range(backlog)))
+    outage.close()  # the collector stopped with the database away
+    live.db.down = False
+    pauses: list[float] = []
+
+    async def wait(stop: asyncio.Event, seconds: float) -> None:
+        pauses.append(seconds)
+        if seconds == TICK_SECONDS:
+            stop.set()
+
+    asyncio.run(live.start().collect(asyncio.Event(), wait))
+
+    # One slice a tick, the next tick at once while rows remain, then the usual pace.
+    assert pauses == [DRAIN_SECONDS, DRAIN_SECONDS, TICK_SECONDS]
+    assert len(live.trail()) == backlog
 
 
 def test_the_broker_connection_keeps_alive_well_inside_the_idle_drop() -> None:

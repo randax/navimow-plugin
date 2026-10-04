@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+import os
 import socket
 import threading
 from collections.abc import Callable, Sequence
@@ -16,7 +17,7 @@ import pytest
 from navimow_collector.config import Secret, StorageConfig
 from navimow_collector.records import Gap, GapReason, TrailPoint
 from navimow_collector.storage import Storage, StorageError, open_storage, postgres
-from navimow_collector.storage.buffered import RETRY_SECONDS, BufferedStorage
+from navimow_collector.storage.buffered import REPLAY_ROWS, RETRY_SECONDS, BufferedStorage
 
 from .conftest import Clock, gaps
 
@@ -368,12 +369,62 @@ def test_rows_spilled_after_a_torn_line_are_not_lost_with_it(database: str, tmp_
     assert db.trail() == [1, 2, 3, 4]
 
 
+def test_a_backlog_is_written_a_slice_at_a_time(database: str, tmp_path: Path) -> None:
+    # Live collection writes from its event loop, which a long outage's backlog written
+    # in one go would hold for minutes.
+    db, clock = Database(database), Clock()
+    storage = buffered(db, tmp_path, clock, memory_rows=100)
+    backlog = 2 * REPLAY_ROWS + 150
+    db.go_down()
+    for second in range(backlog):
+        storage.write_trail(points(second))
+    db.down = False
+    clock.now += RETRY_SECONDS
+
+    storage.flush()
+    assert len(db.trail()) == REPLAY_ROWS
+    assert (storage.buffered, storage.draining) == (backlog - REPLAY_ROWS, True)
+
+    storage.flush()
+    storage.flush()
+    assert db.trail() == list(range(backlog))
+    assert (storage.buffered, storage.draining) == (0, False)
+    assert not (tmp_path / "buffer.jsonl").exists()
+
+
+def read_only(self: Path, missing_ok: bool = False) -> None:
+    raise OSError(errno.EROFS, "Read-only file system", str(self))
+
+
+@pytest.mark.parametrize("reclaim", [lambda spill: spill.write_bytes(b""), os.remove])
+def test_a_buffer_file_emptied_behind_the_collector_is_read_from_its_start(
+    database: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reclaim: Callable[[Path], object],
+) -> None:
+    monkeypatch.setattr(Path, "unlink", read_only)
+    db, clock = Database(database), Clock()
+    storage = buffered(db, tmp_path, clock, memory_rows=1)
+    db.go_down()
+    storage.write_trail(points(1, 2))
+    db.down = False
+    clock.now += RETRY_SECONDS
+    storage.flush()  # written, but the file could not be removed
+
+    reclaim(tmp_path / "buffer.jsonl")  # so the operator makes room by hand
+    db.go_down()
+    storage.write_trail(points(3, 4))
+    db.down = False
+    clock.now += RETRY_SECONDS
+    storage.flush()
+
+    assert db.trail() == [1, 2, 3, 4]
+
+
 def test_a_buffer_file_that_cannot_be_removed_neither_stops_collection_nor_repeats(
     database: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def read_only(self: Path, missing_ok: bool = False) -> None:
-        raise OSError(errno.EROFS, "Read-only file system", str(self))
-
     monkeypatch.setattr(Path, "unlink", read_only)
     db, clock = Database(database), Clock()
     storage = buffered(db, tmp_path, clock, memory_rows=1)

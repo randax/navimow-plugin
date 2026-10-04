@@ -21,7 +21,8 @@ RETRY_SECONDS = 10
 MEMORY_ROWS = 1000
 # Roughly ten days of continuous mowing, so a full disk is never the collector's doing.
 DISK_BYTES = 64 * 1024 * 1024
-_BATCH_ROWS = 500
+# How many waiting rows one call writes; live collection calls from its event loop.
+REPLAY_ROWS = 200
 _ROWS: dict[str, type[TrailPoint] | type[Gap]] = {"TrailPoint": TrailPoint, "Gap": Gap}
 
 Row = TrailPoint | Gap
@@ -56,8 +57,10 @@ class BufferedStorage:
         self._storage: Storage | None = None
         self._memory: list[Row] = []
         self._spilled = _count_lines(spill)  # left by a previous process
-        # How far into the file this process has already sent, when it could not remove it.
+        # How far into the file this process has sent, and which file that was: a backlog
+        # is sent a slice at a time, and a file that was sent cannot always be removed.
         self._replayed = 0
+        self._replayed_file: tuple[int, int] | None = None
         self._retry_at = 0.0
         self._dropping = False  # whether this outage's loss has been reported yet
         self.dropped = 0
@@ -74,6 +77,11 @@ class BufferedStorage:
         """How many rows are waiting for the database."""
         return len(self._memory) + self._spilled
 
+    @property
+    def draining(self) -> bool:
+        """Whether rows are waiting which the database is believed able to take now."""
+        return bool(self.buffered) and self._clock() >= self._retry_at
+
     def connect(self) -> None:
         """Open the database now, so a misconfiguration fails at startup, not into the buffer."""
         self._storage = self._open()
@@ -85,24 +93,30 @@ class BufferedStorage:
         return self._write(gaps)
 
     def flush(self) -> None:
-        """Write what is waiting, unless the database was found unreachable moments ago."""
-        if not self.buffered or self._clock() < self._retry_at:
+        """Write some of what is waiting, unless the database was found unreachable just now.
+
+        At most REPLAY_ROWS rows a call, oldest first: the backlog of a long outage written
+        in one go would hold the caller for minutes. `draining` says whether to call again.
+        """
+        if not self.draining:
             return
-        waiting = self.buffered
+        room = REPLAY_ROWS
         try:
             if self._spilled:
-                self._replay_spill()
-            self._send(self._memory)
+                room -= self._replay_spill(room)
+            if not self._spilled and self._memory and room > 0:
+                self._send(self._memory[:room])
+                del self._memory[:room]
         except StorageError as error:
             self._outage(error)
             return
-        self._memory.clear()
-        self._dropping = False
-        self._refused.clear()
-        _LOGGER.info("Database reachable again; wrote %d buffered rows", waiting)
+        if not self.buffered:
+            self._dropping = False
+            self._refused.clear()
+            _LOGGER.info("Database reachable again; every buffered row is written")
 
     def close(self) -> None:
-        """Make one last attempt, then leave what is still waiting on disk for the next start."""
+        """Write one last slice, then leave what is still waiting on disk for the next start."""
         self._retry_at = 0.0
         self.flush()
         if self._memory:
@@ -163,6 +177,7 @@ class BufferedStorage:
         try:
             self._spill.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             with self._spill.open("ab+", buffering=0) as spill:
+                self._forget_position_in_another_file(spill)
                 room = self._disk_bytes - _end_torn_line(spill)
                 lines: list[bytes] = []
                 for row in self._memory:
@@ -195,24 +210,38 @@ class BufferedStorage:
             self.dropped += lost
             del self._memory[self._memory_rows :]
 
-    def _replay_spill(self) -> None:
-        """Send what the buffer file holds, then remove it.
+    def _replay_spill(self, limit: int) -> int:
+        """Send up to `limit` lines of the buffer file, from where the last call stopped,
+        and remove the file once all of it is sent; return how many lines were taken.
 
         A file that cannot be read keeps its rows for the next start; one that cannot be
         removed (a filesystem gone read-only) is remembered as sent up to where it ends.
         """
+        taken = 0
         try:
             with self._spill.open("rb") as spill:
+                self._forget_position_in_another_file(spill)
                 spill.seek(self._replayed)
-                while lines := list(islice(spill, _BATCH_ROWS)):
-                    # A line cut short by a crash is skipped rather than blocking the rest.
-                    self._send([row for row in map(_decode, lines) if row is not None])
-                self._replayed = spill.tell()
+                lines = list(islice(spill, limit))
+                taken = len(lines)
+                # A line cut short by a crash is skipped rather than blocking the rest.
+                self._send([row for row in map(_decode, lines) if row is not None])
+                self._replayed, self._replayed_file = spill.tell(), _identity(spill)
+                if spill.read(1):
+                    self._spilled = max(self._spilled - taken, 1)  # more for a later call
+                    return taken
             self._spill.unlink()
             self._replayed = 0
         except OSError as error:
             _LOGGER.error("Buffer file %s could not be read and removed: %s", self._spill, error)
         self._spilled = 0
+        return taken
+
+    def _forget_position_in_another_file(self, spill: BinaryIO) -> None:
+        """A file emptied or replaced behind the collector (an operator making room) is not
+        the file that was sent: how far that one was sent says nothing about this one."""
+        if _identity(spill) != self._replayed_file or _size(spill) < self._replayed:
+            self._replayed = 0
 
 
 def _count_lines(path: Path) -> int:
@@ -221,6 +250,15 @@ def _count_lines(path: Path) -> int:
             return sum(1 for _ in spill)
     except OSError:
         return 0
+
+
+def _identity(spill: BinaryIO) -> tuple[int, int]:
+    status = os.fstat(spill.fileno())
+    return status.st_dev, status.st_ino
+
+
+def _size(spill: BinaryIO) -> int:
+    return os.fstat(spill.fileno()).st_size
 
 
 def _end_torn_line(spill: BinaryIO) -> int:
