@@ -88,6 +88,48 @@
           }
         }
       }
+    },
+    {
+      "id": 3,
+      "type": "randax-navimowmap-panel",
+      "title": "Time as x",
+      "gridPos": {
+        "h": 14,
+        "w": 12,
+        "x": 0,
+        "y": 14
+      },
+      "datasource": {
+        "type": "testdata",
+        "uid": "trlxrdZVk"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "testdata",
+            "uid": "trlxrdZVk"
+          },
+          "scenarioId": "csv_content",
+          "csvContent": "time,postureX,postureY,postureTheta\n1789997681027,-0.243,-0.343,1.039\n1789997876937,-0.588,-0.841,1.015\n1789997878935,-0.736,-1.035,0.714"
+        }
+      ],
+      "options": {
+        "baseMap": {
+          "preset": "kartverket-topo"
+        },
+        "lawn": {
+          "dockOrigin": {
+            "lat": 59.964,
+            "lon": 10.672,
+            "rotation": 20
+          }
+        },
+        "trailColumns": {
+          "x": "time",
+          "y": "postureY"
+        }
+      }
     }
   ]
 }

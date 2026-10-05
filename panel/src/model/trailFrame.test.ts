@@ -196,6 +196,16 @@ describe('readTrails', () => {
     expect(trail.segments).toEqual([[{ time: T, x: 1, y: 1 }]]);
   });
 
+  test('a position more than 10 km from the dock is left out, and the line breaks where it was', () => {
+    const result = trails([frame({ time: at(0, SEC, 2 * SEC, 3 * SEC), x: [1, 2, 9000, 4], y: [0, 0, 9000, 0] })]);
+    expect(xs(result)).toEqual([[undefined, [[1, 2], [4]]]]);
+  });
+
+  test('a position 10 km from the dock is still a position', () => {
+    const result = trails([frame({ time: at(0, SEC), x: [6000, -10_000], y: [8000, 0] })]);
+    expect(xs(result)).toEqual([[undefined, [[6000, -10_000]]]]);
+  });
+
   test.each([
     ['no data at all', []],
     ['a query that returned no rows', [frame({ time: [], x: [], y: [] })]],
@@ -212,6 +222,14 @@ describe('readTrails', () => {
   ])('a "%s" column with nothing readable says so, with an example', (column, columns, example) => {
     expect(readTrails([frame(columns)])).toEqual({
       problem: expect.stringContaining(`"${column}" column has no value the Trail can read, such as "${example}"`),
+    });
+  });
+
+  test('x set to the time column, so epoch milliseconds are read as metres, names both columns and the distance', () => {
+    expect(readTrails([frame({ time: at(0, SEC), y: [1, 2] })], { x: 'time' })).toEqual({
+      problem:
+        'The "time" and "y" columns put every position more than 10 km from the dock, the first 1,789,986,187 km away. ' +
+        'Positions must be metres from the dock: check which columns are set under Trail columns in the panel options.',
     });
   });
 

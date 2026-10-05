@@ -243,6 +243,14 @@ test('a frame without the Trail columns names the missing ones instead of drawin
   await expect(panel.getByTestId('navimow-map-message')).toContainText('No "x" and "y" columns');
 });
 
+test('positions read from the wrong column are named, instead of the map failing on them', async ({ openTrail }) => {
+  // X is set to the time column, so epoch milliseconds are read as metres: a latitude no map can hold.
+  const panel = await openTrail('Time as x');
+  await expect(panel.getByTestId('navimow-map-message')).toContainText(
+    'The "time" and "postureY" columns put every position more than 10 km from the dock'
+  );
+});
+
 test('each panel releases its map when it unmounts', async ({
   gotoDashboardPage,
   readProvisionedDashboard,
