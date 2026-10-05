@@ -643,10 +643,11 @@ test('hovering a Trail tells its time, Job and Zone, and hovering a Zone its nam
   const panel = await openInteraction('Two Jobs');
   await expectDrawn(panel);
   await expect(panel.getByTestId('navimow-map')).toHaveAttribute('data-trails-drawn', '2');
+  // Sought on the page: Grafana draws tooltips outside the panel, so that the panel cannot clip them.
   const tooltip = page.getByTestId('navimow-map-tooltip');
   await expect(tooltip).toHaveCount(0);
 
-  // Job a passes through the dock half a minute into its run, in the Zone traced as Front lawn.
+  // Job a passes through the dock half a minute after it began, in the Zone traced as Front lawn.
   await pointAt(panel, 0, 0);
   await expect(tooltip).toContainText(/^\d{4}-\d\d-\d\d \d\d:20:30/);
   await expect(tooltip).toContainText(/Job\s*job-a/);
@@ -745,9 +746,12 @@ test('the controls zoom, turn north up and fit the view to the Trail again', asy
 });
 
 test('the view is the owner’s until following is switched on, which puts the mower in the middle', async ({
-  openInteraction,
+  gotoDashboardPage,
+  interactionDashboard,
+  page,
 }) => {
-  const panel = await openInteraction('Two Jobs');
+  const dashboardPage = await gotoDashboardPage(interactionDashboard);
+  const panel = dashboardPage.getPanelByTitle('Two Jobs').locator;
   await expectDrawn(panel);
   const follow = control(panel, 'Follow the mower');
   await expect(follow).toHaveAttribute('aria-pressed', 'false');
@@ -764,6 +768,20 @@ test('the view is the owner’s until following is switched on, which puts the m
   expect(following.center[1]).toBeCloseTo(DOCK.lat - 20 / METRES_PER_DEGREE.lat, 5);
   // The zoom stays the owner's.
   expect(following.zoom).toBeCloseTo(framed.zoom, 3);
+
+  // A look around lasts until the next refresh, which puts the mower back in the middle though it has not moved.
+  const map = panel.getByTestId('navimow-map');
+  const box = (await map.boundingBox())!;
+  await map.hover({ position: { x: box.width / 2, y: box.height / 2 } });
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width / 2 + 60, box.y + box.height / 2 + 100, { steps: 10 });
+  await page.mouse.up();
+  await cameraAtRest(panel, (camera) => camera.center[1] > following.center[1] + 0.0001);
+  await dashboardPage.refreshDashboard();
+  expectSamePlace(
+    await cameraAtRest(panel, (camera) => Math.abs(camera.center[1] - following.center[1]) < 1e-6),
+    following
+  );
 });
 
 test('a panel set to follow the mower starts with it in the middle', async ({ openInteraction }) => {
@@ -782,7 +800,8 @@ test('the Trail and the Boundary can be hidden from the panel, and shown again',
   await expectDrawn(panel);
   await expect(map).toHaveAttribute('data-trails-drawn', '2');
 
-  const layers = control(panel, 'Show or hide layers');
+  const layers = control(panel, 'Show or hide');
+  // Sought on the page: the list opens outside the panel, as every Grafana popover does.
   const trail = page.getByRole('checkbox', { name: 'Trail' });
   const boundary = page.getByRole('checkbox', { name: 'Boundary' });
   await layers.click();

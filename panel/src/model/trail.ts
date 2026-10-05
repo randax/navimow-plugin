@@ -120,6 +120,7 @@ export function placeTrails(trails: Trail[], origin: DockOrigin): TrailScene {
 export const mowerAt = (last: LastPosition, now: number): MowerMarker => ({ ...last, ...recency(last.time, now) });
 
 const NAMES = new Intl.ListFormat('en-GB', { type: 'conjunction' });
+const quoted = (names: string[]) => NAMES.format(names.map((name) => `"${name}"`));
 
 /**
  * One panel shows one mower's lawn, placed by one Dock origin. Positions from a second mower would
@@ -131,7 +132,7 @@ function mowerWarning(trails: Trail[]): string | undefined {
   );
   return mowers.length < 2
     ? undefined
-    : `Positions from ${mowers.length} mowers, ${NAMES.format(mowers.map((m) => `"${m}"`))}, are drawn here as one lawn. ` +
+    : `Positions from ${mowers.length} mowers, ${quoted(mowers)}, are drawn here as one lawn. ` +
         'Give each mower a panel of its own, and narrow this query to one mower.';
 }
 
@@ -154,9 +155,16 @@ export function trailScene(
   if ('problem' in resolved) {
     return resolved;
   }
-  const warning = mowerWarning(read.trails);
   // Narrowing leaves out everything else, the positions outside any Job included.
   const drawn =
     jobs.length === 0 ? read.trails : read.trails.filter((t) => t.job !== undefined && jobs.includes(t.job));
+  // The mowers are counted before narrowing: a query that returns two is wrong whichever Job is
+  // on show. A map narrowed to nothing would otherwise look like a range the mower never worked in.
+  const warning =
+    mowerWarning(read.trails) ??
+    (drawn.length === 0
+      ? `No positions for Job${jobs.length > 1 ? 's' : ''} ${quoted(jobs)} in this time range. ` +
+        'Set the Job variable to another Job, or to All.'
+      : undefined);
   return { scene: placeTrails(drawn, resolved.origin), ...(warning && { warning }) };
 }

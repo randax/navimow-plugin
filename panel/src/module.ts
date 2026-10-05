@@ -65,8 +65,30 @@ const addCustomSlot = (
     });
 };
 
-// Option editors for each Trail column, in the order the options pane shows them.
-const TRAIL_COLUMN_EDITORS: Array<{ key: keyof TrailColumns; name: string; description: string }> = [
+/** A text input per column of a query, in the order the options pane shows them. */
+type ColumnEditors<T> = Array<{ key: keyof T & string; name: string; description: string }>;
+
+// Blank means the default name, shown as the placeholder, so a database that names things the
+// collector's way needs no settings at all.
+const addColumnEditors = <T extends Record<keyof T, string>>(
+  builder: PanelOptionsEditorBuilder<MapPanelOptions>,
+  path: 'trailColumns' | 'zoneProgressColumns',
+  category: string,
+  editors: ColumnEditors<T>,
+  defaults: T
+) => {
+  for (const { key, name, description } of editors) {
+    builder.addTextInput({
+      path: `${path}.${key}`,
+      name,
+      description,
+      category: [category],
+      settings: { placeholder: defaults[key] },
+    });
+  }
+};
+
+const TRAIL_COLUMN_EDITORS: ColumnEditors<TrailColumns> = [
   { key: 'time', name: 'Time', description: 'When each position was recorded.' },
   { key: 'x', name: 'X', description: "Metres from the dock along the mower's x-axis." },
   { key: 'y', name: 'Y', description: "Metres from the dock along the mower's y-axis." },
@@ -100,8 +122,8 @@ const TRAIL_COLUMN_EDITORS: Array<{ key: keyof TrailColumns; name: string; descr
   },
 ];
 
-// And for each column of the optional Zone progress query.
-const ZONE_PROGRESS_COLUMN_EDITORS: Array<{ key: keyof ZoneProgressColumns; name: string; description: string }> = [
+// The optional Zone progress query.
+const ZONE_PROGRESS_COLUMN_EDITORS: ColumnEditors<ZoneProgressColumns> = [
   { key: 'zone', name: 'Zone', description: 'The identifier of the Zone, as given to it when it was traced.' },
   { key: 'progress', name: 'Progress', description: 'How far through the Zone the mower is, from 0 to 100.' },
   {
@@ -235,26 +257,14 @@ export const plugin = new PanelPlugin<MapPanelOptions>(MapPanel)
       category: lawn,
       defaultValue: 0,
     });
-  // Blank means the default name, shown as the placeholder, so a database that names things the
-  // collector's way needs no settings at all.
-  for (const { key, name, description } of TRAIL_COLUMN_EDITORS) {
-    builder.addTextInput({
-      path: `trailColumns.${key}`,
-      name,
-      description,
-      category: ['Trail columns'],
-      settings: { placeholder: DEFAULT_TRAIL_COLUMNS[key] },
-    });
-  }
-  for (const { key, name, description } of ZONE_PROGRESS_COLUMN_EDITORS) {
-    builder.addTextInput({
-      path: `zoneProgressColumns.${key}`,
-      name,
-      description,
-      category: ['Zone progress columns'],
-      settings: { placeholder: DEFAULT_ZONE_PROGRESS_COLUMNS[key] },
-    });
-  }
+  addColumnEditors(builder, 'trailColumns', 'Trail columns', TRAIL_COLUMN_EDITORS, DEFAULT_TRAIL_COLUMNS);
+  addColumnEditors(
+    builder,
+    'zoneProgressColumns',
+    'Zone progress columns',
+    ZONE_PROGRESS_COLUMN_EDITORS,
+    DEFAULT_ZONE_PROGRESS_COLUMNS
+  );
   builder
     .addSelect({
       path: 'jobVariable',
