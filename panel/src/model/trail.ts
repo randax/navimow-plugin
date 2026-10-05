@@ -3,7 +3,7 @@ import type { FeatureCollection, MultiLineString } from 'geojson';
 import { headingBearing, resolveDockOrigin, toLonLat, type DockOrigin, type DockOriginOptions } from './dockOrigin';
 import { recency, type Recency } from './recency';
 import { readTrails, type Trail, type TrailColumns } from './trailFrame';
-import { quoted } from './words';
+import { quoted } from './messages';
 
 // Strong hues that stand apart from each other and from the greens, whites and water blues of a
 // topographic Base map.

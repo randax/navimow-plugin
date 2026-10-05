@@ -69,9 +69,10 @@ The buttons at the top right of the map steer the view. None of them changes wha
 - **Zoom in** and **Zoom out**.
 - **Turn north up**: the needle shows where north is, and a click turns the map back to it.
 - **Fit to Trail**: brings the whole Trail back into view after panning or zooming away.
-- **Follow the mower**: keeps the mower in the middle of the map as it moves, and leaves the zoom to
-  you. It is off unless **Follow the mower** under **Map view** in the panel options starts it on,
-  as for a wall display, so a refresh never moves a map you are panning around.
+- **Follow the mower**: puts the mower back in the middle of the map on every refresh, and leaves
+  the zoom to you. It is off unless **Follow the mower** under **Map view** in the panel options
+  starts it on, as for a wall display, so a refresh does not take a map you are panning around back
+  to the mower. It needs a mower on the map to follow.
 - **Show or hide**: the Trail and the Boundary, each on its own.
 
 Use the dashboard's time picker to look at another period; the panel has no time control of its own.
@@ -82,6 +83,10 @@ The mower reports metres from its dock, not coordinates, so the panel needs to k
 is. Under **Dock origin and Boundary**, enter the dock's latitude and longitude, and the rotation:
 the compass bearing of the mower's x-axis, in degrees clockwise from north. Adjust the rotation
 until the Trail lies on the lawn.
+
+**Calibrate on the map** opens the same values on a map of their own: drag the dock into place,
+turn the Trail onto the lawn, and trace the lawn's outline and its Zones as the Boundary. The fields
+and the map edit one saved value, so either can be used at any time.
 
 ## Base map
 

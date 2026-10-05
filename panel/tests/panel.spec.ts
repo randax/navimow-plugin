@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import type { Locator, Page } from '@playwright/test';
 import { test as base, expect } from '@grafana/plugin-e2e';
@@ -299,6 +300,15 @@ test('a panel saved by an earlier version keeps its whole Dock origin when one v
   trailDashboard,
   page,
 }) => {
+  // Under any other version Grafana would migrate the panel as it loads, and this would prove nothing.
+  const saved: { panels: Array<{ id: number; pluginVersion?: string }> } = JSON.parse(
+    readFileSync(path.join(__dirname, '../provisioning/dashboards/navimow-trail.json'), 'utf8')
+  );
+  const { version } = JSON.parse(readFileSync(path.join(__dirname, '../package.json'), 'utf8'));
+  expect(saved.panels.find((p) => p.id === 4)?.pluginVersion, 'saved under the version the plugin is built as').toBe(
+    version
+  );
+
   const current = await gotoPanelEditPage({ dashboard: trailDashboard, id: '1' });
   await expectDrawn(current.panel.locator);
   const placed = await cameraOf(current.panel.locator);
@@ -322,6 +332,12 @@ test('a panel saved by an earlier version keeps its whole Dock origin when one v
   await expect(panel.getByTestId('navimow-map')).toHaveAttribute('data-trails-drawn', '1');
   await expect(options.getNumberInput('Longitude')).toHaveValue('10.672');
   await expect(options.getNumberInput('Rotation')).toHaveValue('20');
+
+  // Half a number left behind, here the minus of a longitude never finished, is not a value taken out.
+  await options.getNumberInput('Longitude').press('ControlOrMeta+a');
+  await page.keyboard.type('-');
+  await page.keyboard.press('Tab');
+  await expect(options.getNumberInput('Longitude')).toHaveValue('10.672');
 
   // A value taken out stays out, though the place the panel was saved in still holds it.
   await options.getNumberInput('Rotation').fill('');

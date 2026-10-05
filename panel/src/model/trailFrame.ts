@@ -1,7 +1,7 @@
 import type { DataFrame } from '@grafana/data';
 import { columnNames, toNumber, toText, toTime } from './columns';
 import { STALE_AFTER_MS } from './recency';
-import { quoted } from './words';
+import { quoted } from './messages';
 
 /** Which column holds each value. Defaults follow the collector's schema. */
 export interface TrailColumns {

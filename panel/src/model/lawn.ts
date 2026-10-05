@@ -28,6 +28,9 @@ export interface Lawn {
 /** The text an owner sees, copies and pastes: the option exactly as the panel will save it. */
 export const lawnText = (lawn: Lawn): string => JSON.stringify(lawn, null, 2);
 
+// Everything a Dock origin holds: what pasted text is read for, and what a save spells out.
+const DOCK_ORIGIN_KEYS = ['lat', 'lon', 'rotation'] as const satisfies ReadonlyArray<keyof DockOrigin>;
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
@@ -87,7 +90,7 @@ const dockOrigin = (value: unknown): DockOriginOptions => {
     return refuse('dockOrigin', 'an object with lat, lon and rotation');
   }
   const origin: DockOriginOptions = {};
-  for (const key of ['lat', 'lon', 'rotation'] as const) {
+  for (const key of DOCK_ORIGIN_KEYS) {
     const number = optionalFinite(value[key], `dockOrigin.${key}`);
     if (number !== undefined) {
       origin[key] = number;
@@ -231,7 +234,7 @@ export function withDockOrigin(lawn: Lawn | undefined, key: keyof DockOrigin, va
  */
 export function spelledOut({ dockOrigin, boundary }: Lawn): Lawn {
   return {
-    dockOrigin: { lat: dockOrigin?.lat, lon: dockOrigin?.lon, rotation: dockOrigin?.rotation },
+    dockOrigin: Object.fromEntries(DOCK_ORIGIN_KEYS.map((key) => [key, dockOrigin?.[key]])),
     boundary: boundary && { outline: boundary.outline, zones: boundary.zones },
   };
 }
