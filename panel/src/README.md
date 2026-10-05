@@ -23,6 +23,10 @@ options. A missing optional column means less is drawn. Without a Job column, ea
 one Trail; with a Mower column, each mower's Jobs are kept apart. A silence of more than 15 minutes,
 or a row without a position, is drawn as a gap rather than a straight line.
 
+A position more than 10 km from the dock is left out, as no lawn reaches that far. If every position
+is that far away, the X and Y columns hold something other than metres from the dock, and the panel
+names them instead of drawing.
+
 The mower is drawn at its last position, as an arrow when the heading is known. A position older
 than 15 minutes is faded and labelled with its age, such as "Last seen 3 h ago".
 

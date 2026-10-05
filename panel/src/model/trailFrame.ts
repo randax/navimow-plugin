@@ -51,6 +51,10 @@ const REQUIRED = ['time', 'x', 'y'] as const;
 // and the same span after which a position counts as stale.
 const GAP_MS = STALE_AFTER_MS;
 
+// No lawn reaches this far from its dock. Metres read from the wrong column do: a time column read as
+// x puts the mower beyond the Moon, at a latitude no map can hold.
+const MAX_METRES_FROM_DOCK = 10_000;
+
 const toNumber = (v: unknown): number =>
   typeof v === 'number' ? v : typeof v === 'string' && v.trim() !== '' ? Number(v) : NaN;
 
@@ -126,9 +130,12 @@ export function readTrails(
         status: toText(status?.[row]),
         mower: toText(mower?.[row]),
       };
+      const metres = Math.hypot(point.x, point.y);
       return {
         time: point.time,
-        point: Number.isFinite(point.x) && Number.isFinite(point.y) ? point : undefined,
+        // NaN is no distance at all, so an unreadable position fails this too.
+        point: metres <= MAX_METRES_FROM_DOCK ? point : undefined,
+        metres,
         jobId,
         outsideJob: job !== undefined && jobId === undefined,
         // A Job column says which Trail a row belongs to, whichever frame it came in: Grafana splits
@@ -176,6 +183,17 @@ export function readTrails(
               : 'Positions must be numbers of metres, written with a decimal point.'),
         };
       }
+    }
+    // Readable, but nowhere near: the columns hold something other than metres from the dock.
+    const far = rows.find((r) => r.metres > MAX_METRES_FROM_DOCK);
+    if (far) {
+      return {
+        problem:
+          `The ${quoted([names.x, names.y])} columns put every position more than ` +
+          `${MAX_METRES_FROM_DOCK / 1000} km from the dock, the first ` +
+          `${Math.round(far.metres / 1000).toLocaleString('en-US')} km away. Positions must be metres ` +
+          'from the dock: check which columns are set under Trail columns in the panel options.',
+      };
     }
   }
   return { trails: [...trails.values()].sort((a, b) => a.segments[0][0].time - b.segments[0][0].time) };
