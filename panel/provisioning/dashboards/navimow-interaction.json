@@ -1,0 +1,242 @@
+{
+  "uid": "navimow-interaction",
+  "title": "Navimow interaction",
+  "editable": true,
+  "schemaVersion": 41,
+  "time": {
+    "from": "2026-09-21T10:00:00.000Z",
+    "to": "2026-09-21T12:00:00.000Z"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "job",
+        "label": "Job",
+        "type": "custom",
+        "query": "job-a,job-b",
+        "options": [
+          {
+            "text": "All",
+            "value": "$__all",
+            "selected": true
+          },
+          {
+            "text": "job-a",
+            "value": "job-a",
+            "selected": false
+          },
+          {
+            "text": "job-b",
+            "value": "job-b",
+            "selected": false
+          }
+        ],
+        "current": {
+          "text": "All",
+          "value": "$__all",
+          "selected": true
+        },
+        "includeAll": true,
+        "multi": false
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "randax-navimowmap-panel",
+      "title": "Two Jobs",
+      "gridPos": {
+        "h": 14,
+        "w": 8,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "testdata",
+        "uid": "trlxrdZVk"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "testdata",
+            "uid": "trlxrdZVk"
+          },
+          "scenarioId": "csv_content",
+          "csvContent": "time,x,y,theta,job_id,zone,status,device_id\n1789986000000,-15,0,0,job-a,1,isRunning,mower-1\n1789986002000,-14,0,0,job-a,1,isRunning,mower-1\n1789986004000,-13,0,0,job-a,1,isRunning,mower-1\n1789986006000,-12,0,0,job-a,1,isRunning,mower-1\n1789986008000,-11,0,0,job-a,1,isRunning,mower-1\n1789986010000,-10,0,0,job-a,1,isRunning,mower-1\n1789986012000,-9,0,0,job-a,1,isRunning,mower-1\n1789986014000,-8,0,0,job-a,1,isRunning,mower-1\n1789986016000,-7,0,0,job-a,1,isRunning,mower-1\n1789986018000,-6,0,0,job-a,1,isRunning,mower-1\n1789986020000,-5,0,0,job-a,1,isRunning,mower-1\n1789986022000,-4,0,0,job-a,1,isRunning,mower-1\n1789986024000,-3,0,0,job-a,1,isRunning,mower-1\n1789986026000,-2,0,0,job-a,1,isRunning,mower-1\n1789986028000,-1,0,0,job-a,1,isRunning,mower-1\n1789986030000,0,0,0,job-a,1,isRunning,mower-1\n1789986032000,1,0,0,job-a,1,isRunning,mower-1\n1789986034000,2,0,0,job-a,1,isRunning,mower-1\n1789986036000,3,0,0,job-a,1,isRunning,mower-1\n1789986038000,4,0,0,job-a,1,isRunning,mower-1\n1789986040000,5,0,0,job-a,1,isRunning,mower-1\n1789986042000,6,0,0,job-a,1,isRunning,mower-1\n1789986044000,7,0,0,job-a,1,isRunning,mower-1\n1789986046000,8,0,0,job-a,1,isRunning,mower-1\n1789986048000,9,0,0,job-a,1,isRunning,mower-1\n1789986050000,10,0,0,job-a,1,isRunning,mower-1\n1789986052000,11,0,0,job-a,1,isRunning,mower-1\n1789986054000,12,0,0,job-a,1,isRunning,mower-1\n1789986056000,13,0,0,job-a,1,isRunning,mower-1\n1789986058000,14,0,0,job-a,1,isRunning,mower-1\n1789986060000,15,0,0,job-a,1,isRunning,mower-1\n1789986600000,-20,15,0,job-b,2,isRunning,mower-1\n1789986602000,-19,15,0,job-b,2,isRunning,mower-1\n1789986604000,-18,15,0,job-b,2,isRunning,mower-1\n1789986606000,-17,15,0,job-b,2,isRunning,mower-1\n1789986608000,-16,15,0,job-b,2,isRunning,mower-1\n1789986610000,-15,15,0,job-b,2,isRunning,mower-1\n1789986612000,-14,15,0,job-b,2,isRunning,mower-1\n1789986614000,-13,15,0,job-b,2,isRunning,mower-1\n1789986616000,-12,15,0,job-b,2,isRunning,mower-1\n1789986618000,-11,15,0,job-b,2,isRunning,mower-1\n1789986620000,-10,15,0,job-b,2,isRunning,mower-1\n1789986622000,-9,15,0,job-b,2,isRunning,mower-1\n1789986624000,-8,15,0,job-b,2,isRunning,mower-1\n1789986626000,-7,15,0,job-b,2,isRunning,mower-1\n1789986628000,-6,15,0,job-b,2,isRunning,mower-1\n1789986630000,-5,15,0,job-b,2,isRunning,mower-1\n1789986632000,-4,15,0,job-b,2,isRunning,mower-1\n1789986634000,-3,15,0,job-b,2,isRunning,mower-1\n1789986636000,-2,15,0,job-b,2,isRunning,mower-1\n1789986638000,-1,15,0,job-b,2,isRunning,mower-1\n1789986640000,0,15,0,job-b,2,isRunning,mower-1\n1789986642000,1,15,0,job-b,2,isRunning,mower-1\n1789986644000,2,15,0,job-b,2,isRunning,mower-1\n1789986646000,3,15,0,job-b,2,isRunning,mower-1\n1789986648000,4,15,0,job-b,2,isRunning,mower-1\n1789986650000,5,15,0,job-b,2,isRunning,mower-1\n1789986652000,6,15,0,job-b,2,isRunning,mower-1\n1789986654000,7,15,0,job-b,2,isRunning,mower-1\n1789986656000,8,15,0,job-b,2,isRunning,mower-1\n1789986658000,9,15,0,job-b,2,isRunning,mower-1\n1789986660000,10,15,0,job-b,2,isRunning,mower-1\n1789986662000,11,15,0,job-b,2,isRunning,mower-1\n1789986664000,12,15,0,job-b,2,isRunning,mower-1\n1789986666000,13,15,0,job-b,2,isRunning,mower-1\n1789986668000,14,15,0,job-b,2,isRunning,mower-1\n1789986670000,15,15,0,job-b,2,isRunning,mower-1\n1789986672000,16,15,0,job-b,2,isRunning,mower-1\n1789986674000,17,15,0,job-b,2,isRunning,mower-1\n1789986676000,18,15,0,job-b,2,isRunning,mower-1\n1789986678000,19,15,0,job-b,2,isRunning,mower-1\n1789986680000,20,15,0,job-b,2,isRunning,mower-1\n1789986682000,20,14,0,job-b,2,isRunning,mower-1\n1789986684000,20,13,0,job-b,2,isRunning,mower-1\n1789986686000,20,12,0,job-b,2,isRunning,mower-1\n1789986688000,20,11,0,job-b,2,isRunning,mower-1\n1789986690000,20,10,0,job-b,2,isRunning,mower-1\n1789986692000,20,9,0,job-b,2,isRunning,mower-1\n1789986694000,20,8,0,job-b,2,isRunning,mower-1\n1789986696000,20,7,0,job-b,2,isRunning,mower-1\n1789986698000,20,6,0,job-b,2,isRunning,mower-1\n1789986700000,20,5,0,job-b,2,isRunning,mower-1\n1789986702000,20,4,0,job-b,2,isRunning,mower-1\n1789986704000,20,3,0,job-b,2,isRunning,mower-1\n1789986706000,20,2,0,job-b,2,isRunning,mower-1\n1789986708000,20,1,0,job-b,2,isRunning,mower-1\n1789986710000,20,0,0,job-b,2,isRunning,mower-1\n1789986712000,20,-1,0,job-b,2,isRunning,mower-1\n1789986714000,20,-2,0,job-b,2,isRunning,mower-1\n1789986716000,20,-3,0,job-b,2,isRunning,mower-1\n1789986718000,20,-4,0,job-b,2,isRunning,mower-1\n1789986720000,20,-5,0,job-b,2,isRunning,mower-1\n1789986722000,20,-6,0,job-b,2,isRunning,mower-1\n1789986724000,20,-7,0,job-b,2,isRunning,mower-1\n1789986726000,20,-8,0,job-b,2,isRunning,mower-1\n1789986728000,20,-9,0,job-b,2,isRunning,mower-1\n1789986730000,20,-10,0,job-b,2,isRunning,mower-1\n1789986732000,20,-11,0,job-b,2,isRunning,mower-1\n1789986734000,20,-12,0,job-b,2,isRunning,mower-1\n1789986736000,20,-13,0,job-b,2,isRunning,mower-1\n1789986738000,20,-14,0,job-b,2,isRunning,mower-1\n1789986740000,20,-15,0,job-b,2,isRunning,mower-1\n1789986742000,19,-15,0,job-b,2,isRunning,mower-1\n1789986744000,18,-15,0,job-b,2,isRunning,mower-1\n1789986746000,17,-15,0,job-b,2,isRunning,mower-1\n1789986748000,16,-15,0,job-b,2,isRunning,mower-1\n1789986750000,15,-15,0,job-b,2,isRunning,mower-1\n1789986752000,14,-15,0,job-b,2,isRunning,mower-1\n1789986754000,13,-15,0,job-b,2,isRunning,mower-1\n1789986756000,12,-15,0,job-b,2,isRunning,mower-1\n1789986758000,11,-15,0,job-b,2,isRunning,mower-1\n1789986760000,10,-15,0,job-b,2,isRunning,mower-1\n1789986762000,9,-15,0,job-b,2,isRunning,mower-1\n1789986764000,8,-15,0,job-b,2,isRunning,mower-1\n1789986766000,7,-15,0,job-b,2,isRunning,mower-1\n1789986768000,6,-15,0,job-b,2,isRunning,mower-1\n1789986770000,5,-15,0,job-b,2,isRunning,mower-1\n1789986772000,4,-15,0,job-b,2,isRunning,mower-1\n1789986774000,3,-15,0,job-b,2,isRunning,mower-1\n1789986776000,2,-15,0,job-b,2,isRunning,mower-1\n1789986778000,1,-15,0,job-b,2,isRunning,mower-1\n1789986780000,0,-15,0,job-b,2,isRunning,mower-1\n1789986782000,-1,-15,0,job-b,2,isRunning,mower-1\n1789986784000,-2,-15,0,job-b,2,isRunning,mower-1\n1789986786000,-3,-15,0,job-b,2,isRunning,mower-1\n1789986788000,-4,-15,0,job-b,2,isRunning,mower-1\n1789986790000,-5,-15,0,job-b,2,isRunning,mower-1\n1789986792000,-6,-15,0,job-b,2,isRunning,mower-1\n1789986794000,-7,-15,0,job-b,2,isRunning,mower-1\n1789986796000,-8,-15,0,job-b,2,isRunning,mower-1\n1789986798000,-9,-15,0,job-b,2,isRunning,mower-1\n1789986800000,-10,-15,0,job-b,2,isRunning,mower-1\n1789986802000,-11,-15,0,job-b,2,isRunning,mower-1\n1789986804000,-12,-15,0,job-b,2,isRunning,mower-1\n1789986806000,-13,-15,0,job-b,2,isRunning,mower-1\n1789986808000,-14,-15,0,job-b,2,isRunning,mower-1\n1789986810000,-15,-15,0,job-b,2,isRunning,mower-1\n1789986812000,-16,-15,0,job-b,2,isRunning,mower-1\n1789986814000,-17,-15,0,job-b,2,isRunning,mower-1\n1789986816000,-18,-15,0,job-b,2,isRunning,mower-1\n1789986818000,-19,-15,0,job-b,2,isRunning,mower-1\n1789986820000,-20,-15,0,job-b,2,isRunning,mower-1"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "testdata",
+            "uid": "trlxrdZVk"
+          },
+          "scenarioId": "csv_content",
+          "csvContent": "zone,progress,time\n1,40,1789986060000\n1,64,1789987200000"
+        }
+      ],
+      "options": {
+        "baseMap": {
+          "preset": "kartverket-topo"
+        },
+        "lawns": {
+          "*": {
+            "dockOrigin": {
+              "lat": 59.964,
+              "lon": 10.672,
+              "rotation": 0
+            },
+            "boundary": {
+              "outline": [
+                [
+                  10.6724475,
+                  59.9637756
+                ],
+                [
+                  10.6724475,
+                  59.9642244
+                ],
+                [
+                  10.6715525,
+                  59.9642244
+                ],
+                [
+                  10.6715525,
+                  59.9637756
+                ]
+              ],
+              "zones": [
+                {
+                  "id": "1",
+                  "name": "Front lawn",
+                  "ring": [
+                    [
+                      10.6721432,
+                      59.9637756
+                    ],
+                    [
+                      10.6721432,
+                      59.9642244
+                    ],
+                    [
+                      10.6718568,
+                      59.9642244
+                    ],
+                    [
+                      10.6718568,
+                      59.9637756
+                    ]
+                  ]
+                },
+                {
+                  "id": "2",
+                  "name": "",
+                  "ring": [
+                    [
+                      10.6718568,
+                      59.9637756
+                    ],
+                    [
+                      10.6718568,
+                      59.9642244
+                    ],
+                    [
+                      10.6715525,
+                      59.9642244
+                    ],
+                    [
+                      10.6715525,
+                      59.9637756
+                    ]
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": 2,
+      "type": "randax-navimowmap-panel",
+      "title": "Two mowers",
+      "gridPos": {
+        "h": 14,
+        "w": 8,
+        "x": 8,
+        "y": 0
+      },
+      "datasource": {
+        "type": "testdata",
+        "uid": "trlxrdZVk"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "testdata",
+            "uid": "trlxrdZVk"
+          },
+          "scenarioId": "csv_content",
+          "csvContent": "time,x,y,device_id\n1789986000000,-15,0,north\n1789986002000,-14,0,north\n1789986004000,-13,0,north\n1789986006000,-12,0,north\n1789986008000,-11,0,north\n1789986010000,-10,0,north\n1789986012000,-9,0,north\n1789986014000,-8,0,north\n1789986016000,-7,0,north\n1789986018000,-6,0,north\n1789986020000,-5,0,north\n1789986022000,-4,0,north\n1789986024000,-3,0,north\n1789986026000,-2,0,north\n1789986028000,-1,0,north\n1789986030000,0,0,north\n1789986032000,1,0,north\n1789986034000,2,0,north\n1789986036000,3,0,north\n1789986038000,4,0,north\n1789986040000,5,0,north\n1789986042000,6,0,north\n1789986044000,7,0,north\n1789986046000,8,0,north\n1789986048000,9,0,north\n1789986050000,10,0,north\n1789986052000,11,0,north\n1789986054000,12,0,north\n1789986056000,13,0,north\n1789986058000,14,0,north\n1789986060000,15,0,north\n1789986000000,-15,10,south\n1789986002000,-14,10,south\n1789986004000,-13,10,south\n1789986006000,-12,10,south\n1789986008000,-11,10,south\n1789986010000,-10,10,south\n1789986012000,-9,10,south\n1789986014000,-8,10,south\n1789986016000,-7,10,south\n1789986018000,-6,10,south\n1789986020000,-5,10,south\n1789986022000,-4,10,south\n1789986024000,-3,10,south\n1789986026000,-2,10,south\n1789986028000,-1,10,south\n1789986030000,0,10,south\n1789986032000,1,10,south\n1789986034000,2,10,south\n1789986036000,3,10,south\n1789986038000,4,10,south\n1789986040000,5,10,south\n1789986042000,6,10,south\n1789986044000,7,10,south\n1789986046000,8,10,south\n1789986048000,9,10,south\n1789986050000,10,10,south\n1789986052000,11,10,south\n1789986054000,12,10,south\n1789986056000,13,10,south\n1789986058000,14,10,south\n1789986060000,15,10,south"
+        }
+      ],
+      "options": {
+        "baseMap": {
+          "preset": "kartverket-topo"
+        },
+        "lawns": {
+          "*": {
+            "dockOrigin": {
+              "lat": 59.964,
+              "lon": 10.672,
+              "rotation": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": 3,
+      "type": "randax-navimowmap-panel",
+      "title": "Follows the mower",
+      "gridPos": {
+        "h": 14,
+        "w": 8,
+        "x": 16,
+        "y": 0
+      },
+      "datasource": {
+        "type": "testdata",
+        "uid": "trlxrdZVk"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "testdata",
+            "uid": "trlxrdZVk"
+          },
+          "scenarioId": "csv_content",
+          "csvContent": "time,x,y,theta,job_id,zone,status,device_id\n1789986000000,-15,0,0,job-a,1,isRunning,mower-1\n1789986002000,-14,0,0,job-a,1,isRunning,mower-1\n1789986004000,-13,0,0,job-a,1,isRunning,mower-1\n1789986006000,-12,0,0,job-a,1,isRunning,mower-1\n1789986008000,-11,0,0,job-a,1,isRunning,mower-1\n1789986010000,-10,0,0,job-a,1,isRunning,mower-1\n1789986012000,-9,0,0,job-a,1,isRunning,mower-1\n1789986014000,-8,0,0,job-a,1,isRunning,mower-1\n1789986016000,-7,0,0,job-a,1,isRunning,mower-1\n1789986018000,-6,0,0,job-a,1,isRunning,mower-1\n1789986020000,-5,0,0,job-a,1,isRunning,mower-1\n1789986022000,-4,0,0,job-a,1,isRunning,mower-1\n1789986024000,-3,0,0,job-a,1,isRunning,mower-1\n1789986026000,-2,0,0,job-a,1,isRunning,mower-1\n1789986028000,-1,0,0,job-a,1,isRunning,mower-1\n1789986030000,0,0,0,job-a,1,isRunning,mower-1\n1789986032000,1,0,0,job-a,1,isRunning,mower-1\n1789986034000,2,0,0,job-a,1,isRunning,mower-1\n1789986036000,3,0,0,job-a,1,isRunning,mower-1\n1789986038000,4,0,0,job-a,1,isRunning,mower-1\n1789986040000,5,0,0,job-a,1,isRunning,mower-1\n1789986042000,6,0,0,job-a,1,isRunning,mower-1\n1789986044000,7,0,0,job-a,1,isRunning,mower-1\n1789986046000,8,0,0,job-a,1,isRunning,mower-1\n1789986048000,9,0,0,job-a,1,isRunning,mower-1\n1789986050000,10,0,0,job-a,1,isRunning,mower-1\n1789986052000,11,0,0,job-a,1,isRunning,mower-1\n1789986054000,12,0,0,job-a,1,isRunning,mower-1\n1789986056000,13,0,0,job-a,1,isRunning,mower-1\n1789986058000,14,0,0,job-a,1,isRunning,mower-1\n1789986060000,15,0,0,job-a,1,isRunning,mower-1"
+        }
+      ],
+      "options": {
+        "baseMap": {
+          "preset": "kartverket-topo"
+        },
+        "lawns": {
+          "*": {
+            "dockOrigin": {
+              "lat": 59.964,
+              "lon": 10.672,
+              "rotation": 0
+            }
+          }
+        },
+        "follow": true
+      }
+    }
+  ]
+}

@@ -42,11 +42,13 @@
           "y": "postureY",
           "heading": "postureTheta"
         },
-        "lawn": {
-          "dockOrigin": {
-            "lat": 59.964,
-            "lon": 10.672,
-            "rotation": 20
+        "lawns": {
+          "*": {
+            "dockOrigin": {
+              "lat": 59.964,
+              "lon": 10.672,
+              "rotation": 20
+            }
           }
         }
       }
@@ -80,11 +82,13 @@
         "baseMap": {
           "preset": "kartverket-topo"
         },
-        "lawn": {
-          "dockOrigin": {
-            "lat": 59.964,
-            "lon": 10.672,
-            "rotation": 20
+        "lawns": {
+          "*": {
+            "dockOrigin": {
+              "lat": 59.964,
+              "lon": 10.672,
+              "rotation": 20
+            }
           }
         }
       }
@@ -118,16 +122,18 @@
         "baseMap": {
           "preset": "kartverket-topo"
         },
-        "lawn": {
-          "dockOrigin": {
-            "lat": 59.964,
-            "lon": 10.672,
-            "rotation": 20
-          }
-        },
         "trailColumns": {
           "x": "time",
           "y": "postureY"
+        },
+        "lawns": {
+          "*": {
+            "dockOrigin": {
+              "lat": 59.964,
+              "lon": 10.672,
+              "rotation": 20
+            }
+          }
         }
       }
     }

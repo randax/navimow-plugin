@@ -76,6 +76,44 @@ describe('mapStyle', () => {
     expect(style.sources.boundary).toEqual({ type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
   });
 
+  test('a Zone is filled by its progress, from a pale wash to a deep one, and faintly where none is reported', () => {
+    const fill = mapStyle({ baseMap }, lines, boundary).layers.find((l) => l.id === 'boundary-fill');
+    expect(fill?.paint).toEqual({
+      'fill-color': [
+        'case',
+        ['has', 'progress'],
+        ['interpolate', ['linear'], ['get', 'progress'], 0, '#B2DFDB', 100, '#00695C'],
+        ['match', ['get', 'kind'], 'outline', '#2E7D32', '#00897B'],
+      ],
+      'fill-opacity': ['case', ['has', 'progress'], 0.55, 0.12],
+    });
+  });
+
+  const visibility = (hidden: Parameters<typeof mapStyle>[3]) =>
+    mapStyle({ baseMap, overlay }, lines, boundary, hidden).layers.map((l) => [
+      l.id,
+      l.layout?.visibility ?? 'visible',
+    ]);
+
+  test('every layer is drawn until the owner hides one', () => {
+    expect(visibility(undefined).map(([, shown]) => shown)).toEqual(Array(5).fill('visible'));
+  });
+
+  test('a hidden Trail or Boundary stays in the style, so showing it again needs no new data, but is not drawn', () => {
+    expect(visibility(['boundary'])).toEqual([
+      ['base', 'visible'],
+      ['overlay', 'visible'],
+      ['boundary-fill', 'none'],
+      ['boundary-line', 'none'],
+      ['trail', 'visible'],
+    ]);
+    expect(visibility(['trail', 'boundary']).slice(2)).toEqual([
+      ['boundary-fill', 'none'],
+      ['boundary-line', 'none'],
+      ['trail', 'none'],
+    ]);
+  });
+
   test('the pickers are independent: any Base map combines with any Terrain and Overlay, each with its attribution', () => {
     const style = mapStyle(
       { baseMap, overlay, terrain: source(resolveTerrain({ enabled: true, preset: 'aws-terrarium' })) },

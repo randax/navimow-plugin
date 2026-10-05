@@ -50,6 +50,15 @@ export function nextFraming(scene: TrailScene, previous: Framing | undefined): F
   return { dock, box: pad(scene.localBox) };
 }
 
+/**
+ * Whether a new framing moves the view. It does, unless the view follows the mower: then the mower
+ * holds the centre and the owner the zoom, and a Trail growing out of the framed box is noted
+ * without zooming out to it. A Trail's first appearance and a moved dock are framed either way, as
+ * there is no view of them to keep.
+ */
+export const movesView = (next: Framing, previous: Framing | undefined, following: boolean): boolean =>
+  !following || previous?.dock !== next.dock;
+
 /** The framed box on the map, as longitude and latitude bounds at the Dock origin's current rotation. */
 export function framedBounds({ box: [[minX, minY], [maxX, maxY]] }: Framing, origin: DockOrigin): Box {
   const corners = [

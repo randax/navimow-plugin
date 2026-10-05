@@ -34,6 +34,8 @@ export type MowerMarker = LastPosition & Recency;
 export interface TrailScene {
   /** One feature per Trail, its parts the unbroken runs between gaps in the data. */
   lines: FeatureCollection<MultiLineString, { job: string | null; colour: string }>;
+  /** The Trails the lines were drawn from, each under the index that is its line's id. */
+  trails?: Trail[];
   mower?: LastPosition;
   /** The box around the Trail on the mower's own axes, in metres, which no rotation changes. */
   localBox?: Box;
@@ -48,6 +50,8 @@ export interface TrailOptions {
   dockOrigin?: DockOriginOptions;
   /** Blank or absent means the default column name. */
   trailColumns?: Partial<TrailColumns>;
+  /** The Jobs to draw, when the dashboard has narrowed to some; none means every Job in range. */
+  jobs?: string[];
 }
 
 // Reduced rather than spread into Math.min: a week of Trail is more points than a call takes as arguments.
@@ -93,6 +97,7 @@ export function placeTrails(trails: Trail[], origin: DockOrigin): TrailScene {
             ];
       }),
     },
+    trails,
     origin,
   };
 
@@ -114,14 +119,30 @@ export function placeTrails(trails: Trail[], origin: DockOrigin): TrailScene {
 /** The mower as shown at `now`: current, or faded with its age. */
 export const mowerAt = (last: LastPosition, now: number): MowerMarker => ({ ...last, ...recency(last.time, now) });
 
+const NAMES = new Intl.ListFormat('en-GB', { type: 'conjunction' });
+
+/**
+ * One panel shows one mower's lawn, placed by one Dock origin. Positions from a second mower would
+ * be laid over it as if they were its own, so they are drawn with a warning rather than silently.
+ */
+function mowerWarning(trails: Trail[]): string | undefined {
+  const mowers = [...new Set(trails.flatMap((t) => t.segments.flat().map((p) => p.mower)))].filter(
+    (mower) => mower !== undefined
+  );
+  return mowers.length < 2
+    ? undefined
+    : `Positions from ${mowers.length} mowers, ${NAMES.format(mowers.map((m) => `"${m}"`))}, are drawn here as one lawn. ` +
+        'Give each mower a panel of its own, and narrow this query to one mower.';
+}
+
 /**
  * The panel's whole Trail pipeline, from query frames and options to what the map draws, or to the
  * problem to show instead. With nothing to draw, a missing Dock origin is not a problem yet.
  */
 export function trailScene(
   frames: DataFrame[],
-  { trailColumns, dockOrigin }: TrailOptions
-): { scene: TrailScene } | { problem: string } {
+  { trailColumns, dockOrigin, jobs = [] }: TrailOptions
+): { scene: TrailScene; warning?: string } | { problem: string } {
   const read = readTrails(frames, trailColumns);
   if ('problem' in read) {
     return read;
@@ -130,5 +151,12 @@ export function trailScene(
     return { scene: EMPTY_SCENE };
   }
   const resolved = resolveDockOrigin(dockOrigin);
-  return 'problem' in resolved ? resolved : { scene: placeTrails(read.trails, resolved.origin) };
+  if ('problem' in resolved) {
+    return resolved;
+  }
+  const warning = mowerWarning(read.trails);
+  // Narrowing leaves out everything else, the positions outside any Job included.
+  const drawn =
+    jobs.length === 0 ? read.trails : read.trails.filter((t) => t.job !== undefined && jobs.includes(t.job));
+  return { scene: placeTrails(drawn, resolved.origin), ...(warning && { warning }) };
 }
