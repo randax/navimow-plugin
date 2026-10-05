@@ -22,8 +22,8 @@ export const CalibrationEditor: React.FC<StandardEditorProps<Lawn | undefined, u
       </Button>
       {open && (
         <CalibrationDrawer
-          // A panel saved before the Boundary existed holds its Dock origin at the root, not in `value`.
-          initial={value ?? resolveLawn({ dockOrigin: context.options?.dockOrigin }) ?? {}}
+          // A panel saved by an earlier version holds its Lawn elsewhere in the options, not in `value`.
+          initial={value ?? resolveLawn(context.options ?? {}) ?? {}}
           options={context.options}
           data={context.data}
           onSave={(lawn) => {

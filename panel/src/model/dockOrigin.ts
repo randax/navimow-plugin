@@ -33,6 +33,15 @@ export function toLonLat({ lat, lon, rotation }: DockOrigin, x: number, y: numbe
   return [lon + east / metres.lon, lat + north / metres.lat];
 }
 
+/** A place on the map as local metres from the dock: what toLonLat undoes. */
+export function toLocal({ lat, lon, rotation }: DockOrigin, placeLon: number, placeLat: number): [number, number] {
+  const b = rotation * RAD;
+  const metres = metresPerDegree(lat);
+  const east = (placeLon - lon) * metres.lon;
+  const north = (placeLat - lat) * metres.lat;
+  return [east * Math.sin(b) + north * Math.cos(b), north * Math.sin(b) - east * Math.cos(b)];
+}
+
 /** The compass bearing, in [0, 360), of a mower heading `theta` radians counter-clockwise from its x-axis. */
 export function headingBearing({ rotation }: DockOrigin, theta: number): number {
   return (((rotation - theta / RAD) % 360) + 360) % 360;

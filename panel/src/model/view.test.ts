@@ -1,5 +1,5 @@
 import type { TerrainOptions } from './terrain';
-import { cameraFor, initialView, viewState, type Camera, type View, type ViewState } from './view';
+import { cameraFor, followState, initialView, viewState, type Camera, type View, type ViewState } from './view';
 
 describe('initialView', () => {
   test('without Terrain the map is flat, whatever the saved start', () => {
@@ -57,6 +57,29 @@ describe('viewState', () => {
   test('turning Terrain off and on again starts over, even where both start flat', () => {
     expect(after(startsIn('flat'), 'terrain', { enabled: false, startIn: 'flat' }, startsIn('flat'))).toBe('flat');
     expect(after(startsIn('terrain'), 'flat', { enabled: false }, startsIn('terrain'))).toBe('terrain');
+  });
+});
+
+describe('followState', () => {
+  test('the view is the owner’s until the options or the owner say otherwise', () => {
+    expect(followState(undefined)).toEqual({ start: false, following: false });
+    expect(followState(false)).toEqual({ start: false, following: false });
+  });
+
+  test('a panel set to follow, as on a wall display, follows from the start', () => {
+    expect(followState(true)).toEqual({ start: true, following: true });
+  });
+
+  test("the owner's switch on the panel holds while the option stays as it is", () => {
+    const switchedOn = { ...followState(false), following: true };
+    expect(followState(false, switchedOn)).toBe(switchedOn);
+    expect(followState(undefined, switchedOn)).toBe(switchedOn);
+  });
+
+  test('a change of the option is followed, so editing it shows', () => {
+    const switchedOff = { ...followState(true), following: false };
+    expect(followState(false, switchedOff)).toEqual({ start: false, following: false });
+    expect(followState(true, followState(false, switchedOff))).toEqual({ start: true, following: true });
   });
 });
 

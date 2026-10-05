@@ -55,7 +55,7 @@ const GAP_MS = STALE_AFTER_MS;
 // x puts the mower beyond the Moon, at a latitude no map can hold.
 const MAX_METRES_FROM_DOCK = 10_000;
 
-const toNumber = (v: unknown): number =>
+export const toNumber = (v: unknown): number =>
   typeof v === 'number' ? v : typeof v === 'string' && v.trim() !== '' ? Number(v) : NaN;
 
 // Epoch milliseconds passed 1e11 in 1973, and epoch seconds will not reach it for three thousand years.
@@ -64,7 +64,7 @@ const toEpochMs = (n: number): number => (Math.abs(n) < 1e11 ? n * 1000 : n);
 // Grafana time fields hold epoch milliseconds; a text column may hold epoch milliseconds or seconds, or a date. A date
 // with a time of day but no zone is UTC, as Grafana reads SQL timestamps; Date.parse would take the
 // browser's zone.
-const toTime = (v: unknown): number => {
+export const toTime = (v: unknown): number => {
   if (typeof v !== 'string' || !Number.isNaN(Number(v))) {
     return toEpochMs(toNumber(v));
   }
@@ -73,7 +73,8 @@ const toTime = (v: unknown): number => {
   return Date.parse(zoneless ? `${text.replace(' ', 'T')}Z` : text);
 };
 
-const toText = (v: unknown): string | undefined => (v === null || v === undefined || v === '' ? undefined : String(v));
+export const toText = (v: unknown): string | undefined =>
+  v === null || v === undefined || v === '' ? undefined : String(v);
 
 const optionalNumber = (v: unknown): number | undefined => {
   const n = toNumber(v);
@@ -81,6 +82,19 @@ const optionalNumber = (v: unknown): number | undefined => {
 };
 
 const quoted = (names: string[]) => names.map((n) => `"${n}"`).join(' and ');
+
+/** The name of each column: the default, unless the options name another. */
+export function columnNames<T extends { [K in keyof T]: string }>(defaults: T, overrides: Partial<T> = {}): T {
+  const names = { ...defaults };
+  for (const key of Object.keys(defaults) as Array<keyof T>) {
+    // A cleared option comes back as an empty string; it means the default, not a column named "".
+    const name = overrides[key]?.trim();
+    if (name) {
+      names[key] = name as T[keyof T];
+    }
+  }
+  return names;
+}
 
 /**
  * Reads Trails from whatever frames the queries produced. Only time, x and y are required; any other
@@ -91,13 +105,7 @@ export function readTrails(
   frames: DataFrame[],
   overrides: Partial<TrailColumns> = {}
 ): { trails: Trail[] } | { problem: string } {
-  // A cleared option comes back as an empty string; it means the default, not a column named "".
-  const names = { ...DEFAULT_TRAIL_COLUMNS };
-  for (const [key, name] of Object.entries(overrides) as Array<[keyof TrailColumns, string | undefined]>) {
-    if (name?.trim()) {
-      names[key] = name.trim();
-    }
-  }
+  const names = columnNames(DEFAULT_TRAIL_COLUMNS, overrides);
   const values = (frame: DataFrame, column: keyof TrailColumns) =>
     frame.fields.find((f) => f.name === names[column])?.values;
 

@@ -26,6 +26,8 @@ const test = base.extend<{
   terrainDashboard: Dashboard;
   openTerrain: (title: string) => Promise<Locator>;
   overlayDashboard: Dashboard;
+  interactionDashboard: Dashboard;
+  openInteraction: (title: string) => Promise<Locator>;
 }>({
   // Pull requests must not depend on, or load, third-party tile services: tiles come from fixtures.
   // The nightly run sets LIVE_TILES=1 to exercise the real hosts.
@@ -85,6 +87,12 @@ const test = base.extend<{
   // and loaded beside the Terrain panels it slowed their tests towards the timeout.
   overlayDashboard: async ({ readProvisionedDashboard }, use) =>
     use(await readProvisionedDashboard({ fileName: 'navimow-overlay.json' })),
+  // A made-up lawn, laid out so that a test knows where things are: the dock in the middle of the
+  // map, Job a running north through it in Zone 1, and Job b in a U around that, 15 m to each side.
+  interactionDashboard: async ({ readProvisionedDashboard }, use) =>
+    use(await readProvisionedDashboard({ fileName: 'navimow-interaction.json' })),
+  openInteraction: async ({ gotoDashboardPage, interactionDashboard }, use) =>
+    use(async (title) => (await gotoDashboardPage(interactionDashboard)).getPanelByTitle(title).locator),
 });
 
 /** Waits for an image tile from the host; a 200 carrying an error document does not count. */
@@ -135,8 +143,9 @@ const pixelsOf = async (page: Page, panel: Locator) => {
     const context = canvas.getContext('2d')!;
     context.drawImage(image, 0, 0);
     const { data } = context.getImageData(0, 0, image.width, image.height);
-    // The colour near the top right corner as well, clear of the Trail, the mower and the controls.
-    const corner = 4 * (30 * image.width + image.width - 30);
+    // The colour near the bottom left corner as well, clear of the Trail, the mower, the controls
+    // and the attribution.
+    const corner = 4 * ((image.height - 30) * image.width + 30);
     const count = { baseMap: 0, overlay: 0, trail: 0, corner: [...data.slice(corner, corner + 3)] };
     for (let i = 0; i < data.length; i += 4) {
       const [r, g, b] = [data[i], data[i + 1], data[i + 2]];
@@ -152,6 +161,37 @@ const pixelsOf = async (page: Page, panel: Locator) => {
   }, screenshot.toString('base64'));
 };
 const NEEDS_FIXTURE_TILES = 'real tiles have no known colours or height';
+
+// The interaction dashboard's dock, and the length of a degree there.
+const DOCK = { lon: 10.672, lat: 59.964 };
+const METRES_PER_DEGREE = { lon: 55860.6, lat: 111411.7 };
+
+/**
+ * A place on the interaction dashboard's map, in metres east and north of the dock, as a position
+ * to point at. The map there looks straight down with north up, where a metre is the same number
+ * of pixels in both directions.
+ */
+const metresFromDock = async (panel: Locator, east: number, north: number) => {
+  const { center, zoom } = await cameraOf(panel);
+  const pixelsPerMetre = (512 * 2 ** zoom) / (40_075_016.686 * Math.cos((center[1] * Math.PI) / 180));
+  const box = (await panel.getByTestId('navimow-map').boundingBox())!;
+  return {
+    x: box.width / 2 + (east - (center[0] - DOCK.lon) * METRES_PER_DEGREE.lon) * pixelsPerMetre,
+    y: box.height / 2 - (north - (center[1] - DOCK.lat) * METRES_PER_DEGREE.lat) * pixelsPerMetre,
+  };
+};
+
+/** Moves the pointer onto a place on the map, as a hand would: arriving, not appearing. */
+const pointAt = async (panel: Locator, east: number, north: number) => {
+  const map = panel.getByTestId('navimow-map');
+  const { x, y } = await metresFromDock(panel, east, north);
+  await map.hover({ position: { x: x + 2, y: y + 2 } });
+  await map.hover({ position: { x, y } });
+};
+
+/** The map's control with this name. */
+const control = (panel: Locator, name: string) =>
+  panel.getByTestId('navimow-map-controls').getByRole('button', { name });
 
 test('draws the default Kartverket Base map with its attribution, uncollapsed', async ({ openMap, page }) => {
   const [panel] = await Promise.all([openMap('Kartverket topo'), tileFrom(page, 'cache.kartverket.no')]);
@@ -594,4 +634,194 @@ test('the calibration drawer saves the Dock origin and Boundary into the options
   await expect(again).toHaveCount(0);
   await expect(canvases).toHaveCount(1);
   await expect(options.getNumberInput('Latitude')).toHaveValue('59.965');
+});
+
+test('hovering a Trail tells its time, Job and Zone, and hovering a Zone its name and latest progress', async ({
+  openInteraction,
+  page,
+}) => {
+  const panel = await openInteraction('Two Jobs');
+  await expectDrawn(panel);
+  await expect(panel.getByTestId('navimow-map')).toHaveAttribute('data-trails-drawn', '2');
+  const tooltip = page.getByTestId('navimow-map-tooltip');
+  await expect(tooltip).toHaveCount(0);
+
+  // Job a passes through the dock half a minute into its run, in the Zone traced as Front lawn.
+  await pointAt(panel, 0, 0);
+  await expect(tooltip).toContainText(/^\d{4}-\d\d-\d\d \d\d:20:30/);
+  await expect(tooltip).toContainText(/Job\s*job-a/);
+  await expect(tooltip).toContainText(/Zone\s*Front lawn \(1\)/);
+  await expect(tooltip).toContainText(/Status\s*isRunning/);
+
+  // 15 m west of it runs Job b, in a Zone traced without a name.
+  await pointAt(panel, -15, 0);
+  await expect(tooltip).toContainText(/Job\s*job-b/);
+  await expect(tooltip).toContainText(/Zone\s*2/);
+
+  // Between the two, off any Trail, is the grass of Front lawn itself, last reported 64 % mown.
+  await pointAt(panel, -4, 10);
+  await expect(tooltip).toContainText('Front lawn (1)');
+  await expect(tooltip).toContainText(/Progress\s*64%/);
+  await expect(tooltip).not.toContainText('Job');
+
+  // Outside the Boundary there is nothing to tell.
+  await pointAt(panel, 30, 30);
+  await expect(tooltip).toHaveCount(0);
+});
+
+test('clicking a Trail sets the Job variable, which narrows the map to that Job until it is All again', async ({
+  gotoDashboardPage,
+  interactionDashboard,
+  page,
+}) => {
+  const dashboardPage = await gotoDashboardPage(interactionDashboard);
+  const panel = dashboardPage.getPanelByTitle('Two Jobs').locator;
+  const map = panel.getByTestId('navimow-map');
+  await expectDrawn(panel);
+  await expect(map).toHaveAttribute('data-trails-drawn', '2');
+  const framed = await cameraOf(panel);
+
+  await map.click({ position: await metresFromDock(panel, -15, 0) });
+  await expect(page).toHaveURL(/var-job=job-b/);
+  await expect(map).toHaveAttribute('data-trails-drawn', '1');
+  // Job a is no longer there to hover, and the view has not moved to show it gone.
+  await pointAt(panel, 0, 10);
+  await expect(page.getByTestId('navimow-map-tooltip')).toContainText('Front lawn (1)');
+  expectSamePlace(await cameraOf(panel), framed);
+
+  // The dashboard's own picker undoes it.
+  await dashboardPage.goto({ queryParams: new URLSearchParams({ 'var-job': '$__all' }) });
+  await expectDrawn(panel);
+  await expect(map).toHaveAttribute('data-trails-drawn', '2');
+});
+
+test('the Job variable is picked from the dashboard’s own variables', async ({
+  gotoPanelEditPage,
+  interactionDashboard,
+  selectors,
+  page,
+}) => {
+  const panelEditPage = await gotoPanelEditPage({ dashboard: interactionDashboard, id: '1' });
+  const picker = panelEditPage.getCustomOptions('Jobs').getSelect('Job variable');
+  await expect(picker).toHaveSelected('$job');
+  await picker.locator().getByRole('combobox').click();
+  await expect(panelEditPage.getByGrafanaSelector(selectors.components.Select.option)).toHaveText(['$job']);
+  await page.keyboard.press('Escape');
+});
+
+test('the controls zoom, turn north up and fit the view to the Trail again', async ({ openInteraction, page }) => {
+  const panel = await openInteraction('Two Jobs');
+  await expectDrawn(panel);
+  const framed = await cameraOf(panel);
+
+  await control(panel, 'Zoom in').click();
+  await cameraAtRest(panel, (camera) => Math.abs(camera.zoom - (framed.zoom + 1)) < 0.01);
+  await control(panel, 'Zoom out').click();
+  await cameraAtRest(panel, (camera) => Math.abs(camera.zoom - framed.zoom) < 0.01);
+  await control(panel, 'Zoom out').click();
+  await cameraAtRest(panel, (camera) => Math.abs(camera.zoom - (framed.zoom - 1)) < 0.01);
+
+  // Dragging with the right button turns the map; the compass turns it back.
+  const box = (await panel.getByTestId('navimow-map').boundingBox())!;
+  const [x, y] = [box.x + box.width / 2, box.y + box.height / 2];
+  await page.mouse.move(x, y);
+  await page.mouse.down({ button: 'right' });
+  await page.mouse.move(x + 120, y, { steps: 10 });
+  await page.mouse.up({ button: 'right' });
+  await cameraAtRest(panel, (camera) => Math.abs(camera.bearing) > 5);
+  await control(panel, 'Turn north up').click();
+  await cameraAtRest(panel, (camera) => camera.bearing === 0);
+
+  // Dragged off to one side and still zoomed out, the view is the owner's until they ask for the Trail.
+  await page.mouse.move(x, y);
+  await page.mouse.down();
+  await page.mouse.move(x + 60, y + 100, { steps: 10 });
+  await page.mouse.up();
+  const away = await cameraAtRest(panel, (camera) => Math.abs(camera.center[1] - framed.center[1]) > 0.0001);
+  expect(away.zoom).not.toBeCloseTo(framed.zoom, 1);
+  await control(panel, 'Fit to Trail').click();
+  await cameraAtRest(panel, (camera) => Math.abs(camera.zoom - framed.zoom) < 0.001);
+  expectSamePlace(await cameraOf(panel), framed);
+});
+
+test('the view is the owner’s until following is switched on, which puts the mower in the middle', async ({
+  openInteraction,
+}) => {
+  const panel = await openInteraction('Two Jobs');
+  await expectDrawn(panel);
+  const follow = control(panel, 'Follow the mower');
+  await expect(follow).toHaveAttribute('aria-pressed', 'false');
+  // Framed on the whole Trail, which is centred on the dock.
+  const framed = await cameraOf(panel);
+  expect(framed.center[0]).toBeCloseTo(DOCK.lon, 5);
+  expect(framed.center[1]).toBeCloseTo(DOCK.lat, 5);
+
+  // The mower was last at the end of Job b: 20 m south of the dock and 15 m east.
+  await follow.click();
+  await expect(follow).toHaveAttribute('aria-pressed', 'true');
+  const following = await cameraAtRest(panel, (camera) => camera.center[1] < DOCK.lat - 0.0001);
+  expect(following.center[0]).toBeCloseTo(DOCK.lon + 15 / METRES_PER_DEGREE.lon, 5);
+  expect(following.center[1]).toBeCloseTo(DOCK.lat - 20 / METRES_PER_DEGREE.lat, 5);
+  // The zoom stays the owner's.
+  expect(following.zoom).toBeCloseTo(framed.zoom, 3);
+});
+
+test('a panel set to follow the mower starts with it in the middle', async ({ openInteraction }) => {
+  const panel = await openInteraction('Follows the mower');
+  await expectDrawn(panel);
+  await expect(control(panel, 'Follow the mower')).toHaveAttribute('aria-pressed', 'true');
+  // Job a ended 15 m north of the dock.
+  const camera = await cameraAtRest(panel, (at) => at.center[1] > DOCK.lat + 0.0001);
+  expect(camera.center[0]).toBeCloseTo(DOCK.lon, 5);
+  expect(camera.center[1]).toBeCloseTo(DOCK.lat + 15 / METRES_PER_DEGREE.lat, 5);
+});
+
+test('the Trail and the Boundary can be hidden from the panel, and shown again', async ({ openInteraction, page }) => {
+  const panel = await openInteraction('Two Jobs');
+  const map = panel.getByTestId('navimow-map');
+  await expectDrawn(panel);
+  await expect(map).toHaveAttribute('data-trails-drawn', '2');
+
+  const layers = control(panel, 'Show or hide layers');
+  const trail = page.getByRole('checkbox', { name: 'Trail' });
+  const boundary = page.getByRole('checkbox', { name: 'Boundary' });
+  await layers.click();
+  await expect(trail).toBeChecked();
+  await expect(boundary).toBeChecked();
+
+  await trail.uncheck({ force: true });
+  await expect(map).toHaveAttribute('data-trails-drawn', '0');
+  // The mower is not the Trail: it stays.
+  await expect(panel.locator('[aria-label^="Mower"]')).toBeVisible();
+  await trail.check({ force: true });
+  await expect(map).toHaveAttribute('data-trails-drawn', '2');
+
+  // A hidden Boundary has no Zones to hover either.
+  await boundary.uncheck({ force: true });
+  // The list is put away before going back to the map, as a click on the map would do.
+  await page.keyboard.press('Escape');
+  await expect(trail).toHaveCount(0);
+  await expectDrawn(panel);
+  await pointAt(panel, -4, 10);
+  await expect(page.getByTestId('navimow-map-tooltip')).toHaveCount(0);
+
+  await layers.click();
+  await expect(boundary).not.toBeChecked();
+  await boundary.check({ force: true });
+  await page.keyboard.press('Escape');
+  await expect(trail).toHaveCount(0);
+  await expectDrawn(panel);
+  await pointAt(panel, -4, 12);
+  await expect(page.getByTestId('navimow-map-tooltip')).toContainText('Front lawn (1)');
+});
+
+test('positions from two mowers are drawn with a warning that names them', async ({ openInteraction }) => {
+  const panel = await openInteraction('Two mowers');
+  await expectDrawn(panel);
+  await expect(panel.getByTestId('navimow-map')).toHaveAttribute('data-trails-drawn', '2');
+  await expect(panel.getByTestId('navimow-map-warning')).toContainText('Positions from 2 mowers, "north" and "south"');
+  // A panel for one mower has nothing to warn about, and no Boundary to offer to hide.
+  const one = await openInteraction('Two Jobs');
+  await expectDrawn(one);
+  await expect(one.getByTestId('navimow-map-warning')).toHaveCount(0);
 });
