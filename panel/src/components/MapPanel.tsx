@@ -1,13 +1,19 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import type { PanelProps } from '@grafana/data';
+import { dateTimeFormat, type PanelProps } from '@grafana/data';
+import { getTemplateSrv, locationService } from '@grafana/runtime';
 import { resolveBaseMap } from '../model/baseMap';
+import { jobAt, trailDetail, zoneDetail, type DetailContext } from '../model/hover';
 import { boundaryFeatures, resolveLawn } from '../model/lawn';
 import { resolveOverlay } from '../model/overlay';
-import { resolveTerrain, type TerrainOptions } from '../model/terrain';
+import { jobVariableName, selectedJobs } from '../model/selection';
+import type { Layer } from '../model/style';
+import { resolveTerrain } from '../model/terrain';
 import { mowerAt, trailScene } from '../model/trail';
-import { viewState, type View, type ViewState } from '../model/view';
+import { followState, viewState, type FollowState, type ViewState } from '../model/view';
+import { readZoneProgress } from '../model/zoneProgress';
 import type { MapPanelOptions } from '../types';
-import { MapView } from './MapView';
+import { MapView, useByValue, type MapHit } from './MapView';
+import { MapWarning } from './MapWarning';
 import { PanelMessage } from './PanelMessage';
 import { ViewSwitch } from './ViewSwitch';
 
@@ -21,31 +27,51 @@ const useNow = (): number => {
   return now;
 };
 
-/** The view the map is in. The model decides it (viewState); this remembers it between renders. */
-const useView = (options: TerrainOptions | null | undefined): [View, (view: View) => void] => {
-  const [remembered, remember] = useState<ViewState>();
-  const state = viewState(options, remembered);
-  // Kept as soon as the options start the panel over, so that an earlier switch cannot come back.
+/**
+ * What a switch on the panel is set to. The model decides it from what it was before (`next`), and
+ * hands back the same state for as long as nothing starts the panel over; this remembers it between
+ * renders, as soon as it changes, so that an earlier switch cannot come back.
+ */
+const useSwitch = <S,>(next: (previous?: S) => S): [S, (state: S) => void] => {
+  const [remembered, remember] = useState<S>();
+  const state = next(remembered);
   if (state !== remembered) {
     remember(state);
   }
-  return [state.view, (view) => remember({ ...state, view })];
+  return [state, remember];
 };
 
-export const MapPanel: React.FC<PanelProps<MapPanelOptions>> = ({ options, data, width, height }) => {
+export const MapPanel: React.FC<PanelProps<MapPanelOptions>> = ({ options, data, width, height, timeZone }) => {
   const baseMap = useMemo(() => resolveBaseMap(options.baseMap), [options.baseMap]);
   const terrain = useMemo(() => resolveTerrain(options.terrain), [options.terrain]);
   const overlay = useMemo(() => resolveOverlay(options.overlay), [options.overlay]);
-  const [view, setView] = useView(options.terrain);
-  const { trailColumns, lawn: saved, dockOrigin: legacy } = options;
-  // Keyed on the two places the Lawn may be saved, so a fresh options object alone changes nothing.
-  const lawn = useMemo(() => resolveLawn({ lawn: saved, dockOrigin: legacy }), [saved, legacy]);
+  const [viewed, setViewed] = useSwitch<ViewState>((previous) => viewState(options.terrain, previous));
+  const { view } = viewed;
+  const [followed, setFollowed] = useSwitch<FollowState>((previous) => followState(options.follow, previous));
+  const { following } = followed;
+  const [hidden, setHidden] = useState<Layer[]>([]);
+  const { trailColumns, zoneProgressColumns, lawns, lawn: single, dockOrigin: atRoot } = options;
+  // Keyed on the places the Lawn may be saved, so a fresh options object alone changes nothing.
+  const lawn = useMemo(() => resolveLawn({ lawns, lawn: single, dockOrigin: atRoot }), [lawns, single, atRoot]);
   const dockOrigin = lawn?.dockOrigin;
-  const trail = useMemo(
-    () => trailScene(data.series, { trailColumns, dockOrigin }),
-    [data.series, trailColumns, dockOrigin]
+  const jobVariable = jobVariableName(options.jobVariable);
+  // Undefined on a dashboard without the variable, where there is nothing for a click to set.
+  const jobs = useByValue(
+    selectedJobs(
+      getTemplateSrv()
+        .getVariables()
+        .find((v) => v.name === jobVariable)
+    )
   );
-  const boundary = useMemo(() => boundaryFeatures(lawn?.boundary), [lawn?.boundary]);
+  const trail = useMemo(
+    () => trailScene(data.series, { trailColumns, dockOrigin, jobs }),
+    [data.series, trailColumns, dockOrigin, jobs]
+  );
+  const progress = useMemo(
+    () => readZoneProgress(data.series, zoneProgressColumns),
+    [data.series, zoneProgressColumns]
+  );
+  const boundary = useMemo(() => boundaryFeatures(lawn?.boundary, progress), [lawn?.boundary, progress]);
   // Aged separately, so the minute tick restyles the marker without placing the Trail again.
   const now = useNow();
   const last = 'scene' in trail ? trail.scene.mower : undefined;
@@ -64,19 +90,42 @@ export const MapPanel: React.FC<PanelProps<MapPanelOptions>> = ({ options, data,
   if ('problem' in trail) {
     return message(trail.problem);
   }
+  const { scene } = trail;
+  const context: DetailContext = {
+    formatTime: (time) => dateTimeFormat(time, { timeZone }),
+    zones: lawn?.boundary?.zones,
+    progress,
+  };
+  const jobOf = (hit: MapHit) => (jobs && hit.layer === 'trail' ? jobAt(scene, hit.trail) : undefined);
   return (
     <MapView
       baseMap={baseMap.source}
       overlay={overlay.overlay}
       terrain={terrain.source}
       view={view}
-      trail={trail.scene}
+      trail={scene}
       boundary={boundary}
       mower={mower}
       width={width}
       height={height}
+      hidden={hidden}
+      onHidden={setHidden}
+      following={following}
+      onFollow={(on) => setFollowed({ ...followed, following: on })}
+      detailOf={(hit) =>
+        hit.layer === 'trail' ? trailDetail(scene, hit.trail, hit.at, context) : zoneDetail(hit.zone, context)
+      }
+      selects={(hit) => jobOf(hit) !== undefined}
+      onSelect={(hit) => {
+        const job = jobOf(hit);
+        if (job !== undefined) {
+          // The variable is the dashboard's: set through the address, as its own picker sets it.
+          locationService.partial({ [`var-${jobVariable}`]: job }, true);
+        }
+      }}
     >
-      {terrain.source && <ViewSwitch view={view} onChange={setView} />}
+      {terrain.source && <ViewSwitch view={view} onChange={(to) => setViewed({ ...viewed, view: to })} />}
+      {trail.warning && <MapWarning text={trail.warning} />}
     </MapView>
   );
 };

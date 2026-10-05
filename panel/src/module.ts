@@ -1,12 +1,15 @@
 import { PanelPlugin, type PanelOptionsEditorBuilder } from '@grafana/data';
+import { getTemplateSrv } from '@grafana/runtime';
 import { CalibrationEditor } from './components/CalibrationEditor';
 import { MapPanel } from './components/MapPanel';
 import { BASE_MAP_PRESETS, CUSTOM_BASE_MAP, MAX_ZOOM, TILE_SIZE, type CustomSlot } from './model/baseMap';
-import { migrateLawn, type Lawn } from './model/lawn';
+import { LAWN_PATH, migrateLawn, type Lawn } from './model/lawn';
 import { CUSTOM_OVERLAY, DEFAULT_OVERLAY_OPACITY, OVERLAY_PRESETS } from './model/overlay';
+import { DEFAULT_JOB_VARIABLE } from './model/selection';
 import { CUSTOM_TERRAIN, TERRAIN_ENCODINGS, TERRAIN_PRESETS, terrainEnabled } from './model/terrain';
 import { DEFAULT_TRAIL_COLUMNS, type TrailColumns } from './model/trailFrame';
 import { VIEWS } from './model/view';
+import { DEFAULT_ZONE_PROGRESS_COLUMNS, type ZoneProgressColumns } from './model/zoneProgress';
 import type { MapPanelOptions } from './types';
 
 /** A picker's choices, one per Preset. */
@@ -62,8 +65,30 @@ const addCustomSlot = (
     });
 };
 
-// Option editors for each Trail column, in the order the options pane shows them.
-const TRAIL_COLUMN_EDITORS: Array<{ key: keyof TrailColumns; name: string; description: string }> = [
+/** A text input per column of a query, in the order the options pane shows them. */
+type ColumnEditors<T> = Array<{ key: keyof T & string; name: string; description: string }>;
+
+// Blank means the default name, shown as the placeholder, so a database that names things the
+// collector's way needs no settings at all.
+const addColumnEditors = <T extends Record<keyof T, string>>(
+  builder: PanelOptionsEditorBuilder<MapPanelOptions>,
+  path: 'trailColumns' | 'zoneProgressColumns',
+  category: string,
+  editors: ColumnEditors<T>,
+  defaults: T
+) => {
+  for (const { key, name, description } of editors) {
+    builder.addTextInput({
+      path: `${path}.${key}`,
+      name,
+      description,
+      category: [category],
+      settings: { placeholder: defaults[key] },
+    });
+  }
+};
+
+const TRAIL_COLUMN_EDITORS: ColumnEditors<TrailColumns> = [
   { key: 'time', name: 'Time', description: 'When each position was recorded.' },
   { key: 'x', name: 'X', description: "Metres from the dock along the mower's x-axis." },
   { key: 'y', name: 'Y', description: "Metres from the dock along the mower's y-axis." },
@@ -76,30 +101,40 @@ const TRAIL_COLUMN_EDITORS: Array<{ key: keyof TrailColumns; name: string; descr
     key: 'job',
     name: 'Job',
     description:
-      'Optional. Each Job is drawn as its own line, in its own colour. With SQL, use Format as: Table, which keeps text columns like this one as columns.',
+      'Optional. Each Job is drawn as its own line, in its own colour, and named when hovering it. With SQL, use Format as: Table, which keeps text columns like this one as columns.',
   },
   {
     key: 'zone',
     name: 'Zone',
-    description:
-      'Optional. The Zone each position was mowed in. Read now, shown when hovering the Trail in an upcoming release.',
+    description: 'Optional. The Zone each position was mowed in, shown when hovering the Trail.',
   },
   {
     key: 'status',
     name: 'Status',
     description:
-      "Optional. The mower's state at each position, such as mowing or returning. Read now, shown when hovering the Trail in an upcoming release.",
+      "Optional. The mower's state at each position, such as mowing or returning, shown when hovering the Trail.",
   },
   {
     key: 'mower',
     name: 'Mower',
     description:
-      'Optional. Which mower reported each position. Read now, used to warn about data from more than one mower in an upcoming release.',
+      'Optional. Which mower reported each position. The panel warns when it is given more than one mower.',
+  },
+];
+
+// The optional Zone progress query.
+const ZONE_PROGRESS_COLUMN_EDITORS: ColumnEditors<ZoneProgressColumns> = [
+  { key: 'zone', name: 'Zone', description: 'The identifier of the Zone, as given to it when it was traced.' },
+  { key: 'progress', name: 'Progress', description: 'How far through the Zone the mower is, from 0 to 100.' },
+  {
+    key: 'time',
+    name: 'Time',
+    description: 'Optional. When the progress was reported; the latest row of each Zone is used.',
   },
 ];
 
 export const plugin = new PanelPlugin<MapPanelOptions>(MapPanel)
-  // Panels saved with the Dock origin at the root of their options, before there was a Boundary.
+  // Panels saved before the Lawn was kept by mower: under `lawn`, or as a Dock origin at the root.
   .setMigrationHandler((panel) => migrateLawn(panel.options))
   .setPanelOptions((builder) => {
   builder.addSelect({
@@ -193,7 +228,7 @@ export const plugin = new PanelPlugin<MapPanelOptions>(MapPanel)
   builder
     .addCustomEditor<unknown, Lawn | undefined>({
       id: 'lawn',
-      path: 'lawn',
+      path: LAWN_PATH,
       name: 'On the map',
       description:
         'Drag the dock into place, turn the Trail onto the lawn, and trace the lawn and its Zones. The fields below hold the same values.',
@@ -201,37 +236,59 @@ export const plugin = new PanelPlugin<MapPanelOptions>(MapPanel)
       editor: CalibrationEditor,
     })
     .addNumberInput({
-      path: 'lawn.dockOrigin.lat',
+      path: `${LAWN_PATH}.dockOrigin.lat`,
       name: 'Latitude',
       description: 'Of the charging dock, in decimal degrees.',
       category: lawn,
       settings: { min: -85, max: 85 },
     })
     .addNumberInput({
-      path: 'lawn.dockOrigin.lon',
+      path: `${LAWN_PATH}.dockOrigin.lon`,
       name: 'Longitude',
       description: 'Of the charging dock, in decimal degrees.',
       category: lawn,
       settings: { min: -180, max: 180 },
     })
     .addNumberInput({
-      path: 'lawn.dockOrigin.rotation',
+      path: `${LAWN_PATH}.dockOrigin.rotation`,
       name: 'Rotation',
       description:
         "Compass bearing of the mower's x-axis, in degrees clockwise from north. Turn it until the Trail lies on the lawn.",
       category: lawn,
       defaultValue: 0,
     });
-  // Blank means the default name, shown as the placeholder, so a database that names things the
-  // collector's way needs no settings at all.
-  for (const { key, name, description } of TRAIL_COLUMN_EDITORS) {
-    builder.addTextInput({
-      path: `trailColumns.${key}`,
-      name,
-      description,
-      category: ['Trail columns'],
-      settings: { placeholder: DEFAULT_TRAIL_COLUMNS[key] },
+  addColumnEditors(builder, 'trailColumns', 'Trail columns', TRAIL_COLUMN_EDITORS, DEFAULT_TRAIL_COLUMNS);
+  addColumnEditors(
+    builder,
+    'zoneProgressColumns',
+    'Zone progress columns',
+    ZONE_PROGRESS_COLUMN_EDITORS,
+    DEFAULT_ZONE_PROGRESS_COLUMNS
+  );
+  builder
+    .addSelect({
+      path: 'jobVariable',
+      name: 'Job variable',
+      description:
+        'The dashboard variable that holds a Job. Clicking a Trail sets it to that Job, and while it holds one the map draws that Job alone. Without the variable on the dashboard, every Job is drawn.',
+      category: ['Jobs'],
+      defaultValue: DEFAULT_JOB_VARIABLE,
+      settings: {
+        options: [],
+        // The dashboard's own variables, and the default whether or not the dashboard has it yet.
+        getOptions: async () =>
+          [...new Set([DEFAULT_JOB_VARIABLE, ...getTemplateSrv().getVariables().map((v) => `$${v.name}`)])].map(
+            (value) => ({ value, label: value })
+          ),
+      },
+    })
+    .addBooleanSwitch({
+      path: 'follow',
+      name: 'Follow the mower',
+      description:
+        'Starts the panel with the mower kept in the middle of the map, as for a wall display. The button on the panel turns it on and off from there.',
+      category: ['Map view'],
+      defaultValue: false,
     });
-  }
   return builder;
 });

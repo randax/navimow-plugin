@@ -1,4 +1,4 @@
-import { headingBearing, resolveDockOrigin, toLonLat, type DockOrigin } from './dockOrigin';
+import { headingBearing, resolveDockOrigin, toLocal, toLonLat, type DockOrigin } from './dockOrigin';
 
 // Length of a degree at 60° N on the WGS84 ellipsoid, from the standard series expansions.
 const METRES_PER_DEGREE_LAT = 111412.3;
@@ -59,6 +59,20 @@ describe('toLonLat', () => {
     const [sameLon, sameLat] = toLonLat(dock(same), 30, -7);
     expect(lon).toBeCloseTo(sameLon, 10);
     expect(lat).toBeCloseTo(sameLat, 10);
+  });
+});
+
+describe('toLocal', () => {
+  test('a place 100 m north of a dock whose x-axis points east is 100 m along y', () => {
+    const [x, y] = toLocal(dock(90), 10, 60 + 100 / METRES_PER_DEGREE_LAT);
+    expect(x).toBeCloseTo(0, 6);
+    expect(y).toBeCloseTo(100, 1);
+  });
+
+  test.each([0, 20, 123, 270, 359.5])('undoes toLonLat at rotation %s', (rotation) => {
+    const [x, y] = toLocal(dock(rotation), ...toLonLat(dock(rotation), 31.5, -12.25));
+    expect(x).toBeCloseTo(31.5, 6);
+    expect(y).toBeCloseTo(-12.25, 6);
   });
 });
 

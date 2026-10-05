@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { toLonLat, type DockOrigin } from './dockOrigin';
-import { framedBounds, nextFraming, type Framing } from './framing';
+import { framedBounds, movesView, nextFraming, type Framing } from './framing';
 import { EMPTY_SCENE, placeTrails, type Box } from './trail';
 import type { TrailPoint } from './trailFrame';
 
@@ -118,6 +118,26 @@ describe('nextFraming', () => {
   ])('moving the dock in %s frames again', (_, moved) => {
     const framed = nextFraming(scene(DOCKED), undefined);
     expect(nextFraming(scene(DOCKED, { ...ORIGIN, ...moved }), framed)).toBeDefined();
+  });
+});
+
+describe('movesView', () => {
+  const docked = nextFraming(scene(DOCKED), undefined)!;
+  const grown = nextFraming(scene(FIXTURE), undefined)!;
+  const moved = nextFraming(scene(DOCKED, { ...ORIGIN, lat: 59.974 }), undefined)!;
+
+  test('a view the owner steers is moved by every framing', () => {
+    expect(movesView(docked, undefined, false)).toBe(true);
+    expect(movesView(grown, docked, false)).toBe(true);
+  });
+
+  test('a view that follows the mower is not thrown out to the whole Trail each time the Trail grows', () => {
+    expect(movesView(grown, docked, true)).toBe(false);
+  });
+
+  test('a following view is still framed when the Trail first appears, and when the dock moves', () => {
+    expect(movesView(docked, undefined, true)).toBe(true);
+    expect(movesView(moved, docked, true)).toBe(true);
   });
 });
 

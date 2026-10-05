@@ -40,6 +40,22 @@ export function viewState(options: TerrainOptions | null | undefined, previous?:
   return previous && previous.start === start ? previous : { start, view: start ?? 'flat' };
 }
 
+/** Whether the view follows the mower, and the option it was started from. */
+export interface FollowState {
+  start: boolean;
+  following: boolean;
+}
+
+/**
+ * Whether the view follows the mower, given what it did before. Off unless the options start it
+ * on, so that a refresh never fights the owner's panning. Like the view, the owner's switch on the
+ * panel holds until the option changes, and the panel then starts over from it.
+ */
+export function followState(option: boolean | undefined, previous?: FollowState): FollowState {
+  const start = option === true;
+  return previous && previous.start === start ? previous : { start, following: start };
+}
+
 /**
  * Where a map made for `view` starts. One that replaces another looks at the same place from the
  * same distance and bearing, so switching never throws the owner somewhere else. Only the tilt

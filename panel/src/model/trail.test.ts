@@ -161,6 +161,78 @@ describe('trailScene', () => {
     expect(trailScene([empty, zoneProgress], { dockOrigin: ORIGIN })).toEqual({ scene: EMPTY_SCENE });
   });
 
+  const from = (mowers: string[]) =>
+    createDataFrame({
+      fields: [
+        { name: 'time', type: FieldType.time, values: mowers.map((_, i) => NOW - (9 - i) * MIN) },
+        { name: 'x', type: FieldType.number, values: mowers.map((_, i) => i) },
+        { name: 'y', type: FieldType.number, values: mowers.map(() => 0) },
+        { name: 'device_id', type: FieldType.string, values: mowers },
+      ],
+    });
+
+  test('positions from one mower need no warning', () => {
+    expect(trailScene([from(['north', 'north'])], { dockOrigin: ORIGIN })).not.toHaveProperty('warning');
+  });
+
+  test('positions from two mowers are still drawn, with a warning that names both', () => {
+    expect(trailScene([from(['north', 'south', 'north'])], { dockOrigin: ORIGIN })).toEqual({
+      scene: expect.objectContaining({ origin: ORIGIN }),
+      warning:
+        'Positions from 2 mowers, "north" and "south", are drawn here as one lawn. ' +
+        'Give each mower a panel of its own, and narrow this query to one mower.',
+    });
+  });
+
+  test('three mowers or more are all named', () => {
+    expect(trailScene([from(['c', 'a', 'b'])], { dockOrigin: ORIGIN })).toMatchObject({
+      warning: expect.stringContaining('from 3 mowers, "c", "a" and "b", are'),
+    });
+  });
+
+  // Two Jobs, and a position between them that belongs to neither.
+  const jobs = createDataFrame({
+    fields: [
+      { name: 'time', type: FieldType.time, values: [9, 8, 7, 6, 5].map((ago) => NOW - ago * MIN) },
+      { name: 'x', type: FieldType.number, values: [0, 1, 2, 3, 4] },
+      { name: 'y', type: FieldType.number, values: [0, 0, 0, 0, 0] },
+      { name: 'job_id', type: FieldType.string, values: ['a', 'a', null, 'b', 'b'] },
+    ],
+  });
+  const jobsDrawn = (selected?: string[]) => {
+    const result = trailScene([jobs], { dockOrigin: ORIGIN, jobs: selected });
+    return 'scene' in result ? result.scene.lines.features.map((f) => f.properties.job) : result;
+  };
+
+  test('with no Job selected, every Job in range is drawn', () => {
+    expect(jobsDrawn()).toEqual(['a', 'b']);
+    expect(jobsDrawn([])).toEqual(['a', 'b']);
+  });
+
+  test('a selected Job is drawn alone, and the mower is where that Job left it', () => {
+    expect(jobsDrawn(['a'])).toEqual(['a']);
+    const result = trailScene([jobs], { dockOrigin: ORIGIN, jobs: ['a'] });
+    expect('scene' in result && result.scene.mower?.time).toBe(NOW - 8 * MIN);
+  });
+
+  test('several selected Jobs are drawn together', () => {
+    expect(jobsDrawn(['b', 'a'])).toEqual(['a', 'b']);
+  });
+
+  test('a selected Job with no positions in range draws an empty map, and says why it is empty', () => {
+    expect(trailScene([jobs], { dockOrigin: ORIGIN, jobs: ['z'] })).toEqual({
+      scene: EMPTY_SCENE,
+      warning: 'No positions for Job "z" in this time range. Set the Job variable to another Job, or to All.',
+    });
+    expect(trailScene([jobs], { dockOrigin: ORIGIN, jobs: ['y', 'z'] })).toMatchObject({
+      warning: expect.stringContaining('for Jobs "y" and "z" in'),
+    });
+  });
+
+  test('a selection that draws something needs no such word', () => {
+    expect(trailScene([jobs], { dockOrigin: ORIGIN, jobs: ['a', 'z'] })).not.toHaveProperty('warning');
+  });
+
   test('a frame missing required columns explains itself', () => {
     expect(trailScene([frame], { trailColumns: { y: 'postureY' }, dockOrigin: ORIGIN })).toEqual({
       problem: expect.stringMatching(/"postureY"/),
