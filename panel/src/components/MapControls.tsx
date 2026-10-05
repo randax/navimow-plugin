@@ -8,7 +8,7 @@ interface Props {
   /** Where the top of the map points, in degrees clockwise from north. */
   bearing: number;
   following: boolean;
-  /** The layers the map has something to draw for, and so offers to hide. */
+  /** What the map has something to draw for, and so offers to hide. */
   layers: readonly Layer[];
   hidden: readonly Layer[];
   /** Nothing to fit to, or to follow, until a Trail is on the map. */
@@ -75,7 +75,7 @@ export const MapControls: React.FC<Props> = ({
           </div>
         }
       >
-        <ToolbarButton variant="canvas" icon="layer-group" aria-label="Show or hide layers" />
+        <ToolbarButton variant="canvas" icon="layer-group" aria-label="Show or hide" />
       </Toggletip>
     </div>
   );

@@ -10,4 +10,4 @@
 - An optional Zone progress query colours the traced Zones.
 - Controls on the panel: zoom, north up, fit to Trail, follow the mower, and visibility of the Trail and the Boundary.
 - A warning when a panel receives positions from more than one mower.
-- The Dock origin and Boundary are saved by mower identifier. Panels saved earlier are read as before and moved on their next save.
+- The Dock origin and Boundary are saved under a key per mower, so a panel for several mowers can come later without moving what is saved. A panel for one mower uses the key for any mower; panels saved earlier are read as before and moved on their next save.

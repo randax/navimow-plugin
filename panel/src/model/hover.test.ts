@@ -21,7 +21,7 @@ const point = (seconds: number, x: number, y: number, extra: Partial<TrailPoint>
   y,
   ...extra,
 });
-// Job a runs north along x in Zone 8 and on into Zone 9, in two runs with a gap; Job b lies beside it.
+// Job a heads north along x in Zone 8 and on into Zone 9, with a gap between; Job b lies beside it.
 const trails: Trail[] = [
   {
     job: 'a',
@@ -86,6 +86,7 @@ describe('trailDetail', () => {
 
   test('is nothing for a Trail the scene does not have', () => {
     expect(trailDetail(scene, 7, near(0, 0), { formatTime })).toBeUndefined();
+    expect(trailDetail({ ...scene, trails: [{ segments: [] }] }, 0, near(0, 0), { formatTime })).toBeUndefined();
   });
 });
 

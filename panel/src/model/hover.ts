@@ -1,6 +1,7 @@
 import { toLocal } from './dockOrigin';
 import { zoneLabel, type Zone } from './lawn';
 import type { TrailScene } from './trail';
+import type { TrailPoint } from './trailFrame';
 import type { ZoneProgressById } from './zoneProgress';
 
 /** What the panel tells about the thing under the pointer: a heading, and a row per fact. */
@@ -41,17 +42,27 @@ export function trailDetail(
   }
   // Compared on the mower's own axes, in metres, where near means near whatever the latitude.
   const [x, y] = toLocal(scene.origin, lon, lat);
-  const away = (p: { x: number; y: number }) => (p.x - x) ** 2 + (p.y - y) ** 2;
-  const nearest = found.segments.flat().reduce((a, b) => (away(b) < away(a) ? b : a));
-  const job = found.outsideJob ? 'Outside any Job' : found.job;
+  let nearest: TrailPoint | undefined;
+  let least = Infinity;
+  for (const point of found.segments.flat()) {
+    const away = (point.x - x) ** 2 + (point.y - y) ** 2;
+    if (away < least) {
+      [nearest, least] = [point, away];
+    }
+  }
+  if (!nearest) {
+    return undefined;
+  }
+  const rows = [
+    { label: 'Job', value: found.outsideJob ? 'Outside any Job' : found.job },
+    { label: 'Zone', value: nearest.zone === undefined ? undefined : named(zones, nearest.zone) },
+    { label: 'Status', value: nearest.status },
+  ];
   return {
     title: formatTime(nearest.time),
     colour: scene.lines.features.find((f) => f.id === trail)?.properties.colour,
-    rows: [
-      ...(job === undefined ? [] : [{ label: 'Job', value: job }]),
-      ...(nearest.zone === undefined ? [] : [{ label: 'Zone', value: named(zones, nearest.zone) }]),
-      ...(nearest.status === undefined ? [] : [{ label: 'Status', value: nearest.status }]),
-    ],
+    // Whatever the data does not have is left out, not shown blank.
+    rows: rows.filter((row): row is Detail['rows'][number] => row.value !== undefined),
   };
 }
 

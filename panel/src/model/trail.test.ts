@@ -219,8 +219,18 @@ describe('trailScene', () => {
     expect(jobsDrawn(['b', 'a'])).toEqual(['a', 'b']);
   });
 
-  test('a selected Job with no positions in range draws an empty map', () => {
-    expect(trailScene([jobs], { dockOrigin: ORIGIN, jobs: ['z'] })).toEqual({ scene: EMPTY_SCENE });
+  test('a selected Job with no positions in range draws an empty map, and says why it is empty', () => {
+    expect(trailScene([jobs], { dockOrigin: ORIGIN, jobs: ['z'] })).toEqual({
+      scene: EMPTY_SCENE,
+      warning: 'No positions for Job "z" in this time range. Set the Job variable to another Job, or to All.',
+    });
+    expect(trailScene([jobs], { dockOrigin: ORIGIN, jobs: ['y', 'z'] })).toMatchObject({
+      warning: expect.stringContaining('for Jobs "y" and "z" in'),
+    });
+  });
+
+  test('a selection that draws something needs no such word', () => {
+    expect(trailScene([jobs], { dockOrigin: ORIGIN, jobs: ['a', 'z'] })).not.toHaveProperty('warning');
   });
 
   test('a frame missing required columns explains itself', () => {

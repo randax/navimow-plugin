@@ -43,7 +43,10 @@ const PROGRESS_COLOUR: ExpressionSpecification = [
   '#00695C',
 ];
 
-/** What the owner can show and hide from the panel, in the order the panel offers them. */
+/**
+ * What the owner can show and hide from the panel, in the order the panel offers them. Layers in the
+ * map library's sense, and named so only in code: to the owner each is the Trail or the Boundary.
+ */
 export const LAYERS = [
   { id: 'trail', label: 'Trail' },
   { id: 'boundary', label: 'Boundary' },

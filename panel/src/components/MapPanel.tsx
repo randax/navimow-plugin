@@ -7,9 +7,9 @@ import { boundaryFeatures, resolveLawn } from '../model/lawn';
 import { resolveOverlay } from '../model/overlay';
 import { jobVariableName, selectedJobs } from '../model/selection';
 import type { Layer } from '../model/style';
-import { resolveTerrain, type TerrainOptions } from '../model/terrain';
+import { resolveTerrain } from '../model/terrain';
 import { mowerAt, trailScene } from '../model/trail';
-import { followState, viewState, type FollowState, type View, type ViewState } from '../model/view';
+import { followState, viewState, type FollowState, type ViewState } from '../model/view';
 import { readZoneProgress } from '../model/zoneProgress';
 import type { MapPanelOptions } from '../types';
 import { MapView, useByValue, type MapHit } from './MapView';
@@ -27,33 +27,28 @@ const useNow = (): number => {
   return now;
 };
 
-/** The view the map is in. The model decides it (viewState); this remembers it between renders. */
-const useView = (options: TerrainOptions | null | undefined): [View, (view: View) => void] => {
-  const [remembered, remember] = useState<ViewState>();
-  const state = viewState(options, remembered);
-  // Kept as soon as the options start the panel over, so that an earlier switch cannot come back.
+/**
+ * What a switch on the panel is set to. The model decides it from what it was before (`next`), and
+ * hands back the same state for as long as nothing starts the panel over; this remembers it between
+ * renders, as soon as it changes, so that an earlier switch cannot come back.
+ */
+const useSwitch = <S,>(next: (previous?: S) => S): [S, (state: S) => void] => {
+  const [remembered, remember] = useState<S>();
+  const state = next(remembered);
   if (state !== remembered) {
     remember(state);
   }
-  return [state.view, (view) => remember({ ...state, view })];
-};
-
-/** Whether the view follows the mower. The model decides it (followState); this remembers it. */
-const useFollow = (option: boolean | undefined): [boolean, (following: boolean) => void] => {
-  const [remembered, remember] = useState<FollowState>();
-  const state = followState(option, remembered);
-  if (state !== remembered) {
-    remember(state);
-  }
-  return [state.following, (following) => remember({ ...state, following })];
+  return [state, remember];
 };
 
 export const MapPanel: React.FC<PanelProps<MapPanelOptions>> = ({ options, data, width, height, timeZone }) => {
   const baseMap = useMemo(() => resolveBaseMap(options.baseMap), [options.baseMap]);
   const terrain = useMemo(() => resolveTerrain(options.terrain), [options.terrain]);
   const overlay = useMemo(() => resolveOverlay(options.overlay), [options.overlay]);
-  const [view, setView] = useView(options.terrain);
-  const [following, setFollowing] = useFollow(options.follow);
+  const [viewed, setViewed] = useSwitch<ViewState>((previous) => viewState(options.terrain, previous));
+  const { view } = viewed;
+  const [followed, setFollowed] = useSwitch<FollowState>((previous) => followState(options.follow, previous));
+  const { following } = followed;
   const [hidden, setHidden] = useState<Layer[]>([]);
   const { trailColumns, zoneProgressColumns, lawns, lawn: single, dockOrigin: atRoot } = options;
   // Keyed on the places the Lawn may be saved, so a fresh options object alone changes nothing.
@@ -116,7 +111,7 @@ export const MapPanel: React.FC<PanelProps<MapPanelOptions>> = ({ options, data,
       hidden={hidden}
       onHidden={setHidden}
       following={following}
-      onFollow={setFollowing}
+      onFollow={(on) => setFollowed({ ...followed, following: on })}
       detailOf={(hit) =>
         hit.layer === 'trail' ? trailDetail(scene, hit.trail, hit.at, context) : zoneDetail(hit.zone, context)
       }
@@ -129,7 +124,7 @@ export const MapPanel: React.FC<PanelProps<MapPanelOptions>> = ({ options, data,
         }
       }}
     >
-      {terrain.source && <ViewSwitch view={view} onChange={setView} />}
+      {terrain.source && <ViewSwitch view={view} onChange={(to) => setViewed({ ...viewed, view: to })} />}
       {trail.warning && <MapWarning text={trail.warning} />}
     </MapView>
   );

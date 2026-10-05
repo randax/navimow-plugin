@@ -42,8 +42,9 @@ dashboard's time zone. Hovering a Zone of the Boundary shows its name and its la
 Clicking a Trail selects its Job across the dashboard, by setting a dashboard variable. Add a
 variable for the Job to the dashboard and choose it as **Job variable** under **Jobs** in the panel
 options; the default is a variable named `job`. While the variable holds a Job, or several, the map
-draws those alone; set to **All**, or empty, it draws every Job in the time range. On a dashboard
-without the variable, every Job is drawn and a click selects nothing.
+draws those alone, and says so if they have no positions in the time range; set to **All**, or
+empty, it draws every Job in the range. On a dashboard without the variable, every Job is drawn and
+a click selects nothing.
 
 ## Zone progress
 
@@ -70,7 +71,7 @@ The buttons at the top right of the map steer the view. None of them changes wha
 - **Follow the mower**: keeps the mower in the middle of the map as it moves, and leaves the zoom to
   you. It is off unless **Follow the mower** under **Map view** in the panel options starts it on,
   as for a wall display, so a refresh never moves a map you are panning around.
-- **Show or hide layers**: the Trail and the Boundary, each on its own.
+- **Show or hide**: the Trail and the Boundary, each on its own.
 
 Use the dashboard's time picker to look at another period; the panel has no time control of its own.
 

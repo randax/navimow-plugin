@@ -5,9 +5,11 @@
  */
 export const DEFAULT_JOB_VARIABLE = '$job';
 
-/** The name of the variable the option refers to, written as $name or ${name}. */
+const NAME = /\w+/;
+
+/** The name of the variable the option refers to, written as $name or ${name}; the default's, if it names none. */
 export const jobVariableName = (option: string | undefined): string =>
-  /\w+/.exec(option?.trim() || DEFAULT_JOB_VARIABLE)?.[0] ?? 'job';
+  (NAME.exec(option ?? '') ?? NAME.exec(DEFAULT_JOB_VARIABLE))![0];
 
 // What Grafana holds in a variable set to All, whatever the options behind it.
 const ALL = '$__all';

@@ -43,6 +43,7 @@ describe('jobVariableName', () => {
   test('a panel saved without the option looks for a variable named job', () => {
     expect(jobVariableName(undefined)).toBe('job');
     expect(jobVariableName('  ')).toBe('job');
+    expect(jobVariableName('${}')).toBe('job');
   });
 
   test('a bare name, as panel JSON written by hand may hold, is still the name', () => {

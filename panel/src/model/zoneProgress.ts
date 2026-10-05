@@ -1,5 +1,5 @@
 import type { DataFrame } from '@grafana/data';
-import { columnNames, toNumber, toText, toTime } from './trailFrame';
+import { columnNames, toNumber, toText, toTime } from './columns';
 
 /** Which column holds each value of the optional Zone progress query. */
 export interface ZoneProgressColumns {

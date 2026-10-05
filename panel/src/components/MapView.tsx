@@ -234,11 +234,14 @@ const MapCanvas: React.FC<Props> = ({
   const framed = useRef<Framing>(undefined);
   const countPending = useRef(true);
   const [bearing, setBearing] = useState(0);
-  const [hover, setHover] = useState<{ at: { x: number; y: number }; detail: Detail }>();
+  // What the pointer is on, and the data that was true of: a click that narrows the map, or a
+  // refresh, can take the thing away from under a pointer that has not moved.
+  const [hover, setHover] = useState<{ at: { x: number; y: number }; detail: Detail; of: unknown[] }>();
+  const shown = [trail, boundary];
   // The map's listeners are added once per map, and must answer with the panel's latest data.
-  const pointer = useRef({ detailOf, selects, onSelect });
+  const pointer = useRef({ detailOf, selects, onSelect, shown });
   useEffect(() => {
-    pointer.current = { detailOf, selects, onSelect };
+    pointer.current = { detailOf, selects, onSelect, shown };
   });
 
   // New data replaces a source's data only. The source exists once the style has loaded; until
@@ -321,7 +324,8 @@ const MapCanvas: React.FC<Props> = ({
       }
       const hit = hitAt(created, point);
       const detail = hit && pointer.current.detailOf(hit);
-      setHover(detail && { at: { x: originalEvent.clientX, y: originalEvent.clientY }, detail });
+      const at = { x: originalEvent.clientX, y: originalEvent.clientY };
+      setHover(detail && { at, detail, of: pointer.current.shown });
       created.getCanvas().style.cursor = hit && pointer.current.selects(hit) ? 'pointer' : '';
     });
     // A detail belongs to where the pointer is: gone once it leaves the map, or drags the map from under it.
@@ -358,14 +362,15 @@ const MapCanvas: React.FC<Props> = ({
     }
   }, [trail, width, height, following]);
 
-  // Following keeps the mower in the middle and leaves the zoom to the owner. It moves the view
-  // only when the mower does, so a look around between two positions is not snatched back.
+  // Following puts the mower back in the middle on every refresh, moved or not, and leaves the zoom
+  // to the owner. Keyed on the Trail, which is new with each refresh, and not on the marker, which
+  // is also restyled by the clock.
   const [mowerLon, mowerLat] = mower?.position ?? [];
   useEffect(() => {
     if (following && mowerLon !== undefined && mowerLat !== undefined) {
       map.current?.easeTo({ center: [mowerLon, mowerLat] });
     }
-  }, [following, mowerLon, mowerLat]);
+  }, [following, mowerLon, mowerLat, trail]);
 
   // The rotating icon and its age label are separate markers, so the label stays upright.
   useEffect(() => {
@@ -408,7 +413,6 @@ const MapCanvas: React.FC<Props> = ({
     []
   );
 
-  const whole = nextFraming(trail, undefined);
   // MapLibre follows container size changes itself (trackResize), so the panel's size is all it needs.
   return (
     <>
@@ -418,11 +422,12 @@ const MapCanvas: React.FC<Props> = ({
         following={following}
         layers={LAYERS.map((l) => l.id).filter((id) => id !== 'boundary' || boundary.features.length > 0)}
         hidden={hidden}
-        canFit={whole !== undefined}
+        canFit={trail.localBox !== undefined}
         canFollow={mower !== undefined}
         onZoom={(by) => (by > 0 ? map.current?.zoomIn() : map.current?.zoomOut())}
         onNorth={() => map.current?.resetNorth()}
         onFit={() => {
+          const whole = nextFraming(trail, undefined);
           if (map.current && whole && trail.origin) {
             framed.current = whole;
             fit(map.current, whole, trail.origin, { width, height, animate: true });
@@ -431,7 +436,7 @@ const MapCanvas: React.FC<Props> = ({
         onFollow={onFollow}
         onHidden={onHidden}
       />
-      {hover && <MapTooltip at={hover.at} detail={hover.detail} />}
+      {hover?.of.every((data, i) => data === shown[i]) && <MapTooltip at={hover.at} detail={hover.detail} />}
     </>
   );
 };
