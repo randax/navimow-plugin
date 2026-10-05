@@ -43,33 +43,34 @@ const PROGRESS_COLOUR: ExpressionSpecification = [
   '#00695C',
 ];
 
-/**
- * What the owner can show and hide from the panel, in the order the panel offers them. Layers in the
- * map library's sense, and named so only in code: to the owner each is the Trail or the Boundary.
- */
-export const LAYERS = [
+/** What the owner can show and hide from the panel, in the order the panel offers them. */
+const HIDEABLE = [
   { id: 'trail', label: 'Trail' },
   { id: 'boundary', label: 'Boundary' },
 ] as const;
 
-export type Layer = (typeof LAYERS)[number]['id'];
+export type Hideable = (typeof HIDEABLE)[number]['id'];
+
+/** What the panel offers to hide: only what it has something to draw for. */
+export const hideable = (boundary: BoundaryFeatures) =>
+  HIDEABLE.filter(({ id }) => id !== 'boundary' || boundary.features.length > 0);
 
 /**
  * The whole map as one style, drawn bottom to top: Base map, Overlay, Boundary, Trail. The Trail
  * and Boundary are part of the style, so a Base map switch keeps them and a refresh only diffs their
  * data. So is the Terrain: the terrain prototype found that enabling it on a map already drawn
  * leaves the camera at its height above sea level, throwing the view outward by the height of the
- * ground. A layer the owner has hidden stays in the style, undrawn, so showing it again is a restyle
+ * ground. What the owner has hidden stays in the style, undrawn, so showing it again is a restyle
  * in place like any other.
  */
 export const mapStyle = (
   { baseMap, overlay, terrain }: MapSources,
   trail: TrailScene['lines'],
   boundary: BoundaryFeatures = NO_BOUNDARY,
-  hidden: readonly Layer[] = []
+  hidden: readonly Hideable[] = []
 ): StyleSpecification => {
-  const visibility = (layer: Layer) => ({
-    visibility: hidden.includes(layer) ? ('none' as const) : ('visible' as const),
+  const visibility = (drawn: Hideable) => ({
+    visibility: hidden.includes(drawn) ? ('none' as const) : ('visible' as const),
   });
   return {
     version: 8,

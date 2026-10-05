@@ -1,6 +1,7 @@
 import { PanelPlugin, type PanelOptionsEditorBuilder } from '@grafana/data';
 import { getTemplateSrv } from '@grafana/runtime';
 import { CalibrationEditor } from './components/CalibrationEditor';
+import { DockOriginField, type DockOriginFieldSettings } from './components/DockOriginField';
 import { MapPanel } from './components/MapPanel';
 import { BASE_MAP_PRESETS, CUSTOM_BASE_MAP, MAX_ZOOM, TILE_SIZE, type CustomSlot } from './model/baseMap';
 import { LAWN_PATH, migrateLawn, type Lawn } from './model/lawn';
@@ -234,29 +235,30 @@ export const plugin = new PanelPlugin<MapPanelOptions>(MapPanel)
         'Drag the dock into place, turn the Trail onto the lawn, and trace the lawn and its Zones. The fields below hold the same values.',
       category: lawn,
       editor: CalibrationEditor,
-    })
-    .addNumberInput({
-      path: `${LAWN_PATH}.dockOrigin.lat`,
-      name: 'Latitude',
-      description: 'Of the charging dock, in decimal degrees.',
-      category: lawn,
-      settings: { min: -85, max: 85 },
-    })
-    .addNumberInput({
-      path: `${LAWN_PATH}.dockOrigin.lon`,
-      name: 'Longitude',
-      description: 'Of the charging dock, in decimal degrees.',
-      category: lawn,
-      settings: { min: -180, max: 180 },
-    })
-    .addNumberInput({
-      path: `${LAWN_PATH}.dockOrigin.rotation`,
+    });
+  // The plain fields edit the same Lawn as the drawer, one value at a time.
+  const dockOriginFields: Array<DockOriginFieldSettings & { name: string; description: string }> = [
+    { field: 'lat', name: 'Latitude', description: 'Of the charging dock, in decimal degrees.', min: -85, max: 85 },
+    { field: 'lon', name: 'Longitude', description: 'Of the charging dock, in decimal degrees.', min: -180, max: 180 },
+    {
+      field: 'rotation',
       name: 'Rotation',
       description:
         "Compass bearing of the mower's x-axis, in degrees clockwise from north. Turn it until the Trail lies on the lawn.",
+      placeholder: '0',
+    },
+  ];
+  for (const { name, description, ...settings } of dockOriginFields) {
+    builder.addCustomEditor<DockOriginFieldSettings, Lawn | undefined>({
+      id: `lawn.dockOrigin.${settings.field}`,
+      path: LAWN_PATH,
+      name,
+      description,
       category: lawn,
-      defaultValue: 0,
+      editor: DockOriginField,
+      settings,
     });
+  }
   addColumnEditors(builder, 'trailColumns', 'Trail columns', TRAIL_COLUMN_EDITORS, DEFAULT_TRAIL_COLUMNS);
   addColumnEditors(
     builder,

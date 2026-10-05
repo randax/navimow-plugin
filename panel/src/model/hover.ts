@@ -69,13 +69,19 @@ export function trailDetail(
 /** The Job a click on a Trail selects: none for positions outside any Job, or without a Job column. */
 export const jobAt = (scene: TrailScene, trail: number): string | undefined => scene.trails?.[trail]?.job;
 
-/** What to tell about a Zone of the Boundary: its name, and its latest progress when one is reported. */
-export function zoneDetail(id: string, { formatTime, zones = [], progress = {} }: DetailContext): Detail | undefined {
-  const zone = zones.find((z) => z.id === id);
+/**
+ * What to tell about a Zone of the Boundary: its name, and its latest progress when one is reported.
+ * `place` is the Zone's place in the Boundary's list, which is the id of the polygon under the pointer.
+ */
+export function zoneDetail(
+  place: number,
+  { formatTime, zones = [], progress = {} }: DetailContext
+): Detail | undefined {
+  const zone = zones[place];
   if (!zone) {
     return undefined;
   }
-  const latest = progress[id];
+  const latest = progress[zone.id];
   return {
     title: zoneLabel(zone),
     rows: latest

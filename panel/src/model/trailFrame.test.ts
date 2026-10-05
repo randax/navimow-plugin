@@ -233,6 +233,12 @@ describe('readTrails', () => {
     });
   });
 
+  test('a position only just out of range is not said to be 10 km away, which would be in range', () => {
+    expect(readTrails([frame({ time: at(0), x: [10_001], y: [0] })])).toEqual({
+      problem: expect.stringContaining('more than 10 km from the dock, the first 10.1 km away.'),
+    });
+  });
+
   test('frames without the Trail columns, such as another query, are ignored', () => {
     const result = trails([frame({ zone: [1], progress: [50] }), frame({ time: at(0), x: [1], y: [1] })]);
     expect(result).toHaveLength(1);

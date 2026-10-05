@@ -3,6 +3,7 @@ import type { FeatureCollection, MultiLineString } from 'geojson';
 import { headingBearing, resolveDockOrigin, toLonLat, type DockOrigin, type DockOriginOptions } from './dockOrigin';
 import { recency, type Recency } from './recency';
 import { readTrails, type Trail, type TrailColumns } from './trailFrame';
+import { quoted } from './words';
 
 // Strong hues that stand apart from each other and from the greens, whites and water blues of a
 // topographic Base map.
@@ -118,9 +119,6 @@ export function placeTrails(trails: Trail[], origin: DockOrigin): TrailScene {
 
 /** The mower as shown at `now`: current, or faded with its age. */
 export const mowerAt = (last: LastPosition, now: number): MowerMarker => ({ ...last, ...recency(last.time, now) });
-
-const NAMES = new Intl.ListFormat('en-GB', { type: 'conjunction' });
-const quoted = (names: string[]) => NAMES.format(names.map((name) => `"${name}"`));
 
 /**
  * One panel shows one mower's lawn, placed by one Dock origin. Positions from a second mower would

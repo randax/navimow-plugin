@@ -40,7 +40,8 @@ describe('trailDetail', () => {
   test('tells the time, Job, Zone and status of the position nearest the pointer', () => {
     expect(trailDetail(scene, 0, near(0.9, 0.2), { formatTime })).toEqual({
       title: '2026-09-21T10:23:09.389Z',
-      colour: scene.lines.features[0].properties.colour,
+      // The second colour of the palette, which is where the identifier "a" lands.
+      colour: '#1F60C4',
       rows: [
         { label: 'Job', value: 'a' },
         { label: 'Zone', value: '8' },
@@ -56,7 +57,7 @@ describe('trailDetail', () => {
     });
   });
 
-  test('reaches across a gap to a later run of the same Trail', () => {
+  test('reaches across a gap to a later stretch of the same Trail', () => {
     expect(trailDetail(scene, 0, near(5.8, 0), { formatTime })?.title).toBe('2026-09-21T10:38:09.389Z');
   });
 
@@ -79,7 +80,8 @@ describe('trailDetail', () => {
     const bare = placeTrails([{ segments: [[point(0, 0, 0), point(2, 1, 0)]] }], ORIGIN);
     expect(trailDetail(bare, 0, near(0, 0), { formatTime })).toEqual({
       title: '2026-09-21T10:23:07.389Z',
-      colour: bare.lines.features[0].properties.colour,
+      // Without a Job to name it, a Trail takes the palette in order: the first colour.
+      colour: '#E02F44',
       rows: [],
     });
   });
@@ -108,7 +110,7 @@ describe('zoneDetail', () => {
   ];
 
   test('names the Zone and tells its latest progress, and when that was reported', () => {
-    expect(zoneDetail('8', { formatTime, zones, progress: { '8': { progress: 63.6, time: T } } })).toEqual({
+    expect(zoneDetail(0, { formatTime, zones, progress: { '8': { progress: 63.6, time: T } } })).toEqual({
       title: 'Front lawn (8)',
       rows: [
         { label: 'Progress', value: '64%' },
@@ -118,17 +120,26 @@ describe('zoneDetail', () => {
   });
 
   test('progress reported without a time is told without one', () => {
-    expect(zoneDetail('9', { formatTime, zones, progress: { '9': { progress: 100 } } })).toEqual({
+    expect(zoneDetail(1, { formatTime, zones, progress: { '9': { progress: 100 } } })).toEqual({
       title: '9',
       rows: [{ label: 'Progress', value: '100%' }],
     });
   });
 
   test('a Zone with no progress reported is only named', () => {
-    expect(zoneDetail('8', { formatTime, zones })).toEqual({ title: 'Front lawn (8)', rows: [] });
+    expect(zoneDetail(0, { formatTime, zones })).toEqual({ title: 'Front lawn (8)', rows: [] });
   });
 
   test('is nothing for a Zone the Boundary does not have', () => {
-    expect(zoneDetail('12', { formatTime, zones })).toBeUndefined();
+    expect(zoneDetail(2, { formatTime, zones })).toBeUndefined();
+  });
+
+  test('two Zones traced under one identifier are each named as themselves, and share its progress', () => {
+    const twins = ['Front', 'Back'].map((name) => ({ id: '1', name, ring }));
+    const told = [0, 1].map((place) =>
+      zoneDetail(place, { formatTime, zones: twins, progress: { '1': { progress: 40 } } })
+    );
+    expect(told.map((detail) => detail?.title)).toEqual(['Front (1)', 'Back (1)']);
+    expect(told.map((detail) => detail?.rows)).toEqual(Array(2).fill([{ label: 'Progress', value: '40%' }]));
   });
 });

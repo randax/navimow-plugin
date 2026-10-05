@@ -38,6 +38,26 @@
         },
         "includeAll": true,
         "multi": false
+      },
+      {
+        "name": "mower",
+        "label": "Mower",
+        "type": "custom",
+        "query": "mower-1",
+        "options": [
+          {
+            "text": "mower-1",
+            "value": "mower-1",
+            "selected": true
+          }
+        ],
+        "current": {
+          "text": "mower-1",
+          "value": "mower-1",
+          "selected": true
+        },
+        "includeAll": false,
+        "multi": false
       }
     ]
   },

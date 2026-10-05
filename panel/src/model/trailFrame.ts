@@ -1,6 +1,7 @@
 import type { DataFrame } from '@grafana/data';
 import { columnNames, toNumber, toText, toTime } from './columns';
 import { STALE_AFTER_MS } from './recency';
+import { quoted } from './words';
 
 /** Which column holds each value. Defaults follow the collector's schema. */
 export interface TrailColumns {
@@ -56,12 +57,15 @@ const GAP_MS = STALE_AFTER_MS;
 // x puts the mower beyond the Moon, at a latitude no map can hold.
 const MAX_METRES_FROM_DOCK = 10_000;
 
+// A distance beyond the limit, for a message. Rounded up near the limit, so that a position just
+// outside it is never said to be at it; far beyond, to the whole kilometre.
+const kilometres = (metres: number): string =>
+  (metres < 100_000 ? Math.ceil(metres / 100) / 10 : Math.round(metres / 1000)).toLocaleString('en-US');
+
 const optionalNumber = (v: unknown): number | undefined => {
   const n = toNumber(v);
   return Number.isFinite(n) ? n : undefined;
 };
-
-const quoted = (names: string[]) => names.map((n) => `"${n}"`).join(' and ');
 
 /**
  * Reads Trails from whatever frames the queries produced. Only time, x and y are required; any other
@@ -166,7 +170,7 @@ export function readTrails(
         problem:
           `The ${quoted([names.x, names.y])} columns put every position more than ` +
           `${MAX_METRES_FROM_DOCK / 1000} km from the dock, the first ` +
-          `${Math.round(far.metres / 1000).toLocaleString('en-US')} km away. Positions must be metres ` +
+          `${kilometres(far.metres)} km away. Positions must be metres ` +
           'from the dock: check which columns are set under Trail columns in the panel options.',
       };
     }

@@ -9,6 +9,8 @@ import {
   parseLawn,
   resolveLawn,
   rotationTowards,
+  spelledOut,
+  withDockOrigin,
   type Lawn,
 } from './lawn';
 
@@ -76,9 +78,9 @@ describe('parseLawn', () => {
   });
 
   test('a Zone without a ring is refused by position', () => {
-    expect(parseLawn(JSON.stringify({ boundary: { zones: [{ id: '1', name: 'a', ring: square }, { id: '2' }] } }))).toEqual(
-      { problem: expect.stringContaining('zones[1]') }
-    );
+    expect(
+      parseLawn(JSON.stringify({ boundary: { zones: [{ id: '1', name: 'a', ring: square }, { id: '2' }] } }))
+    ).toEqual({ problem: expect.stringContaining('zones[1]') });
   });
 
   test('a Zone identifier may be empty while editing, but the ring must be there', () => {
@@ -162,10 +164,27 @@ describe('boundaryFeatures', () => {
   });
 });
 
+describe('boundaryFeatures identity', () => {
+  test('each Zone’s polygon is known by its place in the list, which tells apart two that share an identifier', () => {
+    const zones = ['Front', 'Back'].map((name) => ({ id: '1', name, ring: square }));
+    const { features } = boundaryFeatures({ outline: square, zones });
+    expect(features.map((f) => [f.properties.kind, f.id])).toEqual([
+      ['outline', undefined],
+      ['zone', 0],
+      ['zone', 1],
+    ]);
+  });
+});
+
 describe('nextZoneId', () => {
   test('counts on from the largest numeric identifier in use', () => {
     expect(nextZoneId([])).toBe('1');
-    expect(nextZoneId([{ id: '1', name: '', ring: square }, { id: '7', name: '', ring: square }])).toBe('8');
+    expect(
+      nextZoneId([
+        { id: '1', name: '', ring: square },
+        { id: '7', name: '', ring: square },
+      ])
+    ).toBe('8');
     expect(nextZoneId([{ id: 'patio', name: '', ring: square }])).toBe('1');
   });
 });
@@ -190,24 +209,24 @@ describe('resolveLawn', () => {
     expect(resolveLawn({ dockOrigin: origin })).toEqual({ dockOrigin: origin });
   });
 
-  test('prefers the newest place each value is saved in, and keeps what only an older place has', () => {
-    expect(
-      resolveLawn({
-        lawns: { '*': { dockOrigin: { lat: 1, lon: 2 } } },
-        lawn: { dockOrigin: { lat: 3, lon: 4 }, boundary: { outline: square } },
-        dockOrigin: origin,
-      })
-    ).toEqual({ dockOrigin: { lat: 1, lon: 2, rotation: 20 }, boundary: { outline: square } });
+  test('of the two older places, lawn is the newer, and a Dock origin only the root has is kept', () => {
+    expect(resolveLawn({ lawn: { dockOrigin: { lat: 3, lon: 4 } }, dockOrigin: origin })).toEqual({
+      dockOrigin: { lat: 3, lon: 4 },
+    });
     expect(resolveLawn({ lawn: { boundary: { outline: square } }, dockOrigin: origin })).toEqual({
       boundary: { outline: square },
       dockOrigin: origin,
     });
   });
 
-  test('a plain field edited before the panel is migrated changes that value and keeps the rest', () => {
-    expect(resolveLawn({ lawns: { '*': { dockOrigin: { lat: 61 } } }, lawn: { dockOrigin: origin } })).toEqual({
-      dockOrigin: { lat: 61, lon: 10, rotation: 20 },
+  test('once saved for any mower, that is the whole Lawn: what was taken out of it does not come back from an older place', () => {
+    const older = { dockOrigin: origin, boundary: { outline: square } };
+    expect(
+      resolveLawn({ lawns: { '*': { dockOrigin: { lat: 60, lon: 10 } } }, lawn: older, dockOrigin: origin })
+    ).toEqual({
+      dockOrigin: { lat: 60, lon: 10 },
     });
+    expect(resolveLawn({ lawns: { '*': {} }, lawn: older })).toEqual({});
   });
 
   test('is nothing for a panel with none of them', () => {
@@ -238,14 +257,60 @@ describe('migrateLawn', () => {
     expect(migrateLawn({ baseMap: { preset: 'osm' }, lawn: undefined })).toEqual({ baseMap: { preset: 'osm' } });
   });
 
-  test('an older place never overrides a newer one', () => {
+  test('drops the older places once a Lawn is saved for any mower, without reading them', () => {
     const options = {
       dockOrigin: { lat: 60, lon: 10 },
-      lawn: { dockOrigin: { lat: 3, lon: 4 } },
+      lawn: { dockOrigin: { lat: 3, lon: 4 }, boundary: { outline: square } },
       lawns: { '*': { dockOrigin: { lat: 1, lon: 2 } }, 'mower-1': { dockOrigin: { lat: 5, lon: 6 } } },
     };
     expect(migrateLawn(options)).toEqual({
       lawns: { '*': { dockOrigin: { lat: 1, lon: 2 } }, 'mower-1': { dockOrigin: { lat: 5, lon: 6 } } },
     });
+  });
+
+  test('keeps the Lawns of named mowers when it moves an older Lawn in beside them', () => {
+    expect(migrateLawn({ lawn: { dockOrigin: { lat: 3, lon: 4 } }, lawns: { 'mower-1': {} } })).toEqual({
+      lawns: { '*': { dockOrigin: { lat: 3, lon: 4 } }, 'mower-1': {} },
+    });
+  });
+});
+
+describe('withDockOrigin', () => {
+  const lawn = { dockOrigin: { lat: 60, lon: 10, rotation: 20 }, boundary: { outline: square } };
+
+  test('sets one value of the Dock origin and keeps the rest of the Lawn', () => {
+    expect(withDockOrigin(lawn, 'lat', 61)).toEqual({
+      dockOrigin: { lat: 61, lon: 10, rotation: 20 },
+      boundary: { outline: square },
+    });
+  });
+
+  test('a cleared value is taken out, not saved as nothing', () => {
+    expect(withDockOrigin(lawn, 'rotation', undefined).dockOrigin).toEqual({ lat: 60, lon: 10 });
+    expect('rotation' in withDockOrigin(lawn, 'rotation', undefined).dockOrigin!).toBe(false);
+  });
+
+  test('starts a Lawn where there was none', () => {
+    expect(withDockOrigin(undefined, 'lon', 10)).toEqual({ dockOrigin: { lon: 10 } });
+  });
+});
+
+describe('spelledOut', () => {
+  // Grafana merges saved options into the ones before, and takes a value that is missing to mean no change.
+  test('what a Lawn does not have is spelled out as undefined, so that saving it takes it out', () => {
+    expect(spelledOut({ dockOrigin: { lat: 60, lon: 10 } })).toStrictEqual({
+      dockOrigin: { lat: 60, lon: 10, rotation: undefined },
+      boundary: undefined,
+    });
+    expect(spelledOut({})).toStrictEqual({
+      dockOrigin: { lat: undefined, lon: undefined, rotation: undefined },
+      boundary: undefined,
+    });
+  });
+
+  test('what it has is saved as it is', () => {
+    const lawn = { dockOrigin: { lat: 60, lon: 10, rotation: 20 }, boundary: { outline: square, zones: [] } };
+    expect(spelledOut(lawn)).toStrictEqual(lawn);
+    expect(spelledOut({ boundary: { zones: [] } }).boundary).toStrictEqual({ outline: undefined, zones: [] });
   });
 });

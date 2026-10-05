@@ -8,7 +8,7 @@ import type { DockOrigin } from '../model/dockOrigin';
 import { framedBounds, movesView, nextFraming, type Framing } from '../model/framing';
 import type { Detail } from '../model/hover';
 import type { BoundaryFeatures } from '../model/lawn';
-import { LAYERS, mapStyle, type Layer, type MapSources } from '../model/style';
+import { hideable, mapStyle, type Hideable, type MapSources } from '../model/style';
 import type { MowerMarker, TrailScene } from '../model/trail';
 import { cameraFor, type Camera, type View } from '../model/view';
 import { MapControls } from './MapControls';
@@ -68,8 +68,11 @@ const mowerIcon = ({ bearing, stale }: MowerMarker): string => {
   return `<svg viewBox="0 0 24 24" width="28" height="28">${shape}</svg>`;
 };
 
-/** What the pointer is on: a drawn Trail, by its line's id and the place on it, or a Zone of the Boundary. */
-export type MapHit = { layer: 'trail'; trail: number; at: [number, number] } | { layer: 'zone'; zone: string };
+/**
+ * What the pointer is on: a drawn Trail, by its line's id and the place on it, or a Zone of the
+ * Boundary, by its polygon's id.
+ */
+export type MapHit = { on: 'trail'; trail: number; at: [number, number] } | { on: 'zone'; zone: number };
 
 interface Props extends MapSources {
   view: View;
@@ -78,17 +81,16 @@ interface Props extends MapSources {
   mower?: MowerMarker;
   width: number;
   height: number;
-  /** The layers the owner has hidden from the panel. */
-  hidden: readonly Layer[];
-  onHidden: (hidden: Layer[]) => void;
+  /** What the owner has hidden from the panel. */
+  hidden: readonly Hideable[];
+  onHidden: (hidden: Hideable[]) => void;
   /** Whether the view keeps the mower in its middle. */
   following: boolean;
   onFollow: (following: boolean) => void;
   /** What to tell about the thing under the pointer, if anything. */
   detailOf: (hit: MapHit) => Detail | undefined;
-  /** Whether a click there selects something, which the pointer then shows. */
-  selects: (hit: MapHit) => boolean;
-  onSelect: (hit: MapHit) => void;
+  /** What a click there does, if anything; the pointer shows when it would do something. */
+  selectionAt: (hit: MapHit) => (() => void) | undefined;
 }
 
 // A Trail is a line two pixels wide; this much to either side still counts as on it.
@@ -106,10 +108,10 @@ const hitAt = (map: Map, { x, y }: { x: number; y: number }): MapHit | undefined
   ];
   const [trail] = map.queryRenderedFeatures(around, { layers: ['trail'] });
   if (typeof trail?.id === 'number') {
-    return { layer: 'trail', trail: trail.id, at: map.unproject([x, y]).toArray() };
+    return { on: 'trail', trail: trail.id, at: map.unproject([x, y]).toArray() };
   }
   const zone = map.queryRenderedFeatures([x, y], { layers: ['boundary-fill'] }).find((f) => f.properties.kind === 'zone');
-  return zone && { layer: 'zone', zone: String(zone.properties.id) };
+  return typeof zone?.id === 'number' ? { on: 'zone', zone: zone.id } : undefined;
 };
 
 /**
@@ -222,8 +224,7 @@ const MapCanvas: React.FC<Props> = ({
   following,
   onFollow,
   detailOf,
-  selects,
-  onSelect,
+  selectionAt,
 }) => {
   const element = useRef<HTMLDivElement>(null);
   const map = useRef<Map | null>(null);
@@ -234,14 +235,18 @@ const MapCanvas: React.FC<Props> = ({
   const framed = useRef<Framing>(undefined);
   const countPending = useRef(true);
   const [bearing, setBearing] = useState(0);
-  // What the pointer is on, and the data that was true of: a click that narrows the map, or a
-  // refresh, can take the thing away from under a pointer that has not moved.
-  const [hover, setHover] = useState<{ at: { x: number; y: number }; detail: Detail; of: unknown[] }>();
-  const shown = [trail, boundary];
+  // What the pointer is on, and the Trail and Boundary that was true of: a click that narrows the
+  // map, or a refresh, can take the thing away from under a pointer that has not moved.
+  const [hover, setHover] = useState<{
+    at: { x: number; y: number };
+    detail: Detail;
+    trail: TrailScene;
+    boundary: BoundaryFeatures;
+  }>();
   // The map's listeners are added once per map, and must answer with the panel's latest data.
-  const pointer = useRef({ detailOf, selects, onSelect, shown });
+  const pointer = useRef({ detailOf, selectionAt, trail, boundary });
   useEffect(() => {
-    pointer.current = { detailOf, selects, onSelect, shown };
+    pointer.current = { detailOf, selectionAt, trail, boundary };
   });
 
   // New data replaces a source's data only. The source exists once the style has loaded; until
@@ -323,19 +328,17 @@ const MapCanvas: React.FC<Props> = ({
         return;
       }
       const hit = hitAt(created, point);
-      const detail = hit && pointer.current.detailOf(hit);
-      const at = { x: originalEvent.clientX, y: originalEvent.clientY };
-      setHover(detail && { at, detail, of: pointer.current.shown });
-      created.getCanvas().style.cursor = hit && pointer.current.selects(hit) ? 'pointer' : '';
+      const { detailOf: tell, selectionAt: select, ...shown } = pointer.current;
+      const detail = hit && tell(hit);
+      setHover(detail && { at: { x: originalEvent.clientX, y: originalEvent.clientY }, detail, ...shown });
+      created.getCanvas().style.cursor = hit && select(hit) ? 'pointer' : '';
     });
     // A detail belongs to where the pointer is: gone once it leaves the map, or drags the map from under it.
     created.on('mouseout', () => setHover(undefined));
     created.on('movestart', () => setHover(undefined));
     created.on('click', ({ point }) => {
       const hit = hitAt(created, point);
-      if (hit) {
-        pointer.current.onSelect(hit);
-      }
+      (hit && pointer.current.selectionAt(hit))?.();
     });
     map.current = created;
     drawn.current = { view, terrain };
@@ -364,13 +367,14 @@ const MapCanvas: React.FC<Props> = ({
 
   // Following puts the mower back in the middle on every refresh, moved or not, and leaves the zoom
   // to the owner. Keyed on the Trail, which is new with each refresh, and not on the marker, which
-  // is also restyled by the clock.
+  // is also restyled by the clock; and on the panel's size, as a view framed for a new size (above)
+  // is otherwise left on the whole Trail.
   const [mowerLon, mowerLat] = mower?.position ?? [];
   useEffect(() => {
     if (following && mowerLon !== undefined && mowerLat !== undefined) {
       map.current?.easeTo({ center: [mowerLon, mowerLat] });
     }
-  }, [following, mowerLon, mowerLat, trail]);
+  }, [following, mowerLon, mowerLat, trail, width, height]);
 
   // The rotating icon and its age label are separate markers, so the label stays upright.
   useEffect(() => {
@@ -420,7 +424,7 @@ const MapCanvas: React.FC<Props> = ({
       <MapControls
         bearing={bearing}
         following={following}
-        layers={LAYERS.map((l) => l.id).filter((id) => id !== 'boundary' || boundary.features.length > 0)}
+        hideable={hideable(boundary)}
         hidden={hidden}
         canFit={trail.localBox !== undefined}
         canFollow={mower !== undefined}
@@ -436,7 +440,7 @@ const MapCanvas: React.FC<Props> = ({
         onFollow={onFollow}
         onHidden={onHidden}
       />
-      {hover?.of.every((data, i) => data === shown[i]) && <MapTooltip at={hover.at} detail={hover.detail} />}
+      {hover?.trail === trail && hover.boundary === boundary && <MapTooltip at={hover.at} detail={hover.detail} />}
     </>
   );
 };

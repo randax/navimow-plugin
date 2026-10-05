@@ -188,10 +188,18 @@ export function boundaryFeatures(boundary: Boundary | undefined, progress: ZoneP
     type: 'FeatureCollection',
     features: [
       ...(outline
-        ? [{ type: 'Feature' as const, properties: { kind: 'outline' as const, label: 'Outline' }, geometry: polygon(outline) }]
+        ? [
+            {
+              type: 'Feature' as const,
+              properties: { kind: 'outline' as const, label: 'Outline' },
+              geometry: polygon(outline),
+            },
+          ]
         : []),
-      ...zones.map(({ id, name, ring }) => ({
+      ...zones.map(({ id, name, ring }, place) => ({
         type: 'Feature' as const,
+        // Its place in the list, as two Zones may share an identifier: a Zone in two pieces of grass.
+        id: place,
         properties: {
           kind: 'zone' as const,
           label: zoneLabel({ id, name }),
@@ -208,6 +216,24 @@ export function boundaryFeatures(boundary: Boundary | undefined, progress: ZoneP
 export function nextZoneId(zones: Zone[]): string {
   const numbers = zones.map((z) => Number(z.id)).filter((n) => Number.isInteger(n) && n > 0);
   return String(Math.max(0, ...numbers) + 1);
+}
+
+/** A Lawn with one value of its Dock origin set, or taken out. */
+export function withDockOrigin(lawn: Lawn | undefined, key: keyof DockOrigin, value: number | undefined): Lawn {
+  const { [key]: _, ...others } = lawn?.dockOrigin ?? {};
+  return { ...lawn, dockOrigin: value === undefined ? others : { ...others, [key]: value } };
+}
+
+/**
+ * A Lawn as it has to be handed to Grafana to be saved: with everything it does not have spelled
+ * out as undefined. Grafana merges what is saved into the options from before, and takes a value
+ * that is simply missing to mean no change, so a rotation or a Boundary left out would stay.
+ */
+export function spelledOut({ dockOrigin, boundary }: Lawn): Lawn {
+  return {
+    dockOrigin: { lat: dockOrigin?.lat, lon: dockOrigin?.lon, rotation: dockOrigin?.rotation },
+    boundary: boundary && { outline: boundary.outline, zones: boundary.zones },
+  };
 }
 
 /**
@@ -233,25 +259,22 @@ export interface LawnOptions {
 /**
  * Moves a Lawn saved by an earlier version to where it is kept now: under `lawns`, for any mower.
  * Earlier versions held it under `lawn`, and before the Boundary existed held only the Dock origin,
- * at the root. Each value is taken from the newest place that has it.
+ * at the root. Once a Lawn is saved in the new place it is the whole Lawn, and the older places are
+ * leftovers to drop: read again, they would bring back whatever the owner has since taken out.
  */
 export function migrateLawn<T extends LawnOptions>(options: T): Omit<T, 'dockOrigin' | 'lawn'> {
   const { dockOrigin: atRoot, lawn: single, ...rest } = options;
-  if (atRoot === undefined && single === undefined) {
+  if (rest.lawns?.[ANY_MOWER] !== undefined || (atRoot === undefined && single === undefined)) {
     return rest;
   }
-  const kept = rest.lawns?.[ANY_MOWER];
-  // Field by field: a plain field edited on a panel not yet migrated saves that one value in the
-  // new place, and must not lose the rest of the Dock origin still in the old one.
-  const dockOrigin = { ...atRoot, ...single?.dockOrigin, ...kept?.dockOrigin };
-  const lawn: Lawn = { ...single, ...kept, ...(Object.keys(dockOrigin).length > 0 && { dockOrigin }) };
-  return { ...rest, lawns: { ...rest.lawns, [ANY_MOWER]: lawn } };
+  const dockOrigin = single?.dockOrigin ?? atRoot;
+  return { ...rest, lawns: { ...rest.lawns, [ANY_MOWER]: { ...single, ...(dockOrigin && { dockOrigin }) } } };
 }
 
 /**
  * The Lawn a panel's options hold, wherever they hold it. Grafana runs the migration handler only
  * for a panel saved under another plugin version, so a panel saved yesterday still reads from the
- * older places; this is what the panel and the drawer read, and the migration tidies up on the next
- * save.
+ * older places. This is what the panel and every editor of the Lawn read, and each editor saves the
+ * whole Lawn it read, so the first save of any part moves all of it to the new place.
  */
 export const resolveLawn = (options: LawnOptions): Lawn | undefined => migrateLawn(options).lawns?.[ANY_MOWER];

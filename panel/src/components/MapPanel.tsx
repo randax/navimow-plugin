@@ -6,7 +6,7 @@ import { jobAt, trailDetail, zoneDetail, type DetailContext } from '../model/hov
 import { boundaryFeatures, resolveLawn } from '../model/lawn';
 import { resolveOverlay } from '../model/overlay';
 import { jobVariableName, selectedJobs } from '../model/selection';
-import type { Layer } from '../model/style';
+import type { Hideable } from '../model/style';
 import { resolveTerrain } from '../model/terrain';
 import { mowerAt, trailScene } from '../model/trail';
 import { followState, viewState, type FollowState, type ViewState } from '../model/view';
@@ -49,7 +49,7 @@ export const MapPanel: React.FC<PanelProps<MapPanelOptions>> = ({ options, data,
   const { view } = viewed;
   const [followed, setFollowed] = useSwitch<FollowState>((previous) => followState(options.follow, previous));
   const { following } = followed;
-  const [hidden, setHidden] = useState<Layer[]>([]);
+  const [hidden, setHidden] = useState<Hideable[]>([]);
   const { trailColumns, zoneProgressColumns, lawns, lawn: single, dockOrigin: atRoot } = options;
   // Keyed on the places the Lawn may be saved, so a fresh options object alone changes nothing.
   const lawn = useMemo(() => resolveLawn({ lawns, lawn: single, dockOrigin: atRoot }), [lawns, single, atRoot]);
@@ -96,7 +96,12 @@ export const MapPanel: React.FC<PanelProps<MapPanelOptions>> = ({ options, data,
     zones: lawn?.boundary?.zones,
     progress,
   };
-  const jobOf = (hit: MapHit) => (jobs && hit.layer === 'trail' ? jobAt(scene, hit.trail) : undefined);
+  // A click on a Trail selects its Job, where the dashboard has a variable to hold one. The variable
+  // is the dashboard's: set through the address, as its own picker sets it.
+  const selectionAt = (hit: MapHit) => {
+    const job = jobs && hit.on === 'trail' ? jobAt(scene, hit.trail) : undefined;
+    return job === undefined ? undefined : () => locationService.partial({ [`var-${jobVariable}`]: job }, true);
+  };
   return (
     <MapView
       baseMap={baseMap.source}
@@ -113,16 +118,9 @@ export const MapPanel: React.FC<PanelProps<MapPanelOptions>> = ({ options, data,
       following={following}
       onFollow={(on) => setFollowed({ ...followed, following: on })}
       detailOf={(hit) =>
-        hit.layer === 'trail' ? trailDetail(scene, hit.trail, hit.at, context) : zoneDetail(hit.zone, context)
+        hit.on === 'trail' ? trailDetail(scene, hit.trail, hit.at, context) : zoneDetail(hit.zone, context)
       }
-      selects={(hit) => jobOf(hit) !== undefined}
-      onSelect={(hit) => {
-        const job = jobOf(hit);
-        if (job !== undefined) {
-          // The variable is the dashboard's: set through the address, as its own picker sets it.
-          locationService.partial({ [`var-${jobVariable}`]: job }, true);
-        }
-      }}
+      selectionAt={selectionAt}
     >
       {terrain.source && <ViewSwitch view={view} onChange={(to) => setViewed({ ...viewed, view: to })} />}
       {trail.warning && <MapWarning text={trail.warning} />}

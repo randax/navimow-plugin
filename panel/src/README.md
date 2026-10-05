@@ -59,7 +59,8 @@ as it was.
 | Time     | `time`       | no       | When that was reported; the latest row of each Zone is the one shown |
 
 Set other column names under **Zone progress columns**. The panel tells the two queries apart by
-their columns, so their order does not matter.
+their columns, so their order does not matter: any query result with a Zone and a progress column is
+read as Zone progress.
 
 ## Controls on the panel
 

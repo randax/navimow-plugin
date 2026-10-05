@@ -1,7 +1,7 @@
 import { resolveBaseMap } from './baseMap';
 import { boundaryFeatures } from './lawn';
 import { resolveOverlay } from './overlay';
-import { mapStyle } from './style';
+import { hideable, mapStyle } from './style';
 import { resolveTerrain } from './terrain';
 import { EMPTY_SCENE } from './trail';
 
@@ -126,5 +126,12 @@ describe('mapStyle', () => {
       undefined,
       undefined,
     ]);
+  });
+});
+
+describe('hideable', () => {
+  test('the Trail can always be hidden, and the Boundary once there is one to hide', () => {
+    expect(hideable(boundaryFeatures(undefined)).map((h) => h.label)).toEqual(['Trail']);
+    expect(hideable(boundary).map((h) => h.label)).toEqual(['Trail', 'Boundary']);
   });
 });

@@ -2,15 +2,15 @@ import React from 'react';
 import { css } from '@emotion/css';
 import type { GrafanaTheme2 } from '@grafana/data';
 import { Checkbox, Toggletip, ToolbarButton, Tooltip, useStyles2 } from '@grafana/ui';
-import { LAYERS, type Layer } from '../model/style';
+import type { Hideable } from '../model/style';
 
 interface Props {
   /** Where the top of the map points, in degrees clockwise from north. */
   bearing: number;
   following: boolean;
   /** What the map has something to draw for, and so offers to hide. */
-  layers: readonly Layer[];
-  hidden: readonly Layer[];
+  hideable: ReadonlyArray<{ id: Hideable; label: string }>;
+  hidden: readonly Hideable[];
   /** Nothing to fit to, or to follow, until a Trail is on the map. */
   canFit: boolean;
   canFollow: boolean;
@@ -18,7 +18,7 @@ interface Props {
   onNorth: () => void;
   onFit: () => void;
   onFollow: (following: boolean) => void;
-  onHidden: (hidden: Layer[]) => void;
+  onHidden: (hidden: Hideable[]) => void;
 }
 
 // A needle with its north half coloured, turned against the map so that it keeps pointing north.
@@ -36,7 +36,7 @@ const Needle: React.FC<{ bearing: number }> = ({ bearing }) => (
 export const MapControls: React.FC<Props> = ({
   bearing,
   following,
-  layers,
+  hideable,
   hidden,
   canFit,
   canFollow,
@@ -47,8 +47,7 @@ export const MapControls: React.FC<Props> = ({
   onHidden,
 }) => {
   const styles = useStyles2(getStyles);
-  const toggle = (layer: Layer) =>
-    onHidden(hidden.includes(layer) ? hidden.filter((l) => l !== layer) : [...hidden, layer]);
+  const toggle = (id: Hideable) => onHidden(hidden.includes(id) ? hidden.filter((h) => h !== id) : [...hidden, id]);
   return (
     <div className={styles.controls} data-testid="navimow-map-controls">
       <Control name="Zoom in" icon="plus" onClick={() => onZoom(1)} />
@@ -68,8 +67,8 @@ export const MapControls: React.FC<Props> = ({
         closeButton={false}
         fitContent
         content={
-          <div className={styles.layers}>
-            {LAYERS.filter(({ id }) => layers.includes(id)).map(({ id, label }) => (
+          <div className={styles.list}>
+            {hideable.map(({ id, label }) => (
               <Checkbox key={id} label={label} value={!hidden.includes(id)} onChange={() => toggle(id)} />
             ))}
           </div>
@@ -105,5 +104,5 @@ const getStyles = (theme: GrafanaTheme2) => ({
     // The buttons are made for a toolbar's background; over a map each needs one of its own.
     button: { background: theme.colors.background.primary, boxShadow: theme.shadows.z1 },
   }),
-  layers: css({ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: theme.spacing(1) }),
+  list: css({ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: theme.spacing(1) }),
 });

@@ -291,6 +291,47 @@ test('positions read from the wrong column are named, instead of the map failing
   );
 });
 
+// Grafana migrates the options of a panel saved under another plugin version, and of no other. This
+// panel is saved under the current one, with its Lawn where earlier versions kept it, so nothing has
+// moved it: the panel and its editors have to read it from there themselves.
+test('a panel saved by an earlier version keeps its whole Dock origin when one value of it is edited', async ({
+  gotoPanelEditPage,
+  trailDashboard,
+  page,
+}) => {
+  const current = await gotoPanelEditPage({ dashboard: trailDashboard, id: '1' });
+  await expectDrawn(current.panel.locator);
+  const placed = await cameraOf(current.panel.locator);
+
+  const panelEditPage = await gotoPanelEditPage({ dashboard: trailDashboard, id: '4' });
+  const panel = panelEditPage.panel.locator;
+  const options = panelEditPage.getCustomOptions('Dock origin and Boundary');
+  await expectDrawn(panel);
+  // The same Trail, placed and turned exactly as on the panel saved in today's shape: turned any
+  // other way about the dock, its middle would be somewhere else.
+  const legacy = await cameraOf(panel);
+  expect(legacy.center[0]).toBeCloseTo(placed.center[0], 6);
+  expect(legacy.center[1]).toBeCloseTo(placed.center[1], 6);
+  await expect(options.getNumberInput('Latitude')).toHaveValue('59.964');
+  await expect(options.getNumberInput('Longitude')).toHaveValue('10.672');
+  await expect(options.getNumberInput('Rotation')).toHaveValue('20');
+
+  await options.getNumberInput('Latitude').fill('59.965');
+  await page.keyboard.press('Tab');
+  await cameraAtRest(panel, (camera) => camera.center[1] > placed.center[1] + 0.0005);
+  await expect(panel.getByTestId('navimow-map')).toHaveAttribute('data-trails-drawn', '1');
+  await expect(options.getNumberInput('Longitude')).toHaveValue('10.672');
+  await expect(options.getNumberInput('Rotation')).toHaveValue('20');
+
+  // A value taken out stays out, though the place the panel was saved in still holds it.
+  await options.getNumberInput('Rotation').fill('');
+  await page.keyboard.press('Tab');
+  await expect(options.getNumberInput('Latitude')).toHaveValue('59.965');
+  await expect(options.getNumberInput('Rotation')).toHaveValue('');
+  await expectDrawn(panel);
+  await expect(panel.getByTestId('navimow-map')).toHaveAttribute('data-trails-drawn', '1');
+});
+
 test('each panel releases its map when it unmounts', async ({
   gotoDashboardPage,
   readProvisionedDashboard,
@@ -685,9 +726,14 @@ test('clicking a Trail sets the Job variable, which narrows the map to that Job 
   await map.click({ position: await metresFromDock(panel, -15, 0) });
   await expect(page).toHaveURL(/var-job=job-b/);
   await expect(map).toHaveAttribute('data-trails-drawn', '1');
-  // Job a is no longer there to hover, and the view has not moved to show it gone.
+  // Job b is the one that stayed.
+  const tooltip = page.getByTestId('navimow-map-tooltip');
+  await pointAt(panel, -15, 0);
+  await expect(tooltip).toContainText(/Job\s*job-b/);
+  // Where Job a ran there is now only the grass of its Zone, and the view has not moved to show it gone.
   await pointAt(panel, 0, 10);
-  await expect(page.getByTestId('navimow-map-tooltip')).toContainText('Front lawn (1)');
+  await expect(tooltip).toContainText(/Progress\s*64%/);
+  await expect(tooltip).not.toContainText('Job');
   expectSamePlace(await cameraOf(panel), framed);
 
   // The dashboard's own picker undoes it.
@@ -706,7 +752,8 @@ test('the Job variable is picked from the dashboard’s own variables', async ({
   const picker = panelEditPage.getCustomOptions('Jobs').getSelect('Job variable');
   await expect(picker).toHaveSelected('$job');
   await picker.locator().getByRole('combobox').click();
-  await expect(panelEditPage.getByGrafanaSelector(selectors.components.Select.option)).toHaveText(['$job']);
+  // The dashboard has two variables, one for the Job and one for the mower.
+  await expect(panelEditPage.getByGrafanaSelector(selectors.components.Select.option)).toHaveText(['$job', '$mower']);
   await page.keyboard.press('Escape');
 });
 
@@ -839,7 +886,7 @@ test('positions from two mowers are drawn with a warning that names them', async
   await expectDrawn(panel);
   await expect(panel.getByTestId('navimow-map')).toHaveAttribute('data-trails-drawn', '2');
   await expect(panel.getByTestId('navimow-map-warning')).toContainText('Positions from 2 mowers, "north" and "south"');
-  // A panel for one mower has nothing to warn about, and no Boundary to offer to hide.
+  // A panel for one mower has nothing to warn about.
   const one = await openInteraction('Two Jobs');
   await expectDrawn(one);
   await expect(one.getByTestId('navimow-map-warning')).toHaveCount(0);
