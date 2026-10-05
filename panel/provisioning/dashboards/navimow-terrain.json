@@ -37,11 +37,6 @@
         "baseMap": {
           "preset": "kartverket-topo"
         },
-        "dockOrigin": {
-          "lat": 59.964,
-          "lon": 10.672,
-          "rotation": 20
-        },
         "trailColumns": {
           "x": "postureX",
           "y": "postureY",
@@ -50,6 +45,13 @@
         "terrain": {
           "enabled": true,
           "startIn": "flat"
+        },
+        "lawn": {
+          "dockOrigin": {
+            "lat": 59.964,
+            "lon": 10.672,
+            "rotation": 20
+          }
         }
       }
     },
@@ -82,11 +84,6 @@
         "baseMap": {
           "preset": "kartverket-topo"
         },
-        "dockOrigin": {
-          "lat": 59.964,
-          "lon": 10.672,
-          "rotation": 20
-        },
         "trailColumns": {
           "x": "postureX",
           "y": "postureY",
@@ -94,6 +91,13 @@
         },
         "terrain": {
           "enabled": true
+        },
+        "lawn": {
+          "dockOrigin": {
+            "lat": 59.964,
+            "lon": 10.672,
+            "rotation": 20
+          }
         }
       }
     }

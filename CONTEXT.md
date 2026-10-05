@@ -28,6 +28,10 @@ _Avoid_: Heatmap, mowed area, progress map
 The user-drawn outline of the lawn and its Zones, as polygons.
 _Avoid_: Perimeter, fence, map, lawn shape
 
+**Lawn**:
+The Dock origin and Boundary of one panel, saved together.
+_Avoid_: calibration, placement, setup
+
 ## Map panel
 
 **Base map**:

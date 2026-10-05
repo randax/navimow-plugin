@@ -37,11 +37,6 @@
         "baseMap": {
           "preset": "kartverket-topo"
         },
-        "dockOrigin": {
-          "lat": 59.964,
-          "lon": 10.672,
-          "rotation": 20
-        },
         "trailColumns": {
           "x": "postureX",
           "y": "postureY",
@@ -50,6 +45,13 @@
         "overlay": {
           "preset": "kartverket-hillshade",
           "opacity": 1
+        },
+        "lawn": {
+          "dockOrigin": {
+            "lat": 59.964,
+            "lon": 10.672,
+            "rotation": 20
+          }
         }
       }
     }

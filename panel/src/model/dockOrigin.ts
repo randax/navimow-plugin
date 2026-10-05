@@ -18,15 +18,19 @@ const A = 6378137;
 const E2 = 0.00669437999014;
 const RAD = Math.PI / 180;
 
+/** The length of a degree of latitude and of longitude at a latitude, in metres. */
+export function metresPerDegree(lat: number): { lat: number; lon: number } {
+  const w = 1 - E2 * Math.sin(lat * RAD) ** 2;
+  return { lat: (A * (1 - E2) * RAD) / w ** 1.5, lon: (A * Math.cos(lat * RAD) * RAD) / Math.sqrt(w) };
+}
+
 /** Local metres from the dock, as [longitude, latitude]. */
 export function toLonLat({ lat, lon, rotation }: DockOrigin, x: number, y: number): [number, number] {
   const b = rotation * RAD;
   const east = x * Math.sin(b) - y * Math.cos(b);
   const north = x * Math.cos(b) + y * Math.sin(b);
-  const w = 1 - E2 * Math.sin(lat * RAD) ** 2;
-  const metresPerDegreeLat = (A * (1 - E2) * RAD) / w ** 1.5;
-  const metresPerDegreeLon = (A * Math.cos(lat * RAD) * RAD) / Math.sqrt(w);
-  return [lon + east / metresPerDegreeLon, lat + north / metresPerDegreeLat];
+  const metres = metresPerDegree(lat);
+  return [lon + east / metres.lon, lat + north / metres.lat];
 }
 
 /** The compass bearing, in [0, 360), of a mower heading `theta` radians counter-clockwise from its x-axis. */

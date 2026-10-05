@@ -489,3 +489,101 @@ test('the Overlay picker offers hillshade or a custom URL, with an opacity', asy
   await Promise.all([page.keyboard.press('Tab'), tileFrom(page, 'tile.openstreetmap.org', /token=mine/)]);
   await expect(panel.locator('.maplibregl-ctrl-attrib')).toContainText('© My imagery');
 });
+
+test('the calibration drawer saves the Dock origin and Boundary into the options, or discards them, and takes its map with it', async ({
+  gotoPanelEditPage,
+  trailDashboard,
+  page,
+}) => {
+  const panelEditPage = await gotoPanelEditPage({ dashboard: trailDashboard, id: '1' });
+  const panel = panelEditPage.panel.locator;
+  await expectDrawn(panel);
+  const options = panelEditPage.getCustomOptions('Dock origin and Boundary');
+  const canvases = page.locator('canvas.maplibregl-canvas');
+  const open = async () => {
+    await options.element.getByRole('button', { name: 'Calibrate on the map' }).click();
+    const drawer = page.getByRole('dialog', { name: 'Dock origin and Boundary' });
+    await expect(drawer).toBeVisible();
+    return drawer;
+  };
+
+  const drawer = await open();
+  // The drawer has a map of its own, beside the panel's.
+  await expect(canvases).toHaveCount(2);
+  const map = drawer.getByTestId('navimow-calibration-map');
+  await expect(map).toHaveAttribute('data-map-idle');
+  const latitude = drawer.getByRole('spinbutton', { name: 'Latitude' });
+  const rotation = drawer.getByRole('spinbutton', { name: 'Rotation in degrees' });
+  await expect(latitude).toHaveValue('59.964');
+  await expect(rotation).toHaveValue('20');
+
+  // Dragging the handle turns the x-axis; dragging the dock moves it.
+  const drag = async (name: string, dx: number, dy: number) => {
+    const handle = drawer.getByRole('img', { name });
+    // Hovering waits for the marker to stand still: the drawer slides in, the map with it.
+    await handle.hover();
+    const box = (await handle.boundingBox())!;
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width / 2 + dx, box.y + box.height / 2 + dy, { steps: 8 });
+    await page.mouse.up();
+  };
+  await drag('Rotation handle', 60, 60);
+  await expect(rotation).not.toHaveValue('20');
+  const turned = Number(await rotation.inputValue());
+  expect(turned).toBeGreaterThan(20);
+  expect(turned).toBeLessThan(180);
+  await drag('Dock', 0, -40);
+  await expect(latitude).not.toHaveValue('59.964');
+  expect(Number(await latitude.inputValue())).toBeGreaterThan(59.964);
+
+  await latitude.fill('59.965');
+  await rotation.fill('33.5');
+
+  // Four corners around the middle of the map: three clicks and a double click, which must not
+  // add its corner twice.
+  await drawer.getByRole('button', { name: 'Draw outline' }).click();
+  const box = (await map.boundingBox())!;
+  const [cx, cy] = [box.width / 2, box.height / 2];
+  await map.click({ position: { x: cx - 120, y: cy - 120 } });
+  await map.click({ position: { x: cx + 120, y: cy - 120 } });
+  await map.click({ position: { x: cx + 120, y: cy + 120 } });
+  await map.dblclick({ position: { x: cx - 120, y: cy + 120 } });
+  await expect(drawer.getByText('Outline: 4 corners')).toBeVisible();
+
+  // A Zone gets the next identifier; blanking it holds Save until it is back.
+  await drawer.getByRole('button', { name: 'Add Zone' }).click();
+  await map.click({ position: { x: cx - 60, y: cy - 60 } });
+  await map.click({ position: { x: cx + 60, y: cy - 60 } });
+  await map.dblclick({ position: { x: cx, y: cy + 60 } });
+  const zoneId = drawer.getByRole('textbox', { name: 'Zone 1 identifier' });
+  await expect(zoneId).toHaveValue('1');
+  const save = drawer.getByRole('button', { name: 'Save' });
+  await zoneId.fill('');
+  await expect(drawer.getByText(/Zone 1 needs the identifier/)).toBeVisible();
+  await expect(save).toBeDisabled();
+  await zoneId.fill('3');
+  await expect(save).toBeEnabled();
+
+  // What will be saved is shown as text, with the typed values in it.
+  const text = drawer.locator('textarea');
+  await expect(text).toHaveValue(/"lat": 59\.965,/);
+  await expect(text).toHaveValue(/"rotation": 33\.5/);
+  await expect(text).toHaveValue(/"outline": \[/);
+  await expect(text).toHaveValue(/"id": "3"/);
+
+  await save.click();
+  await expect(drawer).toHaveCount(0);
+  await expect(canvases).toHaveCount(1);
+  await expect(options.getNumberInput('Latitude')).toHaveValue('59.965');
+  await expect(options.getNumberInput('Rotation')).toHaveValue('33.5');
+  await expectDrawn(panel);
+  await expect(panel.getByTestId('navimow-map')).toHaveAttribute('data-trails-drawn', '1');
+
+  // Discard forgets a change, and the plain fields keep what was saved.
+  const again = await open();
+  await again.getByRole('spinbutton', { name: 'Latitude' }).fill('58');
+  await again.getByRole('button', { name: 'Discard' }).click();
+  await expect(again).toHaveCount(0);
+  await expect(canvases).toHaveCount(1);
+  await expect(options.getNumberInput('Latitude')).toHaveValue('59.965');
+});
