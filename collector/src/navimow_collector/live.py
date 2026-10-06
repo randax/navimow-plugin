@@ -41,8 +41,8 @@ DRAIN_SECONDS = 0.1
 VENDOR_WAIT_SECONDS = 5
 # Every topic the broker delivers for a mower, whatever the channel.
 MOWER_TOPIC = re.compile(r"^/downlink/vehicle/([^/]+)/")
-# How much of a message nothing is stored of is logged, in characters.
-UNSTORED_LOGGED = 300
+# How much of a message nothing is stored of is logged.
+UNSTORED_LOG_CHARS = 300
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -393,7 +393,7 @@ class Collector:
             "Mower %s sent a message on the %s channel, of which nothing is stored: %s",
             mower,
             channel,
-            payload.decode("utf-8", errors="replace")[:UNSTORED_LOGGED],
+            payload.decode("utf-8", errors="replace")[:UNSTORED_LOG_CHARS],
         )
 
     def _feed(self, record: dict[str, object]) -> None:

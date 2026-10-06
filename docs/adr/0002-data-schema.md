@@ -14,7 +14,9 @@ kept for good. This resolves
 
 ## The relational shape
 
-PostgreSQL is the reference; TimescaleDB and ClickHouse hold the same tables and columns.
+PostgreSQL is the reference, and the one backend built so far. TimescaleDB and ClickHouse
+are to hold the same tables and columns
+([#31](https://github.com/randax/navimow-plugin/issues/31)).
 
 | Table | Key | Columns |
 |---|---|---|
@@ -66,14 +68,16 @@ Nothing is stored for Coverage: the panel computes it from the Trail.
 Everything is kept unless the owner sets `storage.retention_days`. Rows older than that are
 then removed from `trail_point`, `job_progress`, `mower_state` and `collector_gap`. `job`
 and `mower` rows are never removed, so the history of Jobs outlives their Trails. On
-PostgreSQL the collector removes the rows itself; TimescaleDB and ClickHouse are given the
-rule to apply. InfluxDB keeps retention on the bucket, which the owner creates, so there
-the setting is refused. Not yet built:
-[#73](https://github.com/randax/navimow-plugin/issues/73).
+PostgreSQL the collector is to remove the rows itself; TimescaleDB and ClickHouse are to be
+given the rule to apply. InfluxDB keeps retention on the bucket, which the owner creates,
+so there the setting is to be refused. None of it is built yet:
+[#73](https://github.com/randax/navimow-plugin/issues/73) for PostgreSQL,
+[#31](https://github.com/randax/navimow-plugin/issues/31) for the others.
 
 ## The InfluxDB shape
 
-Measurements are named as the tables and fields as the columns.
+Not yet built ([#31](https://github.com/randax/navimow-plugin/issues/31)). Measurements are
+named as the tables and fields as the columns.
 
 - **Time** is `device_time`; for `job` and `collector_gap`, `start_time`; for `mower`,
   `updated_time`.
@@ -112,7 +116,10 @@ Measurements are named as the tables and fields as the columns.
   older database finds fewer of them.
 - `job.zones` is an array, which PostgreSQL and ClickHouse have and InfluxDB does not:
   there it is text, and a query that wants one Zone of the list has to parse it.
-- A Job shorter than the five minutes between two Zone lists may record none.
+- A Job has no `zones` for its first minutes, and one given up within them never has. The
+  mower lists its Zones as it leaves the dock, but a third of a second before the state
+  channel says it has left, so that list falls outside the Job; the next came 225 seconds
+  later in the capture.
 - The device list is read when the collector starts, so a firmware update is recorded at
   the next start, not when it happened.
 - The bundled dashboard has no signal-strength panel until a mower is seen to send one.

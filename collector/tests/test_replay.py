@@ -197,6 +197,16 @@ def test_a_mower_is_recorded_as_the_device_list_describes_it(
     assert mowers(database) == [("DEVICE_1", "NAME_1", "X420", "005D", ms(1790775147856))]
 
 
+def test_a_mower_whose_firmware_the_device_list_does_not_name_is_recorded_without_it(
+    config_file: Path, database: str
+) -> None:
+    # The synthetic device list was written before a real one was seen, and names the
+    # firmware under a key no mower uses.
+    assert main(["--config", str(config_file), "replay", str(FIXTURE)]) == 0
+
+    assert mowers(database) == [("DEVICE_1", "NAME_1", "Navimow H500E", None, ms(1788084093431))]
+
+
 def test_a_mower_described_differently_later_is_rewritten(
     config_file: Path, database: str, tmp_path: Path
 ) -> None:

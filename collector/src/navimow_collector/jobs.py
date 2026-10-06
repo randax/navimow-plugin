@@ -46,9 +46,11 @@ class JobTracker:
         self._job = job
         away = job is not None and job.end_time is None
         self._spans = [Span(job.start_time, job.job_id)] if job is not None and away else []
-        # When the newest state and the newest progress report heard were sent. Whatever
+        # When the newest state, progress report and Zone list heard were sent. Whatever
         # was sent before a stored Job last changed was heard by the collector that stored it.
-        self._stated_at = self._reported = job.updated_time if job is not None else None
+        self._stated_at = self._reported = self._listed = (
+            job.updated_time if job is not None else None
+        )
         self._pose: TrailPoint | None = None  # the newest position
         self._heard = False  # whether the state channel has spoken since the last gap
         # When the Job was left off, while it is only taken to be resumed: the mower left
@@ -146,6 +148,9 @@ class JobTracker:
     def zones(self, listed: ZoneList) -> list[Row]:
         """The Zones a Job covers are the ones last listed while the mower was away on it."""
         job = self._job
+        if self._listed is not None and listed.device_time < self._listed:
+            return []  # delivered after a newer one: decides nothing
+        self._listed = listed.device_time
         if job is None or self._span(listed.device_time).job_id != job.job_id:
             return []  # listed at the dock, or on a Job before this one
         return self._take(replace(job, zones=listed.zones), listed.device_time, self._zone)

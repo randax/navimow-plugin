@@ -214,10 +214,7 @@ def _polled(received_time: datetime, answer: object) -> Iterator[MowerState]:
 def _described(received_time: datetime, answer: object) -> Iterator[Mower]:
     """Each mower in a device list, with whatever of its details the list gives."""
     for mower_id, device in _devices(answer):
-        name, model, firmware = (
-            value if isinstance(value := device.get(key), str) else None
-            for key in ("name", "model", "firmware")
-        )
+        name, model, firmware = (_str(device.get(key)) for key in ("name", "model", "firmware"))
         yield Mower(mower_id, name, model, firmware, received_time)
 
 
@@ -285,6 +282,10 @@ def _int(value: object) -> int | None:
     # Beyond a 32-bit column it is noise, and a row no database accepts would never leave
     # the live buffer.
     return number if -(2**31) <= number < 2**31 else None
+
+
+def _str(value: object) -> str | None:
+    return value if isinstance(value, str) else None
 
 
 def _float(value: object) -> float | None:
