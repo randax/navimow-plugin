@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { type ReactNode } from 'react';
 import { css } from '@emotion/css';
 import type { GrafanaTheme2 } from '@grafana/data';
 import { Checkbox, Toggletip, ToolbarButton, Tooltip, useStyles2 } from '@grafana/ui';
@@ -19,6 +19,8 @@ interface Props {
   onFit: () => void;
   onFollow: (following: boolean) => void;
   onHidden: (hidden: Hideable[]) => void;
+  /** More controls for the foot of the stack, made by whoever owns what they switch. */
+  children?: ReactNode;
 }
 
 // A needle with its north half coloured, turned against the map so that it keeps pointing north.
@@ -45,6 +47,7 @@ export const MapControls: React.FC<Props> = ({
   onFit,
   onFollow,
   onHidden,
+  children,
 }) => {
   const styles = useStyles2(getStyles);
   const toggle = (id: Hideable) => onHidden(hidden.includes(id) ? hidden.filter((h) => h !== id) : [...hidden, id]);
@@ -76,6 +79,7 @@ export const MapControls: React.FC<Props> = ({
       >
         <ToolbarButton variant="canvas" icon="layer-group" aria-label="Show or hide" />
       </Toggletip>
+      {children}
     </div>
   );
 };

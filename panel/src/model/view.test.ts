@@ -1,5 +1,14 @@
 import type { TerrainOptions } from './terrain';
-import { cameraFor, followState, initialView, viewState, type Camera, type View, type ViewState } from './view';
+import {
+  cameraFor,
+  followState,
+  initialView,
+  pitchToSeeRaised,
+  viewState,
+  type Camera,
+  type View,
+  type ViewState,
+} from './view';
 
 describe('initialView', () => {
   test('without Terrain the map is flat, whatever the saved start', () => {
@@ -114,5 +123,16 @@ describe('cameraFor', () => {
   test('a first map has no place to keep yet, only the tilt of its view', () => {
     expect(cameraFor('terrain')).toEqual({ pitch: 60 });
     expect(cameraFor('flat')).toEqual({ pitch: 0 });
+  });
+});
+
+describe('pitchToSeeRaised', () => {
+  test('a map seen from straight above is tilted, as raised Coverage looks flat from there', () => {
+    expect(pitchToSeeRaised(0)).toBe(60);
+  });
+
+  test('a map the owner has tilted already is left as it is', () => {
+    expect(pitchToSeeRaised(35)).toBeUndefined();
+    expect(pitchToSeeRaised(60)).toBeUndefined();
   });
 });

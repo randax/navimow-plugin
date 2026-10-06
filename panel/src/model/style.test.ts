@@ -1,4 +1,5 @@
 import { resolveBaseMap } from './baseMap';
+import { coverageScene } from './coverageScene';
 import { boundaryFeatures } from './lawn';
 import { resolveOverlay } from './overlay';
 import { hideable, mapStyle } from './style';
@@ -23,6 +24,22 @@ const boundary = boundaryFeatures({
     [10, 60.001],
   ],
 });
+
+// A metre of mowing from the dock: enough for Coverage to have something to draw.
+const coverage = coverageScene(
+  [
+    {
+      segments: [
+        [
+          { time: 0, x: 0, y: 0 },
+          { time: 2000, x: 1, y: 0 },
+        ],
+      ],
+    },
+  ],
+  { lat: 60, lon: 10, rotation: 0 },
+  { style: 'grid', raised: false, encoding: 'visits', cellSize: 0.5, cuttingWidth: 0.43 }
+);
 
 describe('mapStyle', () => {
   test('a Base map alone is drawn under the Boundary and the Trail, with no Terrain', () => {
@@ -114,6 +131,37 @@ describe('mapStyle', () => {
     ]);
   });
 
+  test("Coverage lies over the Boundary's fill and under its outline and the Trail, drawn by its own layer", () => {
+    const style = mapStyle({ baseMap }, lines, boundary, [], coverage);
+    expect(style.layers.map((l) => l.id)).toEqual(['base', 'boundary-fill', 'coverage', 'boundary-line', 'trail']);
+    expect(style.layers[2]).toMatchObject({ source: 'coverage', ...coverage?.layer });
+    expect(style.sources.coverage).toEqual({ type: 'geojson', data: coverage?.data });
+  });
+
+  test('hidden Coverage stays in the style, undrawn, whatever else its layer lays out', () => {
+    const hiddenLayer = (scene: typeof coverage) =>
+      mapStyle({ baseMap }, lines, boundary, ['coverage'], scene).layers.find((l) => l.id === 'coverage');
+    expect(hiddenLayer(coverage)?.layout).toEqual({ visibility: 'none' });
+    const line = coverage && {
+      ...coverage,
+      layer: { type: 'line' as const, layout: { 'line-cap': 'round' as const } },
+    };
+    expect(hiddenLayer(line)?.layout).toEqual({ 'line-cap': 'round', visibility: 'none' });
+  });
+
+  test('the Trail recedes to a faint hairline while Coverage is shown under it, and is back in full without', () => {
+    const trailPaint = (hidden: Parameters<typeof mapStyle>[3], scene?: typeof coverage) =>
+      mapStyle({ baseMap }, lines, boundary, hidden, scene).layers.find((l) => l.id === 'trail')?.paint;
+    const full = { 'line-color': ['get', 'colour'], 'line-width': 2, 'line-opacity': 0.9 };
+    expect(trailPaint([])).toEqual(full);
+    expect(trailPaint([], coverage)).toEqual({
+      'line-color': ['get', 'colour'],
+      'line-width': 1,
+      'line-opacity': 0.35,
+    });
+    expect(trailPaint(['coverage'], coverage)).toEqual(full);
+  });
+
   test('the pickers are independent: any Base map combines with any Terrain and Overlay, each with its attribution', () => {
     const style = mapStyle(
       { baseMap, overlay, terrain: source(resolveTerrain({ enabled: true, preset: 'aws-terrarium' })) },
@@ -133,5 +181,10 @@ describe('hideable', () => {
   test('the Trail can always be hidden, and the Boundary once there is one to hide', () => {
     expect(hideable(boundaryFeatures(undefined)).map((h) => h.label)).toEqual(['Trail']);
     expect(hideable(boundary).map((h) => h.label)).toEqual(['Trail', 'Boundary']);
+  });
+
+  test('Coverage can be hidden once the Trail has cut something', () => {
+    expect(hideable(boundary, coverage).map((h) => h.label)).toEqual(['Trail', 'Coverage', 'Boundary']);
+    expect(hideable(boundaryFeatures(undefined), coverage).map((h) => h.label)).toEqual(['Trail', 'Coverage']);
   });
 });

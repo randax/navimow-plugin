@@ -4,13 +4,14 @@ import type { GrafanaTheme2 } from '@grafana/data';
 import { useStyles2 } from '@grafana/ui';
 import { GPUInitializationError, Map, Marker, setWorkerUrl, type GeoJSONSource, type PointLike } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
+import type { CoverageScene } from '../model/coverageScene';
 import type { DockOrigin } from '../model/dockOrigin';
 import { framedBounds, movesView, nextFraming, type Framing } from '../model/framing';
 import type { Detail } from '../model/hover';
 import type { BoundaryFeatures } from '../model/lawn';
 import { hideable, mapStyle, type Hideable, type MapSources } from '../model/style';
 import type { MowerMarker, TrailScene } from '../model/trail';
-import { cameraFor, type Camera, type View } from '../model/view';
+import { cameraFor, pitchToSeeRaised, type Camera, type View } from '../model/view';
 import { MapControls } from './MapControls';
 import { MapTooltip } from './MapTooltip';
 import { PanelMessage } from './PanelMessage';
@@ -78,6 +79,10 @@ interface Props extends MapSources {
   view: View;
   trail: TrailScene;
   boundary: BoundaryFeatures;
+  /** Absent when the Trail has cut nothing. */
+  coverage?: CoverageScene;
+  /** Whether Coverage stands up from the ground, which wants a tilted map to be seen. */
+  raised: boolean;
   mower?: MowerMarker;
   width: number;
   height: number;
@@ -91,6 +96,8 @@ interface Props extends MapSources {
   detailOf: (hit: MapHit) => Detail | undefined;
   /** What a click there does, if anything; the pointer shows when it would do something. */
   selectionAt: (hit: MapHit) => (() => void) | undefined;
+  /** Controls to add to the stack on the map, for what this adapter draws but does not switch. */
+  controls?: ReactNode;
 }
 
 // A Trail is a line two pixels wide; this much to either side still counts as on it.
@@ -142,10 +149,12 @@ export const MapView: React.FC<Props & { children?: ReactNode }> = ({ children, 
     terrain: useByValue(props.view === 'terrain' ? props.terrain : undefined),
   };
   const hidden = useByValue(props.hidden);
+  // Its colours are scaled to the data, so a refresh hands over a new layer that is usually the same.
+  const coverageLayer = useByValue(props.coverage?.layer);
   return (
     <WebGLBoundary width={props.width} height={props.height}>
       <div style={{ position: 'relative', width: props.width, height: props.height }}>
-        <MapCanvas {...props} {...sources} hidden={hidden} />
+        <MapCanvas {...props} {...sources} hidden={hidden} coverageLayer={coverageLayer} />
         <div className={styles.topLeft}>{children}</div>
       </div>
     </WebGLBoundary>
@@ -209,13 +218,17 @@ const fit = (
 /** Clears the drawn mark until the map next goes idle with the new style or data in. */
 const redrawing = (element: HTMLElement | null) => element?.removeAttribute('data-map-idle');
 
-const MapCanvas: React.FC<Props> = ({
+const MapCanvas: React.FC<Props & { coverageLayer?: CoverageScene['layer'] }> = ({
   baseMap,
   overlay,
   terrain,
   view,
   trail,
   boundary,
+  coverage,
+  coverageLayer,
+  raised,
+  controls,
   mower,
   width,
   height,
@@ -231,6 +244,7 @@ const MapCanvas: React.FC<Props> = ({
   const drawn = useRef({ view, terrain });
   const lines = useRef(trail.lines);
   const rings = useRef(boundary);
+  const covers = useRef(coverage?.data);
   const topUp = useRef(false);
   const framed = useRef<Framing>(undefined);
   const countPending = useRef(true);
@@ -251,7 +265,7 @@ const MapCanvas: React.FC<Props> = ({
 
   // New data replaces a source's data only. The source exists once the style has loaded; until
   // then the style carries the data it was made with, topped up on load below.
-  const replaceData = (id: 'trail' | 'boundary', data: GeoJSON.FeatureCollection) => {
+  const replaceData = (id: 'trail' | 'boundary' | 'coverage', data: GeoJSON.FeatureCollection) => {
     const source = map.current?.getSource<GeoJSONSource>(id);
     if (source) {
       redrawing(element.current);
@@ -269,13 +283,22 @@ const MapCanvas: React.FC<Props> = ({
     rings.current = boundary;
     replaceData('boundary', boundary);
   }, [boundary]);
+  // Coverage has a source only while there is some to draw; the restyle below adds and removes it.
+  const cells = coverage?.data;
+  useEffect(() => {
+    covers.current = cells;
+    if (cells) {
+      replaceData('coverage', cells);
+    }
+  }, [cells]);
 
   // Create the map on first draw, then restyle it in place: a second style set before the first
   // has loaded makes MapLibre rebuild from scratch. A change of Terrain is the exception. Terrain
   // has to be in a map's first style (see mapStyle), so the map is recreated where the last one
   // was looking; the model decides the camera (cameraFor).
   useEffect(() => {
-    const style = mapStyle({ baseMap, overlay, terrain }, lines.current, rings.current, hidden);
+    const covering = covers.current && coverageLayer && { data: covers.current, layer: coverageLayer };
+    const style = mapStyle({ baseMap, overlay, terrain }, lines.current, rings.current, hidden, covering);
     const previous = map.current;
     redrawing(element.current);
     // A restyle can hide the Trail or show it again, so what is drawn is counted afresh.
@@ -306,6 +329,9 @@ const MapCanvas: React.FC<Props> = ({
         topUp.current = false;
         created.getSource<GeoJSONSource>('trail')?.setData(lines.current);
         created.getSource<GeoJSONSource>('boundary')?.setData(rings.current);
+        if (covers.current) {
+          created.getSource<GeoJSONSource>('coverage')?.setData(covers.current);
+        }
       }
     });
     // Marks a fully drawn map, how many Trails it drew and where it looks from, so browser tests can
@@ -343,7 +369,18 @@ const MapCanvas: React.FC<Props> = ({
     map.current = created;
     drawn.current = { view, terrain };
     setBearing(created.getBearing());
-  }, [baseMap, overlay, terrain, view, hidden]);
+  }, [baseMap, overlay, terrain, view, hidden, coverageLayer]);
+
+  // Raised Coverage seen from straight above is the flat picture again, so the map is tilted once
+  // to show it: when Coverage is raised, or first has something to raise. From there the tilt is
+  // the owner's, and a switch to the flat view looks straight down as it always does.
+  const standing = raised && coverage !== undefined;
+  useEffect(() => {
+    const pitch = standing && map.current ? pitchToSeeRaised(map.current.getPitch()) : undefined;
+    if (pitch !== undefined) {
+      map.current?.easeTo({ pitch });
+    }
+  }, [standing]);
 
 
   // When to frame the Trail, and whether that moves a view that follows the mower, are the model's
@@ -424,7 +461,7 @@ const MapCanvas: React.FC<Props> = ({
       <MapControls
         bearing={bearing}
         following={following}
-        hideable={hideable(boundary)}
+        hideable={hideable(boundary, coverage)}
         hidden={hidden}
         canFit={trail.localBox !== undefined}
         canFollow={mower !== undefined}
@@ -439,7 +476,9 @@ const MapCanvas: React.FC<Props> = ({
         }}
         onFollow={onFollow}
         onHidden={onHidden}
-      />
+      >
+        {controls}
+      </MapControls>
       {hover?.trail === trail && hover.boundary === boundary && <MapTooltip at={hover.at} detail={hover.detail} />}
     </>
   );

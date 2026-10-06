@@ -1,4 +1,5 @@
 import type { BaseMapOptions } from './model/baseMap';
+import type { CoverageOptions } from './model/coverage';
 import type { LawnOptions } from './model/lawn';
 import type { OverlayOptions } from './model/overlay';
 import type { TerrainOptions } from './model/terrain';
@@ -13,6 +14,7 @@ export interface MapPanelOptions extends LawnOptions {
   baseMap: BaseMapOptions;
   terrain?: TerrainOptions;
   overlay?: OverlayOptions;
+  coverage?: CoverageOptions;
   /** Blank or absent means the default column name. */
   trailColumns?: Partial<TrailColumns>;
   /** Blank or absent means the default column name. */

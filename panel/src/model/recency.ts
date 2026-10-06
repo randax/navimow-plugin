@@ -6,9 +6,13 @@ export type Recency = { stale: false } | { stale: true; lastSeen: string };
 // short of the hour-old position, shown as current, that this exists to prevent.
 export const STALE_AFTER_MS = 15 * 60_000;
 
-const MIN = 60_000;
+export const MIN = 60_000;
 const HOUR = 60 * MIN;
 const DAY = 24 * HOUR;
+
+/** A length of time in the largest unit that says something: minutes, then hours, then days. */
+export const duration = (ms: number): string =>
+  ms < HOUR ? `${Math.floor(ms / MIN)} min` : ms < 2 * DAY ? `${Math.floor(ms / HOUR)} h` : `${Math.floor(ms / DAY)} d`;
 
 /**
  * Whether a position from `time` still describes the mower at `now`. `now` is the wall clock, which
@@ -21,11 +25,5 @@ export function recency(time: number, now: number): Recency {
   if (age < STALE_AFTER_MS) {
     return { stale: false };
   }
-  const amount =
-    age < HOUR
-      ? `${Math.floor(age / MIN)} min`
-      : age < 2 * DAY
-        ? `${Math.floor(age / HOUR)} h`
-        : `${Math.floor(age / DAY)} d`;
-  return { stale: true, lastSeen: `Last seen ${amount} ago` };
+  return { stale: true, lastSeen: `Last seen ${duration(age)} ago` };
 }
