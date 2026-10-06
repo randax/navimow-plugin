@@ -5,3 +5,12 @@ datasources:
     type: testdata
     uid: trlxrdZVk
     isDefault: true
+  # What the bundled dashboards read: the database docker compose fills by replaying a capture.
+  - name: Navimow
+    type: grafana-postgresql-datasource
+    uid: navimow-postgresql
+    url: postgres:5432
+    user: postgres
+    jsonData:
+      database: navimow
+      sslmode: disable

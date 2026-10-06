@@ -3,3 +3,39 @@ services:
     extends:
       file: .config/docker-compose-base.yaml
       service: grafana
+    volumes:
+      # The bundled dashboards, provisioned as they are so that the browser tests open the very files
+      # an owner imports.
+      - ../dashboards:/etc/grafana/bundled-dashboards
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+
+  # What the bundled dashboards read: a database filled as the collector fills one.
+  postgres:
+    image: postgres:16
+    environment:
+      # No password: a throwaway database, reachable only from the services here.
+      POSTGRES_HOST_AUTH_METHOD: trust
+      POSTGRES_DB: navimow
+    healthcheck:
+      test: ['CMD', 'pg_isready', '-U', 'postgres', '-d', 'navimow']
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  seed:
+    image: python:3.13
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ..:/repo:ro
+    # Installed from a copy, since a build writes beside its sources and these are mounted read-only.
+    command:
+      - sh
+      - -c
+      - >-
+        cp -r /repo/collector /tmp/collector
+        && pip install --quiet --root-user-action=ignore /tmp/collector
+        && python /repo/panel/tests/seed.py
