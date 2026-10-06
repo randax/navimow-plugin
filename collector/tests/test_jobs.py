@@ -459,6 +459,33 @@ def test_the_real_capture_mows_its_six_zones_in_order(real: str) -> None:
     assert len(progress(real)) == 414  # every type-2 message but the announcement
 
 
+def test_a_job_records_the_zones_it_was_set_to_mow(real: str) -> None:
+    # The mower lists them every five minutes while it is away. Half a second before it
+    # turned for the dock it sent a message of that kind with no list in it, which says
+    # nothing of the Job.
+    [job] = jobs(real)
+    assert job["zones"] == [1, 6, 7, 9, 10, 11]
+
+
+def test_the_synthetic_job_records_its_two_zones(synthetic: str) -> None:
+    [job] = jobs(synthetic)
+    assert job["zones"] == [10, 11]
+
+
+def test_a_zone_list_delivered_after_a_later_one_decides_nothing(replay: Replay) -> None:
+    # Were the Zones of a Job changed while it was under way, an older list held up on the
+    # way must not put back what the Job was set to mow before.
+    capture: list[Record] = [dict(r) for r in read_capture(REAL_CAPTURE)]
+    stray = {
+        "recv_ms": capture[-1]["recv_ms"] + 1,
+        "kind": "mqtt",
+        "topic": "/downlink/vehicle/DEVICE_1/realtimeDate/location",
+        "payload": [{"partitionIds": [1, 6], "time": REAL_LEFT + 60_000, "type": 3}],
+    }
+    [job] = jobs(replay([*capture, stray]))
+    assert job["zones"] == [1, 6, 7, 9, 10, 11]
+
+
 def test_a_state_delivered_after_a_later_one_decides_nothing(replay: Replay) -> None:
     # The mower says isRunning twice when it resumes. Were the second delivered after it
     # has finished and docked, it would look like leaving the dock on a new Job.

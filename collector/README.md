@@ -170,10 +170,11 @@ against, are in [ADR 0001](../docs/adr/0001-job-and-zone-detection.md).
 
 | Table          | One row per                 | Holds                                                                                              |
 | -------------- | --------------------------- | -------------------------------------------------------------------------------------------------- |
-| `job`          | Job                         | `start_time`, `end_time`, `completed`, `mowing_percentage`, `area` (m²) and the dock arrival pose  |
+| `job`          | Job                         | `start_time`, `end_time`, `completed`, `mowing_percentage`, `area` (m²), the dock arrival pose and its `zones` |
 | `trail_point`  | position                    | the pose, with the `job_id` and `zone` it was mowed in                                             |
 | `job_progress` | progress report             | `zone`, `zone_progress` and `mowing_percentage` (both percent), `area` and `week_area` (m²)        |
 | `mower_state`  | state channel message       | `state` and `battery`: the status timeline and the battery level over time                         |
+| `mower`        | mower                       | `name`, `model` and `firmware`, as the account's device list describes it                          |
 
 Every row carries its `mower_id`, and every row but a `job` names its Job in
 `job_id`, which is empty while the mower is at the dock, a charging break
@@ -185,10 +186,23 @@ A `job` row is rewritten as the Job goes on. While the mower is away its
 is taken up again if the mower next leaves the dock to carry on with it. `arrival_x`,
 `arrival_y` and `arrival_theta` are the pose the mower docked in, which is where
 the dock stands on the mower's own axes: a starting point for the Dock origin.
+`zones` are the Zones the Job was set to mow, as the mower last listed them
+while away on it, and empty until it has.
 
-The layout is provisional until the schema is settled; changes to it only ever
-add columns. A Trail recorded before this version has no `job_id`: replaying a
-capture over rows already stored does not fill it in.
+A `mower` row is rewritten when the device list describes the mower
+differently, a firmware update for one, and `updated_time` says since when. The
+collector reads the list as it starts, so that is when a change is picked up.
+
+There is no table for error events or signal strength: no capture has yet held
+a message carrying either. A mower in trouble shows as a `mower_state` row
+whose `state` is `Error` or `isLifted`, and a message on a channel nothing is
+stored of is counted and logged (see [Health and metrics](#health-and-metrics)).
+
+Changes to this layout only ever add tables and columns. Why it is laid out so,
+what was left out and how long rows are kept are in
+[ADR 0002](../docs/adr/0002-data-schema.md). A Trail recorded before Jobs were
+detected has no `job_id`: replaying a capture over rows already stored does not
+fill it in.
 
 A collector that restarts carries on from each mower's latest stored Job, so a
 restart or an outage inside a Job leaves a gap in it rather than splitting it.
@@ -210,8 +224,8 @@ If that address cannot be used, `collect` does not start.
 ```json
 {"status": "live", "seconds_since_tick": 2.5,
  "broker": {"connected": true},
- "mowers": {"DEVICE_1": {"last_message_age_seconds": 12.0},
-            "DEVICE_2": {"last_message_age_seconds": null}},
+ "mowers": {"DEVICE_1": {"last_message_age_seconds": 12.0, "unstored_messages": {"event": 4}},
+            "DEVICE_2": {"last_message_age_seconds": null, "unstored_messages": {}}},
  "database": {"reachable": true, "buffered_rows": 0,
               "rows_written": 1500, "rows_dropped": 0, "rows_rejected": 0},
  "auth": {"state": "fresh", "reauth_required": false,
@@ -250,6 +264,14 @@ urllib.request.urlopen('http://127.0.0.1:9477/health')"` fails the same way.
 | `navimow_collector_rows_written_total` | counter | rows the database stored, backlog included |
 | `navimow_collector_rows_dropped_total` | counter | rows lost because no buffer could hold them |
 | `navimow_collector_rows_rejected_total` | counter | rows the database refused for what they hold |
+| `navimow_collector_unstored_messages_total{mower_id,channel}` | counter | messages on a channel nothing is stored of, such as `event` or `attributes` |
+
+Nothing is stored of the mower's `event` and `attributes` channels, because no
+capture has yet held a message on either and what they carry is not known. If
+`navimow_collector_unstored_messages_total` ever rises, the first message from
+each mower on each channel is in the log at INFO, with up to 300 characters of
+what it carried, and the rest at DEBUG: that is what a table for them would be
+designed from.
 
 Database reachability is as of the last write or retry: while nothing is
 written it keeps its last value. A mower that is docked and quiet may send

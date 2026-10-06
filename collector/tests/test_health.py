@@ -35,6 +35,7 @@ HEALTHY = Snapshot(
     rows_written=1500,
     rows_dropped=3,
     rows_rejected=1,
+    unstored_messages={("DEVICE_1", "event"): 4},
 )
 
 
@@ -44,8 +45,9 @@ def test_health_reports_every_signal_including_authentication() -> None:
         "seconds_since_tick": 2.5,
         "broker": {"connected": True},
         "mowers": {
-            "DEVICE_1": {"last_message_age_seconds": 12.0},
-            "DEVICE_2": {"last_message_age_seconds": None},  # discovered, silent so far
+            "DEVICE_1": {"last_message_age_seconds": 12.0, "unstored_messages": {"event": 4}},
+            # Discovered, silent so far.
+            "DEVICE_2": {"last_message_age_seconds": None, "unstored_messages": {}},
         },
         "database": {
             "reachable": True,
@@ -131,6 +133,10 @@ def test_metrics_expose_the_same_signals_in_the_scrape_format() -> None:
         " hold.\n"
         "# TYPE navimow_collector_rows_rejected_total counter\n"
         "navimow_collector_rows_rejected_total 1\n"
+        "# HELP navimow_collector_unstored_messages_total Messages on channels of which"
+        " nothing is stored.\n"
+        "# TYPE navimow_collector_unstored_messages_total counter\n"
+        'navimow_collector_unstored_messages_total{mower_id="DEVICE_1",channel="event"} 4\n'
     )
 
 

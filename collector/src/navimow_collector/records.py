@@ -8,7 +8,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 
-MOWER_TOPIC = re.compile(r"^/downlink/vehicle/([^/]+)/realtimeDate/(location|state)$")
+CHANNEL_TOPIC = re.compile(r"^/downlink/vehicle/([^/]+)/realtimeDate/([^/]+)$")
+# The channels something is stored of. No capture has yet held a message on another (the
+# mower has `event` and `attributes` too), so what those carry is not known.
+STORED_CHANNELS = ("location", "state")
 
 
 @dataclass(frozen=True)
@@ -67,6 +70,28 @@ class Job:
     arrival_x: float | None = None
     arrival_y: float | None = None
     arrival_theta: float | None = None
+    # The Zones the mower last said the Job covers; unset until it has said so.
+    zones: tuple[int, ...] | None = None
+
+
+@dataclass(frozen=True)
+class ZoneList:
+    """The Zones the mower says it has been set to mow, as it lists them while away."""
+
+    mower_id: str
+    device_time: datetime
+    zones: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class Mower:
+    """A mower as the account's device list describes it; rewritten when that changes."""
+
+    mower_id: str
+    name: str | None
+    model: str | None
+    firmware: str | None
+    updated_time: datetime  # when it was first described so
 
 
 class GapReason(StrEnum):
@@ -86,7 +111,7 @@ class Gap:
     reason: GapReason
 
 
-Row = TrailPoint | Gap | Job | Progress | MowerState
+Row = TrailPoint | Gap | Job | Progress | MowerState | Mower
 
 
 @dataclass(frozen=True)
@@ -97,6 +122,8 @@ class ParsedRecord:
     states: tuple[MowerState, ...] = ()
     progress: tuple[Progress, ...] = ()
     polled: tuple[MowerState, ...] = ()  # what a status poll answered, as of its receipt
+    zone_lists: tuple[ZoneList, ...] = ()
+    mowers: tuple[Mower, ...] = ()
 
 
 def parse_record(record: Mapping[str, object]) -> ParsedRecord:
@@ -109,11 +136,13 @@ def parse_record(record: Mapping[str, object]) -> ParsedRecord:
         return ParsedRecord()
     if record.get("kind") == "rest" and record.get("endpoint") == "getVehicleStatus":
         return ParsedRecord(polled=tuple(_polled(received_time, record.get("payload"))))
+    if record.get("kind") == "rest" and record.get("endpoint") == "authList":
+        return ParsedRecord(mowers=tuple(_described(received_time, record.get("payload"))))
     topic = record.get("topic")
     if record.get("kind") != "mqtt" or not isinstance(topic, str):
         return ParsedRecord()
-    match = MOWER_TOPIC.fullmatch(topic)
-    if match is None:
+    match = CHANNEL_TOPIC.fullmatch(topic)
+    if match is None or match.group(2) not in STORED_CHANNELS:
         return ParsedRecord()
     payload = record.get("payload")
     if match.group(2) == "state":
@@ -122,6 +151,7 @@ def parse_record(record: Mapping[str, object]) -> ParsedRecord:
     items: Sequence[object] = payload if isinstance(payload, list) else (payload,)
     points: list[TrailPoint] = []
     progress: list[Progress] = []
+    zone_lists: list[ZoneList] = []
     placeholders = 0
     for item in items:
         if not isinstance(item, Mapping):
@@ -129,6 +159,9 @@ def parse_record(record: Mapping[str, object]) -> ParsedRecord:
         if item.get("type") == 2:
             if report := _progress(match.group(1), received_time, item):
                 progress.append(report)
+        if item.get("type") == 3:
+            if listed := _zone_list(match.group(1), item):
+                zone_lists.append(listed)
         if item.get("type") != 1:
             continue
         point = _point(match.group(1), received_time, item)
@@ -138,7 +171,9 @@ def parse_record(record: Mapping[str, object]) -> ParsedRecord:
             placeholders += 1
             continue
         points.append(point)
-    return ParsedRecord(tuple(points), placeholders, progress=tuple(progress))
+    return ParsedRecord(
+        tuple(points), placeholders, progress=tuple(progress), zone_lists=tuple(zone_lists)
+    )
 
 
 def _gap(record: Mapping[str, object]) -> Gap | None:
@@ -160,15 +195,27 @@ def _state(mower_id: str, received_time: datetime, payload: object) -> MowerStat
     return MowerState(mower_id, device_time, received_time, state, _int(payload.get("battery")))
 
 
-def _polled(received_time: datetime, answer: object) -> Iterator[MowerState]:
-    """Each mower's state in a status answer; an answer that is an error names none."""
+def _devices(answer: object) -> Iterator[tuple[str, Mapping[object, object]]]:
+    """Each mower a REST answer speaks of, by its identifier; an error speaks of none."""
     for key in ("data", "payload", "devices"):
         answer = answer.get(key) if isinstance(answer, Mapping) else None
     for device in answer if isinstance(answer, list) else ():
-        if isinstance(device, Mapping):
-            mower_id, state = device.get("id"), device.get("vehicleState")
-            if isinstance(mower_id, str) and isinstance(state, str):
-                yield MowerState(mower_id, received_time, received_time, state, battery=None)
+        if isinstance(device, Mapping) and isinstance(mower_id := device.get("id"), str):
+            yield mower_id, device
+
+
+def _polled(received_time: datetime, answer: object) -> Iterator[MowerState]:
+    """Each mower's state in a status answer."""
+    for mower_id, device in _devices(answer):
+        if isinstance(state := device.get("vehicleState"), str):
+            yield MowerState(mower_id, received_time, received_time, state, battery=None)
+
+
+def _described(received_time: datetime, answer: object) -> Iterator[Mower]:
+    """Each mower in a device list, with whatever of its details the list gives."""
+    for mower_id, device in _devices(answer):
+        name, model, firmware = (_str(device.get(key)) for key in ("name", "model", "firmware"))
+        yield Mower(mower_id, name, model, firmware, received_time)
 
 
 def _point(
@@ -206,6 +253,15 @@ def _progress(
     )
 
 
+def _zone_list(mower_id: str, item: Mapping[object, object]) -> ZoneList | None:
+    """A message of this kind sent near the dock carries no list, and so says nothing."""
+    device_time, listed = _timestamp(item.get("time")), item.get("partitionIds")
+    if device_time is None or not isinstance(listed, list):
+        return None
+    zones = tuple(zone for zone in map(_int, listed) if zone is not None)
+    return ZoneList(mower_id, device_time, zones)
+
+
 def _timestamp(value: object) -> datetime | None:
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         return None
@@ -226,6 +282,10 @@ def _int(value: object) -> int | None:
     # Beyond a 32-bit column it is noise, and a row no database accepts would never leave
     # the live buffer.
     return number if -(2**31) <= number < 2**31 else None
+
+
+def _str(value: object) -> str | None:
+    return value if isinstance(value, str) else None
 
 
 def _float(value: object) -> float | None:

@@ -42,11 +42,12 @@ changed, and regenerate. The numeric `vehicleState` values are the likeliest to
 be wrong: sources disagree on which of 1, 2 and 3 mean docked, charging and idle.
 
 The real capture has landed, and the replay suite now asserts the Job and Zone
-rules against both files. It contradicts the generator in three places, none of
+rules against both files. It contradicts the generator in four places, none of
 which the rules rest on, so the generator is not yet corrected: `vehicleState` 1
 is a docked mower that is not charging rather than the mark of a placeholder, no
-all-zero placeholder was sent in four hours, and no `mowStartType: 0` message
-followed the Job.
+all-zero placeholder was sent in four hours, no `mowStartType: 0` message
+followed the Job, and the device list names the firmware in `firmware` rather
+than `firmwareVersion`, so the synthetic mower is recorded with none.
 
 It simulates about five hours containing one Job, and exercises: docked
 heartbeats and the all-zero placeholder, dock drift, departure with

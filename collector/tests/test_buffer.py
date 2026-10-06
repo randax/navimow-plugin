@@ -16,7 +16,15 @@ import pytest
 from psycopg.conninfo import make_conninfo
 
 from navimow_collector.config import Secret, StorageConfig
-from navimow_collector.records import Gap, GapReason, Job, MowerState, Progress, TrailPoint
+from navimow_collector.records import (
+    Gap,
+    GapReason,
+    Job,
+    Mower,
+    MowerState,
+    Progress,
+    TrailPoint,
+)
 from navimow_collector.storage import Storage, StorageError, open_storage, postgres
 from navimow_collector.storage.buffered import REPLAY_ROWS, RETRY_SECONDS, BufferedStorage
 
@@ -104,6 +112,9 @@ class Observed:
 
     def write_states(self, states: Sequence[MowerState]) -> int:
         return self._storage.write_states(states)
+
+    def write_mowers(self, mowers: Sequence[Mower]) -> int:
+        return self._storage.write_mowers(mowers)
 
     def close(self) -> None:
         self._storage.close()
@@ -336,7 +347,7 @@ def test_the_latest_job_is_the_one_still_waiting_to_be_written(
     # up must carry on from the Job as it ended, not as the database last saw it.
     db, clock = Database(database), Clock()
     storage = buffered(db, tmp_path, clock)
-    away = Job("DEVICE_1", "2026-09-30T12:00:00Z", start_time=START, updated_time=START)
+    away = Job("DEVICE_1", "2026-09-30T12:00:00Z", START, START, zones=(10, 11))
     ended = replace(away, end_time=START + timedelta(hours=1), updated_time=away.start_time)
     ended = replace(ended, completed=True, updated_time=START + timedelta(hours=1))
     storage.write_jobs([away])
@@ -348,6 +359,20 @@ def test_the_latest_job_is_the_one_still_waiting_to_be_written(
     restarted = buffered(db, tmp_path, clock)
     restarted.connect()
     assert restarted.latest_jobs() == [ended]
+
+
+def test_the_latest_job_is_read_back_from_the_database_as_it_was_written(
+    database: str, tmp_path: Path
+) -> None:
+    db, clock = Database(database), Clock()
+    storage = buffered(db, tmp_path, clock)
+    job = Job("DEVICE_1", "2026-09-30T12:00:00Z", START, START, zones=(10, 11))
+    storage.write_jobs([job])
+    storage.close()
+
+    restarted = buffered(db, tmp_path, clock)
+    restarted.connect()
+    assert restarted.latest_jobs() == [job]
 
 
 def test_the_disk_buffer_never_exceeds_its_limit(database: str, tmp_path: Path) -> None:

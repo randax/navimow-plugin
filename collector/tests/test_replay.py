@@ -179,6 +179,53 @@ def test_a_gap_record_becomes_a_gap_row(config_file: Path, database: str, tmp_pa
     assert gaps(database) == [("DEVICE_1", ms(1788084160000), ms(1788084400000), "reconnect")]
 
 
+def mowers(dsn: str) -> list[tuple[Any, ...]]:
+    with psycopg.connect(dsn) as conn:
+        return conn.execute(
+            "SELECT mower_id, name, model, firmware, updated_time FROM mower ORDER BY mower_id"
+        ).fetchall()
+
+
+def test_a_mower_is_recorded_as_the_device_list_describes_it(
+    config_file: Path, database: str
+) -> None:
+    # The real capture asked for the device list 49 times and was told the same each time:
+    # the mower is recorded once, as of the first.
+    real = FIXTURE.with_name("job-2026-09-30.jsonl.gz")
+    assert main(["--config", str(config_file), "replay", str(real)]) == 0
+
+    assert mowers(database) == [("DEVICE_1", "NAME_1", "X420", "005D", ms(1790775147856))]
+
+
+def test_a_mower_whose_firmware_the_device_list_does_not_name_is_recorded_without_it(
+    config_file: Path, database: str
+) -> None:
+    # The synthetic device list was written before a real one was seen, and names the
+    # firmware under a key no mower uses.
+    assert main(["--config", str(config_file), "replay", str(FIXTURE)]) == 0
+
+    assert mowers(database) == [("DEVICE_1", "NAME_1", "Navimow H500E", None, ms(1788084093431))]
+
+
+def test_a_mower_described_differently_later_is_rewritten(
+    config_file: Path, database: str, tmp_path: Path
+) -> None:
+    # A firmware update, and then the capture from before it replayed again: what the
+    # mower was is not put back over what it is.
+    def device_list(recv_ms: int, firmware: str) -> dict[str, Any]:
+        device = {"id": "DEVICE_1", "name": "NAME_1", "model": "X420", "firmware": firmware}
+        answer = {"code": 1, "data": {"payload": {"devices": [device]}}}
+        return {"recv_ms": recv_ms, "kind": "rest", "endpoint": "authList", "payload": answer}
+
+    before, after = device_list(1788084160000, "005D"), device_list(1788084900000, "005E")
+    for name, record in (("before.jsonl", before), ("after.jsonl", after), ("again.jsonl", before)):
+        capture = tmp_path / name
+        capture.write_text(json.dumps(record) + "\n")
+        assert main(["--config", str(config_file), "replay", str(capture)]) == 0
+
+    assert mowers(database) == [("DEVICE_1", "NAME_1", "X420", "005E", ms(1788084900000))]
+
+
 class Batches:
     """A storage adapter which only notes how many rows each write hands it."""
 
@@ -189,7 +236,7 @@ class Batches:
         self.sizes.append(len(rows))
         return len(rows)
 
-    write_trail = write_gaps = write_jobs = write_progress = write_states = _note
+    write_trail = write_gaps = write_jobs = write_progress = write_states = write_mowers = _note
 
 
 def test_a_capture_of_gaps_alone_is_written_in_batches_not_held_to_its_end() -> None:
