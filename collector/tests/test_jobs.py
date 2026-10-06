@@ -94,6 +94,14 @@ def test_a_job_records_how_far_it_got(synthetic: str) -> None:
     assert (job["completed"], job["mowing_percentage"], job["area"]) == (True, 100, 300.0)
 
 
+def test_the_message_with_a_zeroed_start_type_starts_no_job(synthetic: str) -> None:
+    # Sent hours after the Job, with its area at zero as an announcement's is.
+    [zeroed] = [r for r in fixture() if is_progress(r) and r["payload"][0]["mowStartType"] == 0]
+    sent = ms(zeroed["payload"][0]["time"])
+    assert len(jobs(synthetic)) == 1
+    assert sent not in {report["device_time"] for report in progress(synthetic)}
+
+
 def test_leaving_the_dock_after_a_finished_job_starts_a_new_one(replay: Replay) -> None:
     # The same day twice. Each departure announces its Job beside the percentage the last
     # one finished on, which must not finish the new one before it has begun.
@@ -113,10 +121,10 @@ def test_leaving_the_dock_again_the_same_afternoon_is_still_a_new_job(replay: Re
     assert second["start_time"] == ms(LEFT_DOCK + 3 * HOUR_MS)
 
 
-def test_without_progress_reports_each_run_from_the_dock_is_a_job(replay: Replay) -> None:
+def test_without_progress_reports_each_departure_from_the_dock_is_a_job(replay: Replay) -> None:
     # Some firmware reports no progress at all on some Jobs. Whether the mower went to
-    # charge or went home for good cannot then be told apart, so neither run is guessed
-    # to continue the other.
+    # charge or was done cannot then be told apart, so no departure is guessed to continue
+    # the Job before it.
     silent = [r for r in fixture() if not is_progress(r)]
     first, second = jobs(replay(silent))
     assert (first["start_time"], first["end_time"]) == (ms(LEFT_DOCK), ms(1788087728135))
@@ -150,15 +158,63 @@ def test_a_job_already_under_way_when_collection_starts_is_recorded_from_then(
     assert job["end_time"] == ms(1788090811063)
 
 
-def test_an_unfinished_job_left_at_the_dock_for_hours_is_not_resumed(replay: Replay) -> None:
-    # Up to the charging break, then the rest of the day delivered a day late: the mower
-    # leaves the dock again with 63 % on the clock, but that is no longer the same Job.
+def test_a_job_is_resumed_however_long_the_mower_stayed_at_the_dock(replay: Replay) -> None:
+    # Up to the charging break, then the rest of the day delivered a day late, as after a
+    # day of rain: the area carries on from where it stood, so it is the same Job.
     day = fixture()
     before = [r for r in day if r["recv_ms"] < 1788089000000]
-    after = [later(r, DAY_MS) for r in day if r["recv_ms"] >= 1788089000000 and not is_progress(r)]
-    first, second = jobs(replay([*before, *after]))
-    assert (first["end_time"], first["completed"]) == (ms(1788087728135), False)
-    assert second["start_time"] == ms(1788089527836 + DAY_MS)
+    after = [later(r, DAY_MS) for r in day if r["recv_ms"] >= 1788089000000]
+    [job] = jobs(replay([*before, *after]))
+    assert (job["start_time"], job["end_time"]) == (ms(LEFT_DOCK), ms(1788090811063 + DAY_MS))
+    assert (job["completed"], job["area"]) == (True, 300.0)
+
+
+def test_a_job_called_off_before_a_square_metre_is_mowed_is_not_the_next_one(
+    replay: Replay,
+) -> None:
+    # Started, called back to the dock at once, and started again an hour later. The
+    # first Job's area is too small for the second's to fall far below it; but the second
+    # is announced with no area at all, as only a new Job is.
+    day = fixture()
+    called_off = [r for r in day if r["recv_ms"] < 1788085500000]
+    [report] = [
+        r for r in called_off if is_progress(r) and r["payload"][0]["mowingPercentage"] == 3
+    ]
+    report["payload"] = [{**report["payload"][0], "subtotalArea": "0.40", "mowingPercentage": 0}]
+    again = [later(r, HOUR_MS) for r in day if r["recv_ms"] >= LEFT_DOCK]
+    first, second = jobs(replay([*called_off, state(1788085500000, "isDocked"), *again]))
+    assert (first["end_time"], first["area"]) == (ms(1788085500000), 0.4)
+    assert (second["start_time"], second["area"]) == (ms(1788085297268 + HOUR_MS), 300.0)
+
+
+def test_area_far_below_an_unfinished_jobs_is_a_new_job_though_its_announcement_was_lost(
+    replay: Replay,
+) -> None:
+    # The mower goes to charge at 190 square metres, and the next day leaves on another
+    # Job whose announcement never arrives. Its first report, of 10, is not the first Job's.
+    day = fixture()
+    charging = [r for r in day if r["recv_ms"] < 1788089000000]
+    next_day = [later(r, DAY_MS) for r in day if r["recv_ms"] >= LEFT_DOCK and not announces(r)]
+    first, second = jobs(replay([*charging, *next_day]))
+    assert (first["end_time"], first["area"]) == (ms(1788087728135), 190.0)
+    assert second["start_time"] == ms(1788085422268 + DAY_MS)  # its first report
+
+
+def announces(record: Record) -> bool:
+    return is_progress(record) and float(record["payload"][0]["subtotalArea"]) == 0
+
+
+def test_progress_from_a_mower_last_seen_docked_with_nothing_left_to_mow_is_a_new_job(
+    replay: Replay,
+) -> None:
+    # The first day reports no progress, so its Jobs are not known to be unfinished. On
+    # the second neither the departure nor the announcement is heard, only the reports.
+    day = fixture()
+    first_day = [r for r in day if not is_progress(r)]
+    unseen = [later(r, DAY_MS) for r in day if not is_state(r) and r["recv_ms"] > 1788085300000]
+    *_, job = jobs(replay([*first_day, *unseen]))
+    assert job["start_time"] == ms(1788085422268 + DAY_MS)  # the first report heard
+    assert (job["completed"], job["area"]) == (True, 300.0)
 
 
 def is_progress(record: Record) -> bool:
@@ -226,7 +282,7 @@ def progress(dsn: str) -> list[dict[str, Any]]:
 def test_progress_through_the_job_and_through_each_zone_is_recorded(synthetic: str) -> None:
     [job] = jobs(synthetic)
     reports = progress(synthetic)
-    # 33 reports of a task. The announcement, which reports no progress, is not stored;
+    # 33 reports from the Job. The announcement, which reports no progress, is not stored;
     # and two were sent in the same millisecond, of which the one delivered last stands.
     assert len(reports) == 31
     assert reports[-1]["mowing_percentage"] == 100
@@ -243,7 +299,7 @@ def test_progress_through_the_job_and_through_each_zone_is_recorded(synthetic: s
 def test_the_state_channel_is_recorded_with_battery_and_the_job_it_fell_in(synthetic: str) -> None:
     states = rows(synthetic, "SELECT * FROM mower_state ORDER BY device_time")
     assert len(states) == 11
-    changes = [next(run) for _, run in groupby(states, key=lambda s: s["state"])]
+    changes = [next(streak) for _, streak in groupby(states, key=lambda s: s["state"])]
     assert [(s["state"], s["battery"], s["job_id"] is not None) for s in changes] == [
         ("isDocked", 64, False),
         ("isRunning", 96, True),
@@ -274,8 +330,8 @@ def test_a_job_that_is_interrupted_and_never_completes_ends_at_the_dock(
     replay: Replay, interruption: str
 ) -> None:
     interrupted = [r for r in fixture() if r["recv_ms"] < MID_JOB]
-    carried_home = [state(MID_JOB, interruption), state(MID_JOB + 600_000, "isDocked")]
-    [job] = jobs(replay([*interrupted, *carried_home]))
+    carried_back = [state(MID_JOB, interruption), state(MID_JOB + 600_000, "isDocked")]
+    [job] = jobs(replay([*interrupted, *carried_back]))
     assert job["end_time"] == ms(MID_JOB + 600_000)
     assert (job["completed"], job["mowing_percentage"], job["area"]) == (False, 40, 120.0)
 

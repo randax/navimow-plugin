@@ -10,7 +10,7 @@ import psycopg
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from ..config import StorageConfig
-from ..records import Gap, Job, MowerState, Progress, TrailPoint
+from ..records import Gap, Job, MowerState, Progress, Row, TrailPoint
 from .base import RejectedError, SchemaError, StorageError
 
 # Live collection writes from its event loop, so a database call should not wait for long:
@@ -114,14 +114,17 @@ MIGRATIONS = (
 TABLES = ("trail_point", "collector_gap", "job", "job_progress", "mower_state")
 
 
-def _upsert(row: type[Job] | type[Progress], table: str, *, key: int) -> str:
-    """Insert every field of the row, replacing a stored row with the same leading `key` fields."""
+def _insert(row: type[Row], table: str) -> str:
+    """Insert every field of the row into the column of the same name."""
     columns = [field.name for field in fields(row)]
-    replaced = ", ".join(f"{name} = EXCLUDED.{name}" for name in columns[key:])
-    return (
-        f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({', '.join(['%s'] * len(columns))})"
-        f" ON CONFLICT ({', '.join(columns[:key])}) DO UPDATE SET {replaced}"
-    )
+    return f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({', '.join(['%s'] * len(columns))})"
+
+
+def _upsert(row: type[Row], table: str) -> str:
+    """Insert the row, replacing a stored one with the same key: its first two fields."""
+    key, rest = [field.name for field in fields(row)][:2], fields(row)[2:]
+    replaced = ", ".join(f"{field.name} = EXCLUDED.{field.name}" for field in rest)
+    return f"{_insert(row, table)} ON CONFLICT ({', '.join(key)}) DO UPDATE SET {replaced}"
 
 
 class PostgresStorage:
@@ -186,12 +189,7 @@ class PostgresStorage:
 
     def write_trail(self, points: Sequence[TrailPoint]) -> int:
         return self._write(
-            """
-            INSERT INTO trail_point
-                (mower_id, device_time, received_time, x, y, theta, vehicle_state, job_id, zone)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT DO NOTHING
-            """,
+            _insert(TrailPoint, "trail_point") + " ON CONFLICT DO NOTHING",
             [astuple(point) for point in points],
         )
 
@@ -209,23 +207,18 @@ class PostgresStorage:
 
     def write_jobs(self, jobs: Sequence[Job]) -> int:
         return self._write(
-            _upsert(Job, "job", key=2) + " WHERE job.updated_time <= EXCLUDED.updated_time",
+            _upsert(Job, "job") + " WHERE job.updated_time <= EXCLUDED.updated_time",
             [astuple(job) for job in jobs],
         )
 
     def write_progress(self, reports: Sequence[Progress]) -> int:
         return self._write(
-            _upsert(Progress, "job_progress", key=2), [astuple(report) for report in reports]
+            _upsert(Progress, "job_progress"), [astuple(report) for report in reports]
         )
 
     def write_states(self, states: Sequence[MowerState]) -> int:
         return self._write(
-            """
-            INSERT INTO mower_state
-                (mower_id, device_time, received_time, state, battery, job_id)
-            VALUES (%s, %s, %s, %s, %s, %s)
-            ON CONFLICT DO NOTHING
-            """,
+            _insert(MowerState, "mower_state") + " ON CONFLICT DO NOTHING",
             [astuple(state) for state in states],
         )
 

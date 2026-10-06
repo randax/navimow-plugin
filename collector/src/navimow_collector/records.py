@@ -189,7 +189,7 @@ def _progress(
     mower_id: str, received_time: datetime, item: Mapping[object, object]
 ) -> Progress | None:
     device_time = _timestamp(item.get("time"))
-    # A zeroed start type is the mower saying it has no task: sent hours after a Job, with
+    # A zeroed start type is the mower saying it is on no Job: sent hours after one, with
     # everything else zeroed too, it reports no progress.
     if device_time is None or _int(item.get("mowStartType")) == 0:
         return None

@@ -182,7 +182,7 @@ included. A Job's `job_id` is the second it started, in UTC, such as
 
 A `job` row is rewritten as the Job goes on. While the mower is away its
 `end_time` is empty; a Job that ended with `completed` false was interrupted, and
-is taken up again if the mower leaves the dock within six hours. `arrival_x`,
+is taken up again if the mower next leaves the dock to carry on with it. `arrival_x`,
 `arrival_y` and `arrival_theta` are the pose the mower docked in, which is where
 the dock stands on the mower's own axes: a starting point for the Dock origin.
 
@@ -192,6 +192,7 @@ capture over rows already stored does not fill it in.
 
 A collector that restarts carries on from each mower's latest stored Job, so a
 restart or an outage inside a Job leaves a gap in it rather than splitting it.
+`replay` does not: a capture is decided on its own, whatever is already stored.
 
 ## Health and metrics
 
