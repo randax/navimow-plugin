@@ -13,10 +13,10 @@ from datetime import datetime
 from itertools import islice
 from pathlib import Path
 from time import monotonic
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, get_args
 
-from ..records import Gap, GapReason, TrailPoint
-from .base import RejectedError, Storage, StorageError
+from ..records import Gap, GapReason, Job, MowerState, Progress, Row, TrailPoint
+from .base import RejectedError, Storage, StorageError, write_rows
 
 RETRY_SECONDS = 10
 # About half an hour of one mower's Trail; a longer outage continues on disk.
@@ -25,9 +25,7 @@ MEMORY_ROWS = 1000
 DISK_BYTES = 64 * 1024 * 1024
 # How many waiting rows one call writes; live collection calls from its event loop.
 REPLAY_ROWS = 200
-_ROWS: dict[str, type[TrailPoint] | type[Gap]] = {"TrailPoint": TrailPoint, "Gap": Gap}
-
-Row = TrailPoint | Gap
+_ROWS: dict[str, type[Row]] = {kind.__name__: kind for kind in get_args(Row)}
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -101,11 +99,29 @@ class BufferedStorage:
         """Open the database now, so a misconfiguration fails at startup, not into the buffer."""
         self._storage = self._open()
 
+    def latest_jobs(self) -> Sequence[Job]:
+        """Each mower's most recent Job as the database has it; none while it is away, which
+        costs a Job under way its continuity, never the collection."""
+        try:
+            return self._storage.latest_jobs() if self._storage is not None else ()
+        except StorageError as error:
+            self._outage(error)
+            return ()
+
     def write_trail(self, points: Sequence[TrailPoint]) -> int:
         return self._write(points)
 
     def write_gaps(self, gaps: Sequence[Gap]) -> int:
         return self._write(gaps)
+
+    def write_jobs(self, jobs: Sequence[Job]) -> int:
+        return self._write(jobs)
+
+    def write_progress(self, reports: Sequence[Progress]) -> int:
+        return self._write(reports)
+
+    def write_states(self, states: Sequence[MowerState]) -> int:
+        return self._write(states)
 
     def flush(self) -> None:
         """Write some of what is waiting, unless the database was found unreachable just now.
@@ -170,11 +186,8 @@ class BufferedStorage:
             if self._away:
                 _LOGGER.info("Database reachable again; writing what was buffered")
                 self._away = False
-        points = [row for row in rows if isinstance(row, TrailPoint)]
-        gaps = [row for row in rows if isinstance(row, Gap)]
         try:
-            written = self._storage.write_trail(points) if points else 0
-            return written + (self._storage.write_gaps(gaps) if gaps else 0)
+            return sum(write_rows(self._storage, rows).values())
         except RejectedError as error:
             # Retrying cannot help a row the database refuses for what it holds, and it
             # would keep every row behind it waiting: find it, drop it, keep the rest.
@@ -243,9 +256,9 @@ class BufferedStorage:
             # A gap goes last: its writer has already forgotten when it began, so unlike a
             # Trail point it leaves no trace of having been lost.
             gaps: list[Row] = [row for row in self._memory if isinstance(row, Gap)]
-            points: list[Row] = [row for row in self._memory if isinstance(row, TrailPoint)]
-            points = points[: max(self._memory_rows - len(gaps), 0)]
-            self._memory = [*points, *gaps][: self._memory_rows]
+            others: list[Row] = [row for row in self._memory if not isinstance(row, Gap)]
+            others = others[: max(self._memory_rows - len(gaps), 0)]
+            self._memory = [*others, *gaps][: self._memory_rows]
 
     def _replay_spill(self, limit: int) -> int:
         """Send up to `limit` lines of the buffer file, from where the last call stopped,
@@ -363,9 +376,9 @@ def _decode(line: bytes) -> Row | None:
     try:
         values: dict[str, Any] = json.loads(line)
         kind = _ROWS[values.pop("row")]
-        for key in values:
-            if key.endswith("_time"):
-                values[key] = datetime.fromisoformat(values[key])
+        for key, value in values.items():
+            if key.endswith("_time") and value is not None:
+                values[key] = datetime.fromisoformat(value)
         if kind is Gap:
             values["reason"] = GapReason(values["reason"])
         return kind(**values)

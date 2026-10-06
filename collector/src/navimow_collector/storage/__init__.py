@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from ..config import StorageConfig
-from .base import RejectedError, SchemaError, Storage, StorageError, Writer
+from .base import RejectedError, SchemaError, Storage, StorageError, Writer, write_rows
 from .postgres import PostgresStorage
 
 __all__ = [
@@ -14,6 +14,7 @@ __all__ = [
     "StorageError",
     "Writer",
     "open_storage",
+    "write_rows",
 ]
 
 STORAGE_BACKENDS = {"postgres": PostgresStorage}

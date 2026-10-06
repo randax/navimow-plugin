@@ -5,7 +5,7 @@ A Grafana panel plugin and companion collector that visualise a Navimow robotic 
 ## Language
 
 **Job**:
-One mowing run, from the mower leaving the dock to returning to it.
+One round of mowing, from the mower leaving the dock to take it on until it is back at the dock with the round finished or given up. A return to the dock to charge is part of the Job, not the end of it.
 _Avoid_: Task, session, run, mission
 
 **Zone**:

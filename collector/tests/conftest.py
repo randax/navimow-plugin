@@ -88,7 +88,9 @@ def postgres_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
             "-l",
             data / "log",
             "-o",
-            f"-p {port} -k {data} -c listen_addresses=127.0.0.1",
+            # Reached over TCP only: a socket in the data directory has a path too long
+            # to bind once pytest's temporary directories are numbered in the hundreds.
+            f"-p {port} -c unix_socket_directories= -c listen_addresses=127.0.0.1",
             "start",
         ],
         check=True,

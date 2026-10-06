@@ -1,15 +1,16 @@
-"""PostgreSQL storage for the provisional Trail and gap schema."""
+"""PostgreSQL storage for the provisional schema."""
 
 from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
+from dataclasses import astuple, fields
 
 import psycopg
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from ..config import StorageConfig
-from ..records import Gap, TrailPoint
+from ..records import Gap, Job, MowerState, Progress, TrailPoint
 from .base import RejectedError, SchemaError, StorageError
 
 # Live collection writes from its event loop, so a database call should not wait for long:
@@ -64,8 +65,63 @@ MIGRATIONS = (
         PRIMARY KEY (mower_id, start_time)
     )
     """,
+    # Every row names the Job it belongs to, where it belongs to one.
+    "ALTER TABLE trail_point ADD COLUMN IF NOT EXISTS job_id text,"
+    " ADD COLUMN IF NOT EXISTS zone integer",
+    # The collector names each Job itself, and tells of it again whenever it learns more.
+    """
+    CREATE TABLE IF NOT EXISTS job (
+        mower_id text NOT NULL,
+        job_id text NOT NULL,
+        start_time timestamptz NOT NULL,
+        end_time timestamptz,
+        completed boolean NOT NULL,
+        mowing_percentage integer,
+        area double precision,
+        arrival_x double precision,
+        arrival_y double precision,
+        arrival_theta double precision,
+        updated_time timestamptz NOT NULL,
+        PRIMARY KEY (mower_id, job_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS job_progress (
+        mower_id text NOT NULL,
+        device_time timestamptz NOT NULL,
+        received_time timestamptz NOT NULL,
+        zone integer,
+        zone_progress double precision,
+        mowing_percentage integer,
+        area double precision,
+        week_area double precision,
+        job_id text,
+        PRIMARY KEY (mower_id, device_time)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS mower_state (
+        mower_id text NOT NULL,
+        device_time timestamptz NOT NULL,
+        received_time timestamptz NOT NULL,
+        state text NOT NULL,
+        battery integer,
+        job_id text,
+        PRIMARY KEY (mower_id, device_time)
+    )
+    """,
 )
-TABLES = ("trail_point", "collector_gap")
+TABLES = ("trail_point", "collector_gap", "job", "job_progress", "mower_state")
+
+
+def _upsert(row: type[Job] | type[Progress], table: str, *, key: int) -> str:
+    """Insert every field of the row, replacing a stored row with the same leading `key` fields."""
+    columns = [field.name for field in fields(row)]
+    replaced = ", ".join(f"{name} = EXCLUDED.{name}" for name in columns[key:])
+    return (
+        f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({', '.join(['%s'] * len(columns))})"
+        f" ON CONFLICT ({', '.join(columns[:key])}) DO UPDATE SET {replaced}"
+    )
 
 
 class PostgresStorage:
@@ -119,42 +175,63 @@ class PostgresStorage:
                     "collector schema is missing; enable storage.migrate or apply migrations"
                 )
 
+    def latest_jobs(self) -> Sequence[Job]:
+        columns = ", ".join(field.name for field in fields(Job))
+        with _translated():
+            found = self._connection.execute(
+                f"SELECT DISTINCT ON (mower_id) {columns} FROM job"
+                " ORDER BY mower_id, start_time DESC"
+            ).fetchall()
+        return [Job(*row) for row in found]
+
     def write_trail(self, points: Sequence[TrailPoint]) -> int:
-        with _translated(), self._connection.transaction(), self._connection.cursor() as cursor:
-            cursor.executemany(
-                """
-                INSERT INTO trail_point
-                    (mower_id, device_time, received_time, x, y, theta, vehicle_state)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT DO NOTHING
-                """,
-                [
-                    (
-                        point.mower_id,
-                        point.device_time,
-                        point.received_time,
-                        point.x,
-                        point.y,
-                        point.theta,
-                        point.vehicle_state,
-                    )
-                    for point in points
-                ],
-            )
-            return max(cursor.rowcount, 0)
+        return self._write(
+            """
+            INSERT INTO trail_point
+                (mower_id, device_time, received_time, x, y, theta, vehicle_state, job_id, zone)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT DO NOTHING
+            """,
+            [astuple(point) for point in points],
+        )
 
     def write_gaps(self, gaps: Sequence[Gap]) -> int:
+        return self._write(
+            """
+            INSERT INTO collector_gap (mower_id, start_time, end_time, reason)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (mower_id, start_time) DO UPDATE
+                SET end_time = EXCLUDED.end_time, reason = EXCLUDED.reason
+                WHERE collector_gap.end_time < EXCLUDED.end_time
+            """,
+            [(gap.mower_id, gap.start_time, gap.end_time, gap.reason.value) for gap in gaps],
+        )
+
+    def write_jobs(self, jobs: Sequence[Job]) -> int:
+        return self._write(
+            _upsert(Job, "job", key=2) + " WHERE job.updated_time <= EXCLUDED.updated_time",
+            [astuple(job) for job in jobs],
+        )
+
+    def write_progress(self, reports: Sequence[Progress]) -> int:
+        return self._write(
+            _upsert(Progress, "job_progress", key=2), [astuple(report) for report in reports]
+        )
+
+    def write_states(self, states: Sequence[MowerState]) -> int:
+        return self._write(
+            """
+            INSERT INTO mower_state
+                (mower_id, device_time, received_time, state, battery, job_id)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT DO NOTHING
+            """,
+            [astuple(state) for state in states],
+        )
+
+    def _write(self, statement: str, rows: Sequence[tuple[object, ...]]) -> int:
         with _translated(), self._connection.transaction(), self._connection.cursor() as cursor:
-            cursor.executemany(
-                """
-                INSERT INTO collector_gap (mower_id, start_time, end_time, reason)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (mower_id, start_time) DO UPDATE
-                    SET end_time = EXCLUDED.end_time, reason = EXCLUDED.reason
-                    WHERE collector_gap.end_time < EXCLUDED.end_time
-                """,
-                [(gap.mower_id, gap.start_time, gap.end_time, gap.reason.value) for gap in gaps],
-            )
+            cursor.executemany(statement, rows)
             return max(cursor.rowcount, 0)
 
     def close(self) -> None:
