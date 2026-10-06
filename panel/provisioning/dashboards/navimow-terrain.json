@@ -46,11 +46,13 @@
           "enabled": true,
           "startIn": "flat"
         },
-        "lawn": {
-          "dockOrigin": {
-            "lat": 59.964,
-            "lon": 10.672,
-            "rotation": 20
+        "lawns": {
+          "*": {
+            "dockOrigin": {
+              "lat": 59.964,
+              "lon": 10.672,
+              "rotation": 20
+            }
           }
         }
       }
@@ -92,11 +94,13 @@
         "terrain": {
           "enabled": true
         },
-        "lawn": {
-          "dockOrigin": {
-            "lat": 59.964,
-            "lon": 10.672,
-            "rotation": 20
+        "lawns": {
+          "*": {
+            "dockOrigin": {
+              "lat": 59.964,
+              "lon": 10.672,
+              "rotation": 20
+            }
           }
         }
       }

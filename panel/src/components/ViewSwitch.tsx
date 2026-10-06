@@ -16,9 +16,6 @@ export const ViewSwitch: React.FC<{ view: View; onChange: (view: View) => void }
 
 const getStyles = (theme: GrafanaTheme2) => ({
   control: css({
-    position: 'absolute',
-    top: theme.spacing(1),
-    left: theme.spacing(1),
     // The group itself is see-through, made for a panel's background rather than a map's.
     background: theme.colors.background.primary,
     borderRadius: theme.shape.radius.default,

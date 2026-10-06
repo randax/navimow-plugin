@@ -46,11 +46,13 @@
           "preset": "kartverket-hillshade",
           "opacity": 1
         },
-        "lawn": {
-          "dockOrigin": {
-            "lat": 59.964,
-            "lon": 10.672,
-            "rotation": 20
+        "lawns": {
+          "*": {
+            "dockOrigin": {
+              "lat": 59.964,
+              "lon": 10.672,
+              "rotation": 20
+            }
           }
         }
       }

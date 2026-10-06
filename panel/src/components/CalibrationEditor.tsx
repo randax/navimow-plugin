@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import type { StandardEditorProps } from '@grafana/data';
 import { Button } from '@grafana/ui';
-import { resolveLawn, type Lawn } from '../model/lawn';
+import { resolveLawn, spelledOut, type Lawn } from '../model/lawn';
 import type { MapPanelOptions } from '../types';
 import { CalibrationDrawer } from './CalibrationDrawer';
 
@@ -22,12 +22,13 @@ export const CalibrationEditor: React.FC<StandardEditorProps<Lawn | undefined, u
       </Button>
       {open && (
         <CalibrationDrawer
-          // A panel saved before the Boundary existed holds its Dock origin at the root, not in `value`.
-          initial={value ?? resolveLawn({ dockOrigin: context.options?.dockOrigin }) ?? {}}
+          // Once saved where it is kept now, `value` is the whole Lawn; a panel saved by an earlier
+          // version holds it elsewhere in the options.
+          initial={value ?? resolveLawn(context.options ?? {}) ?? {}}
           options={context.options}
           data={context.data}
           onSave={(lawn) => {
-            onChange(lawn);
+            onChange(spelledOut(lawn));
             setOpen(false);
           }}
           onDiscard={() => setOpen(false)}

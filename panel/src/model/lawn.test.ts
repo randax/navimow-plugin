@@ -9,6 +9,8 @@ import {
   parseLawn,
   resolveLawn,
   rotationTowards,
+  spelledOut,
+  withDockOrigin,
   type Lawn,
 } from './lawn';
 
@@ -76,9 +78,9 @@ describe('parseLawn', () => {
   });
 
   test('a Zone without a ring is refused by position', () => {
-    expect(parseLawn(JSON.stringify({ boundary: { zones: [{ id: '1', name: 'a', ring: square }, { id: '2' }] } }))).toEqual(
-      { problem: expect.stringContaining('zones[1]') }
-    );
+    expect(
+      parseLawn(JSON.stringify({ boundary: { zones: [{ id: '1', name: 'a', ring: square }, { id: '2' }] } }))
+    ).toEqual({ problem: expect.stringContaining('zones[1]') });
   });
 
   test('a Zone identifier may be empty while editing, but the ring must be there', () => {
@@ -151,54 +153,164 @@ describe('boundaryFeatures', () => {
     });
     expect(features.map((f) => f.properties.label)).toEqual(['3', '4']);
   });
+  test('a Zone carries its latest progress, which colours it; a Zone with none reported is drawn as before', () => {
+    const zones = ['3', '4'].map((id) => ({ id, name: '', ring: square }));
+    const { features } = boundaryFeatures({ outline: square, zones }, { '3': { progress: 64 }, '9': { progress: 5 } });
+    expect(features.map((f) => f.properties)).toEqual([
+      { kind: 'outline', label: 'Outline' },
+      { kind: 'zone', label: '3', id: '3', progress: 64 },
+      { kind: 'zone', label: '4', id: '4' },
+    ]);
+  });
+});
+
+describe('boundaryFeatures identity', () => {
+  test('each Zone’s polygon is known by its place in the list, which tells apart two that share an identifier', () => {
+    const zones = ['Front', 'Back'].map((name) => ({ id: '1', name, ring: square }));
+    const { features } = boundaryFeatures({ outline: square, zones });
+    expect(features.map((f) => [f.properties.kind, f.id])).toEqual([
+      ['outline', undefined],
+      ['zone', 0],
+      ['zone', 1],
+    ]);
+  });
 });
 
 describe('nextZoneId', () => {
   test('counts on from the largest numeric identifier in use', () => {
     expect(nextZoneId([])).toBe('1');
-    expect(nextZoneId([{ id: '1', name: '', ring: square }, { id: '7', name: '', ring: square }])).toBe('8');
+    expect(
+      nextZoneId([
+        { id: '1', name: '', ring: square },
+        { id: '7', name: '', ring: square },
+      ])
+    ).toBe('8');
     expect(nextZoneId([{ id: 'patio', name: '', ring: square }])).toBe('1');
   });
 });
 
 describe('resolveLawn', () => {
-  test('reads a Dock origin saved at the root, as the migration handler may not have run', () => {
-    expect(resolveLawn({ dockOrigin: { lat: 60, lon: 10, rotation: 20 } })).toEqual({
-      dockOrigin: { lat: 60, lon: 10, rotation: 20 },
+  const origin = { lat: 60, lon: 10, rotation: 20 };
+
+  test('reads the Lawn saved for any mower, which is where a panel for one mower keeps it', () => {
+    const lawn = { dockOrigin: origin, boundary: { outline: square } };
+    expect(resolveLawn({ lawns: { '*': lawn } })).toEqual(lawn);
+  });
+
+  test('a Lawn saved for a named mower belongs to a panel for several, and is not this panel’s', () => {
+    expect(resolveLawn({ lawns: { 'mower-1': { dockOrigin: origin } } })).toBeUndefined();
+  });
+
+  test('reads a Lawn saved under lawn, or a Dock origin at the root, as the migration handler may not have run', () => {
+    expect(resolveLawn({ lawn: { dockOrigin: origin, boundary: { outline: square } } })).toEqual({
+      dockOrigin: origin,
+      boundary: { outline: square },
+    });
+    expect(resolveLawn({ dockOrigin: origin })).toEqual({ dockOrigin: origin });
+  });
+
+  test('of the two older places, lawn is the newer, and a Dock origin only the root has is kept', () => {
+    expect(resolveLawn({ lawn: { dockOrigin: { lat: 3, lon: 4 } }, dockOrigin: origin })).toEqual({
+      dockOrigin: { lat: 3, lon: 4 },
+    });
+    expect(resolveLawn({ lawn: { boundary: { outline: square } }, dockOrigin: origin })).toEqual({
+      boundary: { outline: square },
+      dockOrigin: origin,
     });
   });
 
-  test('prefers what is under lawn, and keeps its Boundary', () => {
-    const lawn = { dockOrigin: { lat: 1, lon: 2 }, boundary: { outline: square } };
-    expect(resolveLawn({ lawn, dockOrigin: { lat: 60, lon: 10 } })).toEqual(lawn);
-    expect(resolveLawn({ lawn: { boundary: { outline: square } }, dockOrigin: { lat: 60, lon: 10 } })).toEqual({
-      boundary: { outline: square },
+  test('once saved for any mower, that is the whole Lawn: what was taken out of it does not come back from an older place', () => {
+    const older = { dockOrigin: origin, boundary: { outline: square } };
+    expect(
+      resolveLawn({ lawns: { '*': { dockOrigin: { lat: 60, lon: 10 } } }, lawn: older, dockOrigin: origin })
+    ).toEqual({
       dockOrigin: { lat: 60, lon: 10 },
     });
+    expect(resolveLawn({ lawns: { '*': {} }, lawn: older })).toEqual({});
   });
 
-  test('is nothing for a panel with neither', () => {
+  test('is nothing for a panel with none of them', () => {
     expect(resolveLawn({})).toBeUndefined();
   });
 });
 
 describe('migrateLawn', () => {
-  test('moves a Dock origin saved at the root under lawn', () => {
+  test('moves a Dock origin saved at the root to the Lawn for any mower', () => {
     const options = { baseMap: { preset: 'osm' }, dockOrigin: { lat: 60, lon: 10, rotation: 20 } };
     expect(migrateLawn(options)).toEqual({
       baseMap: { preset: 'osm' },
-      lawn: { dockOrigin: { lat: 60, lon: 10, rotation: 20 } },
+      lawns: { '*': { dockOrigin: { lat: 60, lon: 10, rotation: 20 } } },
     });
   });
 
-  test('leaves options already under lawn alone', () => {
-    const options = { baseMap: { preset: 'osm' }, lawn: { dockOrigin: { lat: 1, lon: 2 } } };
+  test('moves a Lawn saved under lawn there too, Boundary and all', () => {
+    const lawn = { dockOrigin: { lat: 1, lon: 2 }, boundary: { outline: square } };
+    expect(migrateLawn({ baseMap: { preset: 'osm' }, lawn })).toEqual({
+      baseMap: { preset: 'osm' },
+      lawns: { '*': lawn },
+    });
+  });
+
+  test('leaves options already keyed by mower alone, other mowers included', () => {
+    const options = { baseMap: { preset: 'osm' }, lawns: { '*': { dockOrigin: { lat: 1, lon: 2 } }, 'mower-1': {} } };
     expect(migrateLawn(options)).toEqual(options);
     expect(migrateLawn({ baseMap: { preset: 'osm' }, lawn: undefined })).toEqual({ baseMap: { preset: 'osm' } });
   });
 
-  test('a root Dock origin never overrides one already under lawn', () => {
-    const options = { dockOrigin: { lat: 60, lon: 10 }, lawn: { dockOrigin: { lat: 1, lon: 2 } } };
-    expect(migrateLawn(options)).toEqual({ lawn: { dockOrigin: { lat: 1, lon: 2 } } });
+  test('drops the older places once a Lawn is saved for any mower, without reading them', () => {
+    const options = {
+      dockOrigin: { lat: 60, lon: 10 },
+      lawn: { dockOrigin: { lat: 3, lon: 4 }, boundary: { outline: square } },
+      lawns: { '*': { dockOrigin: { lat: 1, lon: 2 } }, 'mower-1': { dockOrigin: { lat: 5, lon: 6 } } },
+    };
+    expect(migrateLawn(options)).toEqual({
+      lawns: { '*': { dockOrigin: { lat: 1, lon: 2 } }, 'mower-1': { dockOrigin: { lat: 5, lon: 6 } } },
+    });
+  });
+
+  test('keeps the Lawns of named mowers when it moves an older Lawn in beside them', () => {
+    expect(migrateLawn({ lawn: { dockOrigin: { lat: 3, lon: 4 } }, lawns: { 'mower-1': {} } })).toEqual({
+      lawns: { '*': { dockOrigin: { lat: 3, lon: 4 } }, 'mower-1': {} },
+    });
+  });
+});
+
+describe('withDockOrigin', () => {
+  const lawn = { dockOrigin: { lat: 60, lon: 10, rotation: 20 }, boundary: { outline: square } };
+
+  test('sets one value of the Dock origin and keeps the rest of the Lawn', () => {
+    expect(withDockOrigin(lawn, 'lat', 61)).toEqual({
+      dockOrigin: { lat: 61, lon: 10, rotation: 20 },
+      boundary: { outline: square },
+    });
+  });
+
+  test('a cleared value is taken out, not saved as nothing', () => {
+    expect(withDockOrigin(lawn, 'rotation', undefined).dockOrigin).toEqual({ lat: 60, lon: 10 });
+    expect('rotation' in withDockOrigin(lawn, 'rotation', undefined).dockOrigin!).toBe(false);
+  });
+
+  test('starts a Lawn where there was none', () => {
+    expect(withDockOrigin(undefined, 'lon', 10)).toEqual({ dockOrigin: { lon: 10 } });
+  });
+});
+
+describe('spelledOut', () => {
+  // Grafana merges saved options into the ones before, and takes a value that is missing to mean no change.
+  test('what a Lawn does not have is spelled out as undefined, so that saving it takes it out', () => {
+    expect(spelledOut({ dockOrigin: { lat: 60, lon: 10 } })).toStrictEqual({
+      dockOrigin: { lat: 60, lon: 10, rotation: undefined },
+      boundary: undefined,
+    });
+    expect(spelledOut({})).toStrictEqual({
+      dockOrigin: { lat: undefined, lon: undefined, rotation: undefined },
+      boundary: undefined,
+    });
+  });
+
+  test('what it has is saved as it is', () => {
+    const lawn = { dockOrigin: { lat: 60, lon: 10, rotation: 20 }, boundary: { outline: square, zones: [] } };
+    expect(spelledOut(lawn)).toStrictEqual(lawn);
+    expect(spelledOut({ boundary: { zones: [] } }).boundary).toStrictEqual({ outline: undefined, zones: [] });
   });
 });
