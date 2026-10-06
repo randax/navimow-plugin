@@ -2,11 +2,13 @@ name: Panel
 
 on:
   # Branches are covered by their pull request; pushing to one would run everything twice.
+  # The browser tests open the bundled dashboards against a database the collector fills, so a
+  # change to either of those is tested here too.
   push:
     branches: [main]
-    paths: ['panel/**', '.github/workflows/panel.yml']
+    paths: ['panel/**', 'dashboards/**', 'collector/**', '.github/workflows/panel.yml']
   pull_request:
-    paths: ['panel/**', '.github/workflows/panel.yml']
+    paths: ['panel/**', 'dashboards/**', 'collector/**', '.github/workflows/panel.yml']
   # Nightly, because tile services can change or fail without any change in this repository.
   schedule:
     - cron: '0 3 * * *'

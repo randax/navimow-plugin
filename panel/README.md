@@ -11,6 +11,14 @@ pnpm run dev                 # build and watch into dist/
 docker compose up -d --build # Grafana on http://localhost:3000 with dist/ mounted
 ```
 
+`docker compose` also starts a PostgreSQL and fills it as the collector would, by replaying the
+real capture twice (`tests/seed.py`): a Job that ended some hours ago, and the same Job a week
+before with an error and a gap in collection put into it. That is what the bundled dashboard in
+[`../dashboards`](../dashboards/README.md) reads, at `/d/navimow`. The first start installs the
+collector into the seeding container, which takes a minute. The Jobs are placed relative to when
+the database was filled, so on a later day fill it again, to have one in the last 24 hours and for
+the browser tests of that dashboard to pass: `docker compose run --rm seed`.
+
 Provisioned dashboards (`provisioning/`, development only):
 
 - `/d/navimow-map`: every Base map kind side by side, including a custom WMS template and a

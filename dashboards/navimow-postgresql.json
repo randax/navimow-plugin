@@ -1,0 +1,1030 @@
+{
+  "uid": "navimow",
+  "title": "Navimow",
+  "description": "A Navimow mower's Jobs on a map of the lawn, with its battery, state and progress. Reads the PostgreSQL database that navimow-collector writes; needs schema version 8 or later.",
+  "tags": [
+    "navimow"
+  ],
+  "schemaVersion": 41,
+  "version": 1,
+  "editable": true,
+  "graphTooltip": 1,
+  "timezone": "browser",
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "refresh": "30s",
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      },
+      {
+        "name": "Gaps in collection",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "${datasource}"
+        },
+        "enable": true,
+        "hide": false,
+        "iconColor": "#8e8e8e",
+        "rawQuery": "SELECT start_time AS time, end_time AS timeend, 'Nothing was collected: ' || reason AS text, 'gap' AS tags FROM collector_gap WHERE mower_id = ${mower:sqlstring} AND start_time <= $__timeTo() AND end_time >= $__timeFrom() ORDER BY start_time"
+      }
+    ]
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "label": "Database",
+        "type": "datasource",
+        "query": "grafana-postgresql-datasource",
+        "current": {},
+        "hide": 0,
+        "includeAll": false,
+        "multi": false,
+        "options": [],
+        "refresh": 1,
+        "regex": ""
+      },
+      {
+        "name": "mower",
+        "label": "Mower",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "${datasource}"
+        },
+        "definition": "The mowers in the mower table, by name",
+        "query": "SELECT COALESCE(name, mower_id) AS __text, mower_id AS __value FROM mower UNION ALL SELECT 'No mowers yet', '' WHERE NOT EXISTS (SELECT FROM mower) ORDER BY 1",
+        "current": {},
+        "hide": 0,
+        "includeAll": false,
+        "multi": false,
+        "options": [],
+        "refresh": 1,
+        "regex": "",
+        "sort": 0
+      },
+      {
+        "name": "job",
+        "label": "Job",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "${datasource}"
+        },
+        "definition": "The mower's Jobs in the time range, newest first",
+        "description": "The Jobs in the time range, by when each started. All shows every one of them.",
+        "query": "WITH in_range AS ( SELECT job_id, start_time FROM job WHERE mower_id = ${mower:sqlstring} AND start_time <= $__timeTo() AND COALESCE(end_time, updated_time) >= $__timeFrom() ) SELECT __text, __value FROM ( SELECT to_char(start_time AT TIME ZONE 'UTC', 'Dy DD Mon HH24:MI \"UTC\"') AS __text, job_id AS __value, start_time FROM in_range UNION ALL SELECT 'No Jobs in range', '', NULL WHERE NOT EXISTS (SELECT FROM in_range) ) AS jobs ORDER BY start_time DESC NULLS LAST",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "hide": 0,
+        "includeAll": true,
+        "multi": false,
+        "options": [],
+        "refresh": 2,
+        "regex": "",
+        "sort": 0
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "randax-navimowmap-panel",
+      "title": "Lawn",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 16,
+        "h": 16
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${datasource}"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT device_time AS time, x, y, theta, job_id, zone, mower_id AS device_id FROM trail_point WHERE mower_id = ${mower:sqlstring} AND $__timeFilter(device_time) ORDER BY device_time"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${datasource}"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT device_time AS time, zone, zone_progress AS progress FROM job_progress WHERE mower_id = ${mower:sqlstring} AND job_id = ANY(ARRAY[${job:sqlstring}]::text[]) AND zone IS NOT NULL AND $__timeFilter(device_time) ORDER BY device_time"
+        }
+      ],
+      "description": "Every Trail in the time range, coloured by Job. Set the Dock origin in the panel's options to place it on the map; click a Trail to select its Job.",
+      "options": {
+        "baseMap": {
+          "preset": "kartverket-topo"
+        },
+        "jobVariable": "$job"
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "State",
+      "gridPos": {
+        "x": 16,
+        "y": 0,
+        "w": 4,
+        "h": 3
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${datasource}"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT state FROM mower_state WHERE mower_id = ${mower:sqlstring} AND device_time <= $__timeTo() ORDER BY device_time DESC LIMIT 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "isRunning": {
+                  "text": "Mowing",
+                  "index": 0
+                },
+                "isDocking": {
+                  "text": "Returning",
+                  "index": 1
+                },
+                "isPaused": {
+                  "text": "Paused",
+                  "index": 2
+                },
+                "Error": {
+                  "text": "Error",
+                  "index": 3
+                },
+                "isLifted": {
+                  "text": "Lifted",
+                  "index": 4
+                },
+                "isDocked": {
+                  "text": "Docked",
+                  "index": 5
+                },
+                "isIdle": {
+                  "text": "Idle",
+                  "index": 6
+                },
+                "isIdel": {
+                  "text": "Idle",
+                  "index": 7
+                },
+                "Offline": {
+                  "text": "Offline",
+                  "index": 8
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/.*/",
+          "values": false
+        },
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Battery",
+      "gridPos": {
+        "x": 20,
+        "y": 0,
+        "w": 4,
+        "h": 3
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${datasource}"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT battery FROM mower_state WHERE mower_id = ${mower:sqlstring} AND battery IS NOT NULL AND device_time <= $__timeTo() ORDER BY device_time DESC LIMIT 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/.*/",
+          "values": false
+        },
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Job progress",
+      "gridPos": {
+        "x": 16,
+        "y": 3,
+        "w": 4,
+        "h": 3
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${datasource}"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT mowing_percentage FROM (SELECT * FROM job WHERE mower_id = ${mower:sqlstring} AND job_id = ANY(ARRAY[${job:sqlstring}]::text[]) ORDER BY start_time DESC LIMIT 1) AS picked"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/.*/",
+          "values": false
+        },
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true
+      }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Area",
+      "gridPos": {
+        "x": 20,
+        "y": 3,
+        "w": 4,
+        "h": 3
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${datasource}"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT area FROM (SELECT * FROM job WHERE mower_id = ${mower:sqlstring} AND job_id = ANY(ARRAY[${job:sqlstring}]::text[]) ORDER BY start_time DESC LIMIT 1) AS picked"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "areaM2",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/.*/",
+          "values": false
+        },
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true
+      }
+    },
+    {
+      "id": 6,
+      "type": "bargauge",
+      "title": "Zone progress",
+      "gridPos": {
+        "x": 16,
+        "y": 6,
+        "w": 8,
+        "h": 6
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${datasource}"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "WITH picked AS (SELECT * FROM job WHERE mower_id = ${mower:sqlstring} AND job_id = ANY(ARRAY[${job:sqlstring}]::text[]) ORDER BY start_time DESC LIMIT 1), reported AS ( SELECT p.zone, max(p.zone_progress) AS progress FROM job_progress p JOIN picked USING (mower_id, job_id) WHERE p.zone IS NOT NULL GROUP BY p.zone ), listed AS (SELECT unnest(zones) AS zone FROM picked UNION SELECT zone FROM reported) SELECT 'Zone ' || listed.zone AS zone, COALESCE(reported.progress, 0) AS progress FROM listed LEFT JOIN reported USING (zone) ORDER BY listed.zone"
+        }
+      ],
+      "description": "How far each Zone of the Job has come: the Zones it was set to mow, and each one's highest report, since a Zone's progress starts over after a charging break.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": true
+        },
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "valueMode": "text",
+        "showUnfilled": true,
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "namePlacement": "left",
+        "sizing": "auto",
+        "legend": {
+          "showLegend": false,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        }
+      }
+    },
+    {
+      "id": 7,
+      "type": "table",
+      "title": "Jobs",
+      "gridPos": {
+        "x": 16,
+        "y": 12,
+        "w": 8,
+        "h": 4
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${datasource}"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT job_id, start_time AS \"Started\", extract(epoch FROM COALESCE(end_time, updated_time) - start_time) AS \"Duration\", area AS \"Area\", CASE WHEN end_time IS NULL THEN 'Under way' WHEN completed THEN 'Completed' ELSE 'Interrupted' END AS \"Outcome\" FROM job WHERE mower_id = ${mower:sqlstring} AND start_time <= $__timeTo() AND COALESCE(end_time, updated_time) >= $__timeFrom() ORDER BY start_time DESC"
+        }
+      ],
+      "description": "The Jobs in the time range. Click when one started to select it.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "job_id"
+            },
+            "properties": [
+              {
+                "id": "custom.hideFrom.viz",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Started"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Select this Job",
+                    "url": "/d/${__dashboard.uid}/?var-job=${__data.fields.job_id}&${mower:queryparam}&${datasource:queryparam}&${__url_time_range}"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Started"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 150
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Duration"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dthms"
+              },
+              {
+                "id": "custom.width",
+                "value": 85
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Area"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "areaM2"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              },
+              {
+                "id": "custom.width",
+                "value": 75
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true,
+        "footer": {
+          "show": false
+        }
+      }
+    },
+    {
+      "id": 8,
+      "type": "state-timeline",
+      "title": "State timeline",
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 24,
+        "h": 4
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${datasource}"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "(SELECT $__timeFrom()::timestamptz AS time, state AS \"State\" FROM mower_state WHERE mower_id = ${mower:sqlstring} AND device_time < $__timeFrom() ORDER BY device_time DESC LIMIT 1) UNION ALL (SELECT device_time, state FROM mower_state WHERE mower_id = ${mower:sqlstring} AND $__timeFilter(device_time)) ORDER BY time"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "isRunning": {
+                  "text": "Mowing",
+                  "color": "blue",
+                  "index": 0
+                },
+                "isDocking": {
+                  "text": "Returning",
+                  "color": "yellow",
+                  "index": 1
+                },
+                "isPaused": {
+                  "text": "Paused",
+                  "color": "orange",
+                  "index": 2
+                },
+                "Error": {
+                  "text": "Error",
+                  "color": "red",
+                  "index": 3
+                },
+                "isLifted": {
+                  "text": "Lifted",
+                  "color": "red",
+                  "index": 4
+                },
+                "isDocked": {
+                  "text": "Docked",
+                  "color": "#8e8e8e",
+                  "index": 5
+                },
+                "isIdle": {
+                  "text": "Idle",
+                  "color": "#b5b5b5",
+                  "index": 6
+                },
+                "isIdel": {
+                  "text": "Idle",
+                  "color": "#b5b5b5",
+                  "index": 7
+                },
+                "Offline": {
+                  "text": "Offline",
+                  "color": "#5a5a5a",
+                  "index": 8
+                }
+              }
+            }
+          ],
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#8e8e8e"
+          },
+          "custom": {
+            "lineWidth": 0,
+            "fillOpacity": 85,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "mergeValues": true,
+        "showValue": "auto",
+        "alignValue": "left",
+        "rowHeight": 0.9,
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Battery level",
+      "gridPos": {
+        "x": 0,
+        "y": 20,
+        "w": 12,
+        "h": 6
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${datasource}"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT device_time AS time, battery AS \"Battery\" FROM mower_state WHERE mower_id = ${mower:sqlstring} AND battery IS NOT NULL AND $__timeFilter(device_time) ORDER BY device_time"
+        }
+      ],
+      "description": "The battery as the mower reports it with each change of state.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "purple"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Job progress over time",
+      "gridPos": {
+        "x": 12,
+        "y": 20,
+        "w": 12,
+        "h": 6
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${datasource}"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT device_time AS time, job_id AS metric, mowing_percentage AS value FROM job_progress WHERE mower_id = ${mower:sqlstring} AND job_id = ANY(ARRAY[${job:sqlstring}]::text[]) AND mowing_percentage IS NOT NULL AND $__timeFilter(device_time) ORDER BY device_time"
+        }
+      ],
+      "description": "How far through each Job the mower was. A flat stretch is a charging break.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "color": {
+            "mode": "palette-classic-by-name"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "id": 100,
+      "type": "row",
+      "title": "Season",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 26,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 11,
+      "type": "barchart",
+      "title": "Area per week",
+      "gridPos": {
+        "x": 0,
+        "y": 27,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${datasource}"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT week AS time, COALESCE(sum(job.area), 0) AS \"Area\" FROM generate_series(date_trunc('week', $__timeFrom()::timestamptz), $__timeTo()::timestamptz, interval '1 week') AS week LEFT JOIN job ON job.mower_id = ${mower:sqlstring} AND date_trunc('week', job.start_time) = week GROUP BY week ORDER BY week"
+        }
+      ],
+      "description": "The area of every Job that started in the week, Monday to Sunday. This panel keeps its own range, whatever the time picker says.",
+      "timeFrom": "26w",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "areaM2",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          },
+          "custom": {
+            "lineWidth": 0,
+            "fillOpacity": 85,
+            "gradientMode": "none"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "auto",
+        "xField": "time",
+        "xTickLabelRotation": 0,
+        "xTickLabelSpacing": 100,
+        "showValue": "never",
+        "stacking": "none",
+        "groupWidth": 0.8,
+        "barWidth": 0.9,
+        "barRadius": 0.1,
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "id": 12,
+      "type": "stat",
+      "title": "Time on Jobs",
+      "gridPos": {
+        "x": 12,
+        "y": 27,
+        "w": 4,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${datasource}"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT extract(epoch FROM sum(COALESCE(end_time, updated_time) - start_time)) / 3600 FROM job WHERE mower_id = ${mower:sqlstring}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "suffix: h",
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/.*/",
+          "values": false
+        },
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true
+      },
+      "description": "From leaving the dock to being back at it, summed over every Job recorded, whatever the time picker says. Charging breaks inside a Job are included."
+    },
+    {
+      "id": 13,
+      "type": "table",
+      "title": "Errors",
+      "gridPos": {
+        "x": 16,
+        "y": 27,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${datasource}"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT device_time AS \"When\", state AS \"State\", job_id AS \"Job\" FROM ( SELECT device_time, state, job_id, lag(state) OVER (ORDER BY device_time) AS state_before FROM mower_state WHERE mower_id = ${mower:sqlstring} AND $__timeFilter(device_time) ) AS states WHERE state IN ('Error', 'isLifted') AND state IS DISTINCT FROM state_before ORDER BY device_time DESC LIMIT 200"
+        }
+      ],
+      "description": "Each time the mower went into error or was lifted. This panel keeps its own range, whatever the time picker says.",
+      "timeFrom": "26w",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "When"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 150
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "State"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 70
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "Error": {
+                        "text": "Error",
+                        "index": 0
+                      },
+                      "isLifted": {
+                        "text": "Lifted",
+                        "index": 1
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true,
+        "footer": {
+          "show": false
+        }
+      }
+    }
+  ]
+}

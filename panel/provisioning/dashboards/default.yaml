@@ -5,3 +5,8 @@ providers:
     type: file
     options:
       path: /etc/grafana/provisioning/dashboards
+  # The dashboards an owner imports, from the repository root.
+  - name: 'navimow-bundled'
+    type: file
+    options:
+      path: /etc/grafana/bundled-dashboards

@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import type { Locator, Page } from '@playwright/test';
 import { test as base, expect } from '@grafana/plugin-e2e';
-import type { Dashboard } from '@grafana/plugin-e2e';
+import type { Dashboard, DashboardPage } from '@grafana/plugin-e2e';
 import type { Camera as MapCamera } from '../src/model/view';
 
 const PLUGIN_ID = 'randax-navimowmap-panel';
@@ -1026,4 +1026,108 @@ test('every style of Coverage is drawn on Terrain 400 m up, raised as the panel 
       expect(covered, `${style}, ${raised ? 'raised' : 'flat'}`).toBeGreaterThan(500);
     }
   }
+});
+
+// The dashboard an owner imports, reading a PostgreSQL which docker compose fills as a collector
+// would (tests/seed.py): the real capture's Job twice over, one that ended some hours ago and one a
+// week before it with an error and a gap in collection put into it. The Jobs are placed by when the
+// database was filled: after a day, fill it again with `docker compose run --rm seed`.
+const BUNDLED = 'navimow';
+
+/** A panel of the bundled dashboard, brought into view and found to have no failed query. */
+const bundledPanel = async (dashboard: DashboardPage, title: string): Promise<Locator> => {
+  const panel = dashboard.getPanelByTitle(title);
+  await panel.locator.scrollIntoViewIfNeeded();
+  await expect(panel.getErrorIcon(), `${title}: its query failed`).toHaveCount(0);
+  return panel.locator;
+};
+
+test('the bundled dashboard shows a collector database with no query edited', async ({ gotoDashboardPage }) => {
+  const dashboard = await gotoDashboardPage({ uid: BUNDLED });
+  const shows = async (title: string, ...texts: Array<string | RegExp>) => {
+    for (const text of texts) {
+      await expect(await bundledPanel(dashboard, title), title).toContainText(text);
+    }
+  };
+  // A panel that draws on a canvas has one only once it has data to draw.
+  const draws = async (title: string) =>
+    expect((await bundledPanel(dashboard, title)).locator('canvas').first(), title).toBeVisible();
+
+  // On its default range, the last 24 hours: the Job that ended some hours ago, and the dock since.
+  await shows('State', 'Docked');
+  await shows('Battery', '90%');
+  await shows('Job progress', '100%');
+  await shows('Area', '653 m²');
+  await shows('Zone progress', 'Zone 1', 'Zone 6', 'Zone 7', 'Zone 9', 'Zone 10', 'Zone 11');
+  await shows('Jobs', 'Completed', '03:13:53');
+  await shows('State timeline', 'Mowing', 'Returning', 'Docked');
+  await draws('Battery level');
+  await shows('Job progress over time', /\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ/);
+  // No dashboard can know where an owner's dock stands: until they say, the map asks.
+  await shows('Lawn', "Set the Dock origin's latitude and longitude");
+
+  // The Season row keeps its own ranges, so it holds the Job of a week ago as well.
+  await draws('Area per week');
+  await shows('Time on Jobs', '6.5 h');
+  await shows('Errors', 'Error');
+});
+
+test('the bundled dashboard is quiet over a time with no Job in it', async ({ gotoDashboardPage, page }) => {
+  // Three days ago, between the two Jobs: a day the mower sat at the dock, as it does all winter.
+  const dashboard = await gotoDashboardPage({ uid: BUNDLED, timeRange: { from: 'now-4d', to: 'now-3d' } });
+
+  // The mower was docked throughout, which it last said the week before.
+  await expect(await bundledPanel(dashboard, 'State')).toContainText('Docked');
+  await expect(await bundledPanel(dashboard, 'State timeline')).toContainText('Docked');
+  for (const title of ['Job progress', 'Area', 'Zone progress', 'Jobs', 'Battery level', 'Job progress over time']) {
+    await expect(await bundledPanel(dashboard, title), title).toContainText('No data');
+  }
+  await bundledPanel(dashboard, 'Lawn');
+  const job = page.getByTestId('data-testid Dashboard template variables submenu Label Job');
+  await expect(job.getByTestId('icon-exclamation-triangle'), 'the Job variable reports an error').toHaveCount(0);
+});
+
+test('a Job picked from the bundled dashboard’s table is the one the dashboard shows', async ({
+  gotoDashboardPage,
+  page,
+}) => {
+  // Over both Jobs: with the Job variable on All, the tiles speak of the newer.
+  const dashboard = await gotoDashboardPage({ uid: BUNDLED, timeRange: { from: 'now-8d', to: 'now' } });
+  const jobs = await bundledPanel(dashboard, 'Jobs');
+  await expect(jobs.getByRole('link')).toHaveCount(2);
+
+  await jobs.getByRole('link').last().click();
+
+  // The older Job, named by when it started: the only one with an error in it.
+  await expect(page).toHaveURL(/var-job=\d{4}-\d\d-\d\dT[\d:%A]+Z/);
+  await expect(await bundledPanel(dashboard, 'State timeline')).toContainText('Error');
+  const progress = await bundledPanel(dashboard, 'Job progress over time');
+  await expect(progress.getByText(/^\d{4}-.*Z$/)).toHaveCount(1);
+});
+
+test('once its Dock origin is set, the bundled dashboard draws the Trail of the Job', async ({
+  gotoDashboardPage,
+  page,
+}) => {
+  // The dashboard as an owner saves it with their Lawn: the same file, with a Dock origin in the
+  // map's options.
+  const file = path.join(__dirname, '..', '..', 'dashboards', 'navimow-postgresql.json');
+  const bundled = JSON.parse(readFileSync(file, 'utf8'));
+  const lawns = { '*': { dockOrigin: { lat: 59.964, lon: 10.672, rotation: 0 } } };
+  const withLawn = {
+    ...bundled,
+    uid: 'navimow-with-lawn',
+    title: 'Navimow, with a Lawn',
+    panels: bundled.panels.map((panel: { title: string; options?: object }) =>
+      panel.title === 'Lawn' ? { ...panel, options: { ...panel.options, lawns } } : panel
+    ),
+  };
+  const saved = await page.request.post('/api/dashboards/db', { data: { dashboard: withLawn, overwrite: true } });
+  expect(saved.ok(), await saved.text()).toBe(true);
+
+  const map = await bundledPanel(await gotoDashboardPage({ uid: withLawn.uid }), 'Lawn');
+  await expectDrawn(map);
+  // The Job, and the positions sent from the dock before and after it, which belong to none.
+  await expect(map.getByTestId('navimow-map')).toHaveAttribute('data-trails-drawn', '2');
+  await page.request.delete(`/api/dashboards/uid/${withLawn.uid}`);
 });
