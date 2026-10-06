@@ -4,7 +4,7 @@ import type { GrafanaTheme2 } from '@grafana/data';
 import { useStyles2 } from '@grafana/ui';
 import { GPUInitializationError, Map, Marker, setWorkerUrl, type GeoJSONSource, type PointLike } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
-import type { CoverageScene } from '../model/coverage';
+import type { CoverageScene } from '../model/coverageScene';
 import type { DockOrigin } from '../model/dockOrigin';
 import { framedBounds, movesView, nextFraming, type Framing } from '../model/framing';
 import type { Detail } from '../model/hover';
@@ -371,14 +371,16 @@ const MapCanvas: React.FC<Props & { coverageLayer?: CoverageScene['layer'] }> = 
     setBearing(created.getBearing());
   }, [baseMap, overlay, terrain, view, hidden, coverageLayer]);
 
-  // Raised Coverage seen from straight above is the flat picture again, so the map is tilted to
-  // show it: when it is raised, and when a new map starts out looking down on it.
+  // Raised Coverage seen from straight above is the flat picture again, so the map is tilted once
+  // to show it: when Coverage is raised, or first has something to raise. From there the tilt is
+  // the owner's, and a switch to the flat view looks straight down as it always does.
+  const standing = raised && coverage !== undefined;
   useEffect(() => {
-    const pitch = raised && map.current ? pitchToSeeRaised(map.current.getPitch()) : undefined;
+    const pitch = standing && map.current ? pitchToSeeRaised(map.current.getPitch()) : undefined;
     if (pitch !== undefined) {
       map.current?.easeTo({ pitch });
     }
-  }, [raised, terrain, view]);
+  }, [standing]);
 
 
   // When to frame the Trail, and whether that moves a view that follows the mower, are the model's

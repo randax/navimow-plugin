@@ -6,7 +6,7 @@ export type Recency = { stale: false } | { stale: true; lastSeen: string };
 // short of the hour-old position, shown as current, that this exists to prevent.
 export const STALE_AFTER_MS = 15 * 60_000;
 
-const MIN = 60_000;
+export const MIN = 60_000;
 const HOUR = 60 * MIN;
 const DAY = 24 * HOUR;
 

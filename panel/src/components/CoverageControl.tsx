@@ -2,7 +2,8 @@ import React from 'react';
 import { css } from '@emotion/css';
 import type { GrafanaTheme2 } from '@grafana/data';
 import { Checkbox, RadioButtonGroup, Toggletip, ToolbarButton, useStyles2 } from '@grafana/ui';
-import { COVERAGE_STYLES, type CoverageLegend, type CoverageStyle } from '../model/coverage';
+import { COVERAGE_STYLES, type CoverageStyle } from '../model/coverage';
+import type { CoverageLegend } from '../model/coverageScene';
 
 interface Props {
   style: CoverageStyle;
@@ -40,10 +41,12 @@ export const CoverageControl: React.FC<Props> = ({ style, raised, legend, onChan
                 className={styles.ramp}
                 style={{ background: `linear-gradient(90deg, ${legend.colours.join(', ')})` }}
               />
-              <div className={styles.ends}>
-                <span>{legend.from}</span>
-                <span>{legend.to}</span>
-              </div>
+              {legend.ends && (
+                <div className={styles.ends}>
+                  <span>{legend.ends[0]}</span>
+                  <span>{legend.ends[1]}</span>
+                </div>
+              )}
             </div>
           )}
         </div>

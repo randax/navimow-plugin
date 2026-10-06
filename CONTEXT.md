@@ -21,12 +21,12 @@ The latitude/longitude of the charging dock plus the rotation of the mower's loc
 _Avoid_: Calibration point, anchor, home
 
 **Coverage**:
-The area of the lawn a Trail has visited, derived from the Trail itself.
-_Avoid_: Mowed area, progress map, and Heatmap for Coverage as a whole: a Heatmap is one of its styles
+The area of the lawn a Trail has visited, derived from the Trail itself. A heatmap is one way of drawing it, not another word for it.
+_Avoid_: Mowed area, progress map
 
 **Coverage style**:
 One of the three ways Coverage is drawn: Grid (square cells), Heatmap (the cells smoothed) or Buffered line (the Trail as wide as the mower cuts).
-_Avoid_: Mode, layer, rendering, visualisation
+_Avoid_: Mode, rendering, visualisation
 
 **Boundary**:
 The user-drawn outline of the lawn and its Zones, as polygons.

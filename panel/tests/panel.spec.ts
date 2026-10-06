@@ -212,16 +212,20 @@ const setShown = async (page: Page, panel: Locator, name: string, shown: boolean
   await expectDrawn(panel);
 };
 
-/**
- * How much of the Base map Coverage covers, in pixels: the fixture's green that comes back when
- * Coverage is hidden. The Trail is hidden first, as its line lies over the same ground.
- */
-const coveredPixels = async (page: Page, panel: Locator) => {
-  await setShown(page, panel, 'Trail', false);
-  const covered = (await pixelsOf(page, panel)).baseMap;
-  await setShown(page, panel, 'Coverage', false);
-  return (await pixelsOf(page, panel)).baseMap - covered;
+/** Sets how Coverage is drawn from its control on the panel, puts the control away and waits for the map. */
+const drawCoverage = async (page: Page, panel: Locator, style: string, raised: boolean) => {
+  await control(panel, 'Coverage').click();
+  // Sought on the page: it opens outside the panel, as every Grafana popover does.
+  const coverage = page.getByTestId('navimow-map-coverage');
+  await coverage.getByRole('radio', { name: style }).check({ force: true });
+  await coverage.getByRole('checkbox', { name: 'Raised' }).setChecked(raised, { force: true });
+  await page.keyboard.press('Escape');
+  await expect(coverage).toHaveCount(0);
+  await expectDrawn(panel);
 };
+
+/** How much of the fixture Base map's green shows, in pixels: less of it wherever Coverage is drawn. */
+const baseMapPixels = async (page: Page, panel: Locator) => (await pixelsOf(page, panel)).baseMap;
 
 test('draws the default Kartverket Base map with its attribution, uncollapsed', async ({ openMap, page }) => {
   const [panel] = await Promise.all([openMap('Kartverket topo'), tileFrom(page, 'cache.kartverket.no')]);
@@ -943,15 +947,27 @@ for (const { title, note } of [
   { title: 'Heatmap, by time since mowed', note: 'A Heatmap shows how often each part was cut, not how long ago.' },
   { title: 'Buffered line' },
 ]) {
-  test(`Coverage of a real Trail is drawn, and can be hidden: ${title}`, async ({ openCoverage, page }) => {
+  test(`Coverage of a real Trail is drawn, hidden and shown again: ${title}`, async ({ openCoverage, page }) => {
     test.skip(LIVE_TILES, NEEDS_FIXTURE_TILES);
     const panel = await openCoverage(title);
     await expectDrawn(panel);
     // What a style cannot show of what the options ask for is said beside the map, while it is shown.
     const warning = panel.getByTestId('navimow-map-warning');
-    await (note ? expect(warning).toContainText(note) : expect(warning).toHaveCount(0));
-    expect(await coveredPixels(page, panel)).toBeGreaterThan(500);
+    const expectNote = () => (note ? expect(warning).toContainText(note) : expect(warning).toHaveCount(0));
+    await expectNote();
+
+    // Without the Trail, whose line lies over the same ground, what hides the Base map is Coverage.
+    await setShown(page, panel, 'Trail', false);
+    const covered = await baseMapPixels(page, panel);
+    await setShown(page, panel, 'Coverage', false);
+    expect((await baseMapPixels(page, panel)) - covered).toBeGreaterThan(500);
     await expect(warning).toHaveCount(0);
+
+    await setShown(page, panel, 'Coverage', true);
+    await expect(async () => {
+      expect(Math.abs((await baseMapPixels(page, panel)) - covered)).toBeLessThan(50);
+    }).toPass({ timeout: 20_000 });
+    await expectNote();
   });
 }
 
@@ -988,10 +1004,26 @@ test('the Coverage control switches the style and raises it, tilting the map to 
   expect((await cameraOf(panel)).pitch).toBe(60);
 });
 
-test('a panel can open with Coverage raised, standing on Terrain 400 m up', async ({ openCoverage, page }) => {
+test('every style of Coverage is drawn on Terrain 400 m up, raised as the panel opens and flat', async ({
+  openCoverage,
+  page,
+}) => {
   test.skip(LIVE_TILES, NEEDS_FIXTURE_TILES);
+  // Twelve redraws over Terrain, under software rendering.
+  test.setTimeout(180_000);
   const panel = await openCoverage('Raised over Terrain');
   await cameraAtRest(panel, (camera) => Math.round(camera.groundElevation) === 400 && camera.pitch === 60);
   await expectDrawn(panel);
-  expect(await coveredPixels(page, panel)).toBeGreaterThan(500);
+
+  await setShown(page, panel, 'Trail', false);
+  await setShown(page, panel, 'Coverage', false);
+  const bare = await baseMapPixels(page, panel);
+  await setShown(page, panel, 'Coverage', true);
+  for (const raised of [true, false]) {
+    for (const style of ['Grid', 'Heatmap', 'Buffered line']) {
+      await drawCoverage(page, panel, style, raised);
+      const covered = bare - (await baseMapPixels(page, panel));
+      expect(covered, `${style}, ${raised ? 'raised' : 'flat'}`).toBeGreaterThan(500);
+    }
+  }
 });

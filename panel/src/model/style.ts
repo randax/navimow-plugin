@@ -6,7 +6,7 @@ import type {
   RasterSourceSpecification,
   StyleSpecification,
 } from 'maplibre-gl';
-import type { CoverageScene } from './coverage';
+import type { CoverageScene } from './coverageScene';
 import type { BoundaryFeatures } from './lawn';
 import type { Overlay } from './overlay';
 import type { TrailScene } from './trail';
@@ -61,10 +61,14 @@ const HIDEABLE = [
 export type Hideable = (typeof HIDEABLE)[number]['id'];
 
 /** What the panel offers to hide: only what it has something to draw for. */
-export const hideable = (boundary: BoundaryFeatures, coverage?: CoverageScene) =>
-  HIDEABLE.filter(
-    ({ id }) => id === 'trail' || (id === 'coverage' ? coverage !== undefined : boundary.features.length > 0)
-  );
+export const hideable = (boundary: BoundaryFeatures, coverage?: CoverageScene) => {
+  const drawn: Record<Hideable, boolean> = {
+    trail: true,
+    coverage: coverage !== undefined,
+    boundary: boundary.features.length > 0,
+  };
+  return HIDEABLE.filter(({ id }) => drawn[id]);
+};
 
 /**
  * The whole map as one style, drawn bottom to top: Base map, Overlay, the Boundary's fill, Coverage,

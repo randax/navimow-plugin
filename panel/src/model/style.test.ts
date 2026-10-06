@@ -1,5 +1,5 @@
 import { resolveBaseMap } from './baseMap';
-import { coverageScene } from './coverage';
+import { coverageScene } from './coverageScene';
 import { boundaryFeatures } from './lawn';
 import { resolveOverlay } from './overlay';
 import { hideable, mapStyle } from './style';
