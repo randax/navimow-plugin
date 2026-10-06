@@ -5,6 +5,9 @@ dashboard opened on its default range has something to show whenever the tests r
 an hour ago, and once a week before that. The earlier one has an error and a gap in collection
 put into it. Both are invented, since no capture holds either, and are only there so that the
 panels which show them have something to show.
+
+Whatever the database held is dropped first, so filling it again on a later day leaves the same
+two Jobs, placed by that day.
 """
 
 from __future__ import annotations
@@ -16,6 +19,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+import psycopg
 from navimow_collector.cli import main
 
 CAPTURE = Path(__file__).resolve().parents[2] / "fixtures" / "job-2026-09-30.jsonl.gz"
@@ -23,9 +27,12 @@ DSN = "postgresql://postgres@postgres/navimow"
 HOUR_MS = 3_600_000
 WEEK_MS = 7 * 24 * HOUR_MS
 STATE_TOPIC = "/downlink/vehicle/DEVICE_1/realtimeDate/state"
-# Twenty minutes and forty-five minutes into the Job, in the capture's own time.
-GAP_MS = (1790776413612, 1790776653612)
-ERROR_MS = (1790777913612, 1790778033612)
+MINUTE_MS = 60_000
+LEFT_DOCK_MS = 1790775213612  # when the capture's Job began
+# What is put into the earlier Job: four minutes lost from twenty minutes in, and two minutes
+# in error from forty-five minutes in.
+GAP_MS = (LEFT_DOCK_MS + 20 * MINUTE_MS, LEFT_DOCK_MS + 24 * MINUTE_MS)
+ERROR_MS = (LEFT_DOCK_MS + 45 * MINUTE_MS, LEFT_DOCK_MS + 47 * MINUTE_MS)
 
 Record = dict[str, Any]
 
@@ -74,6 +81,9 @@ def seed() -> None:
     with gzip.open(CAPTURE, "rt", encoding="utf-8") as lines:
         capture = [json.loads(line) for line in lines]
     to_an_hour_ago = round(time.time() * 1000) - HOUR_MS - capture[-1]["recv_ms"]
+    with psycopg.connect(DSN, autocommit=True) as database:
+        database.execute("DROP SCHEMA public CASCADE")
+        database.execute("CREATE SCHEMA public")
     with tempfile.TemporaryDirectory() as directory:
         replay([moved(r, to_an_hour_ago - WEEK_MS) for r in troubled(capture)], Path(directory))
         replay([moved(r, to_an_hour_ago) for r in capture], Path(directory))

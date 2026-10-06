@@ -7,6 +7,10 @@ cannot install dashboards itself, so these are files.
 | --- | --- | --- |
 | `navimow-postgresql.json` | PostgreSQL | collector schema version 8 or later |
 
+![The dashboard over a day with one Job in it](navimow-postgresql.jpg)
+
+The Job is the real capture in `fixtures/`, on a dock placed where none stands.
+
 ## Importing
 
 1. Install the Navimow map panel, and add the collector's database to Grafana as a PostgreSQL
@@ -28,7 +32,7 @@ The top of the dashboard follows the time picker, which starts on the last 24 ho
 
 - **Lawn**: every Trail in the time range. Clicking one selects its Job.
 - **State** and **Battery**: as the mower last reported them, at the end of the time range.
-- **Job progress**, **Area mowed** and **Zone progress**: the selected Job, or with All the
+- **Job progress**, **Area** and **Zone progress**: the selected Job, or with All the
   newest in the time range. A Zone shows its highest report, because the mower counts a Zone
   from zero again after a charging break.
 - **Jobs**: each Job in the time range. Clicking when one started selects it.
@@ -37,18 +41,20 @@ The top of the dashboard follows the time picker, which starts on the last 24 ho
 
 The **Season** row keeps its own ranges, whatever the time picker says:
 
-- **Area mowed per week**: the area of the Jobs that started in each of the last 26 weeks.
+- **Area per week**: the area of the Jobs that started in each of the last 26 weeks.
 - **Time on Jobs**: from leaving the dock to being back at it, over every Job recorded.
-  Charging breaks inside a Job are counted.
+  Charging breaks inside a Job are counted. A Job with no end yet counts as far as the mower
+  was last heard from on it.
 - **Errors**: each time the mower went into error or was lifted, in the last 26 weeks.
 
 ## Worth knowing
 
-- **Jobs are listed in UTC.** A Job is named by the second it started in UTC, and a query
-  cannot see the time zone of the browser reading it. The Jobs table and every time axis are in
-  the dashboard's own time zone.
-- **A time range with no Job in it** lists one option under Job, "No Jobs in range". Grafana
-  shows a variable whose query returns nothing as an error, and this is in place of that.
+- **The Job variable lists Jobs in UTC.** A Job is named by the second it started in UTC, and
+  the query behind the variable cannot see the time zone of the browser reading it. The Jobs
+  table and every time axis are in the dashboard's own time zone.
+- **A time range with no Job in it** lists one option under Job, "No Jobs in range", and a
+  database with no mower in it yet lists "No mowers yet". Grafana shows a variable whose query
+  returns nothing as an error, and these are in place of that.
 - **Weeks run Monday to Sunday in the database's time zone**, which is UTC unless the server is
   set otherwise.
 - **There is no signal-strength panel**: no mower has yet been seen to report one.
