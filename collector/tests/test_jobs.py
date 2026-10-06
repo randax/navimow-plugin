@@ -321,8 +321,10 @@ STATE_TOPIC = "/downlink/vehicle/DEVICE_1/realtimeDate/state"
 MID_JOB = 1788087000000  # mowing Zone 10, 40 % of the Job done
 
 
-def state(at_ms: int, name: str) -> Record:
-    return {"recv_ms": at_ms, "kind": "mqtt", "topic": STATE_TOPIC, "payload": {"state": name}}
+def state(at_ms: int, name: str, sent_ms: int | None = None) -> Record:
+    """A state message, which names when it was sent only if the two times differ."""
+    payload = {"state": name} if sent_ms is None else {"state": name, "timestamp": sent_ms}
+    return {"recv_ms": at_ms, "kind": "mqtt", "topic": STATE_TOPIC, "payload": payload}
 
 
 @pytest.mark.parametrize("interruption", ["isPaused", "isLifted", "Error", "Offline", "isIdle"])
@@ -497,3 +499,71 @@ def test_a_report_sent_before_the_mower_docked_does_not_send_it_out_again(
     [job] = jobs(replay(delivered_after(docked)))
     assert job["end_time"] == ms(docked)
     assert (job["mowing_percentage"], job["area"]) == (63, 190.0)  # and still counts
+
+
+def test_a_state_from_before_the_job_began_says_nothing_of_it(replay: Replay) -> None:
+    # The first day's Job is last heard mid-lawn. The next day's is announced, unseen
+    # leaving the dock; and only then does the first day's isDocked turn up. It is not the
+    # new Job that docked ten minutes into the day before.
+    day = fixture()
+    never_back = [r for r in day if r["recv_ms"] < MID_JOB]
+    next_day = [later(r, DAY_MS) for r in day if r["recv_ms"] > LEFT_DOCK]
+    announced = next(i for i, r in enumerate(next_day) if announces(r)) + 1
+    stray = state(next_day[announced]["recv_ms"], "isDocked", sent_ms=MID_JOB + 600_000)
+    first, second = jobs(replay([*never_back, *next_day[:announced], stray, *next_day[announced:]]))
+    assert second["start_time"] == ms(1788085297268 + DAY_MS)
+    assert (second["end_time"], second["completed"]) == (ms(1788090811063 + DAY_MS), True)
+
+
+def test_a_job_given_up_ends_at_its_last_report_even_one_that_reported_nothing_new(
+    replay: Replay,
+) -> None:
+    # Stuck where it stood, the mower reports the same area and percentage a minute on.
+    day = fixture()
+    never_back = [r for r in day if r["recv_ms"] < MID_JOB]
+    [last] = [r for r in never_back if is_progress(r) and r["payload"][0]["time"] == 1788086676268]
+    next_day = [later(r, DAY_MS) for r in day if r["recv_ms"] >= LEFT_DOCK]
+    first, _ = jobs(replay([*never_back, later(last, 60_000), *next_day]))
+    assert first["end_time"] == ms(1788086676268 + 60_000)
+
+
+def without_area(record: Record) -> Record:
+    """The progress report as some firmware sends it: with its area left empty."""
+    if not is_progress(record) or announces(record):
+        return record
+    return {**record, "payload": [{**record["payload"][0], "subtotalArea": ""}]}
+
+
+def test_a_report_without_its_area_leaves_the_jobs_area_as_last_known(replay: Replay) -> None:
+    day = fixture()
+    blank = [without_area(r) if r["recv_ms"] > 1788090000000 else r for r in day]
+    [job] = jobs(replay(blank))
+    assert (job["completed"], job["mowing_percentage"]) == (True, 100)
+    assert job["area"] == 230.0  # the last area reported before they went empty
+
+
+def test_an_announcement_starts_a_job_though_the_one_before_never_reported_an_area(
+    replay: Replay,
+) -> None:
+    # The mower goes to charge at 63 %, never having said how much it mowed, and leaves on
+    # another Job. That one is announced with its area at zero all the same.
+    day = fixture()
+    charging = [without_area(r) for r in day if r["recv_ms"] < 1788089000000]
+    another = [later(r, 90 * 60_000) for r in day if r["recv_ms"] >= LEFT_DOCK]
+    first, second = jobs(replay([*charging, *another]))
+    assert (first["mowing_percentage"], first["area"]) == (63, None)
+    assert second["start_time"] == ms(1788085297268 + 90 * 60_000)  # the announcement
+
+
+def test_a_report_from_before_the_job_began_says_nothing_of_it(replay: Replay) -> None:
+    # One of the first day's last reports turns up only after the mower has left the dock
+    # the next day. Its 99 % and 300 square metres are not the new Job's.
+    day = fixture()
+    [stray] = [r for r in day if is_progress(r) and r["payload"][0]["mowingPercentage"] == 99]
+    day.remove(stray)
+    next_day = [later(r, DAY_MS) for r in day]
+    left = next(i for i, r in enumerate(next_day) if r["recv_ms"] == LEFT_DOCK + DAY_MS) + 1
+    held_up = {**stray, "recv_ms": LEFT_DOCK + DAY_MS + 1}
+    first, second = jobs(replay([*day, *next_day[:left], held_up, *next_day[left:]]))
+    assert (first["completed"], first["end_time"]) == (True, ms(1788090811063))
+    assert (second["start_time"], second["area"]) == (ms(LEFT_DOCK + DAY_MS), 300.0)

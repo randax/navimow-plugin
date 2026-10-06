@@ -6,7 +6,7 @@ import json
 import logging
 import os
 import shutil
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import suppress
 from dataclasses import asdict
 from datetime import datetime
@@ -100,13 +100,27 @@ class BufferedStorage:
         self._storage = self._open()
 
     def latest_jobs(self) -> Sequence[Job]:
-        """Each mower's most recent Job as the database has it; none while it is away, which
-        costs a Job under way its continuity, never the collection."""
+        """Each mower's most recent Job, as the database will have it once what is waiting
+        has been written. None from a database that is away, which costs a Job under way
+        its continuity, never the collection."""
         try:
-            return self._storage.latest_jobs() if self._storage is not None else ()
+            jobs = list(self._storage.latest_jobs()) if self._storage is not None else []
         except StorageError as error:
             self._outage(error)
-            return ()
+            jobs = []
+        latest: dict[str, Job] = {}
+        for job in (*jobs, *(row for row in self._waiting() if isinstance(row, Job))):
+            known = latest.get(job.mower_id)
+            if known is None or _version(known) <= _version(job):
+                latest[job.mower_id] = job
+        return list(latest.values())
+
+    def _waiting(self) -> Iterator[Row]:
+        """Every row waiting for the database, oldest first. Rows of the buffer file that
+        were already sent come too; none do from a file that cannot be read."""
+        with suppress(OSError), self._spill.open("rb") as spill:
+            yield from (row for row in map(_decode, spill) if row is not None)
+        yield from self._memory
 
     def write_trail(self, points: Sequence[TrailPoint]) -> int:
         return self._write(points)
@@ -331,6 +345,11 @@ class BufferedStorage:
         the file that was sent: how far that one was sent says nothing about this one."""
         if _identity(spill) != self._replayed_file or _size(spill) < self._replayed:
             self._replayed = 0
+
+
+def _version(job: Job) -> tuple[datetime, datetime]:
+    """Orders a mower's Jobs, and the versions of one Job, oldest first."""
+    return job.start_time, job.updated_time
 
 
 def _count_lines(path: Path) -> int | None:

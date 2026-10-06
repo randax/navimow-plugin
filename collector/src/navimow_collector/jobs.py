@@ -14,6 +14,7 @@ from typing import NamedTuple, TypeVar
 from .records import Job, MowerState, Progress, Row, TrailPoint
 
 Reading = TypeVar("Reading", MowerState, Progress)
+Number = TypeVar("Number", int, float)
 
 # How far the area mowed must fall, in square metres, before it is another Job's area.
 AREA_FALL = 1.0
@@ -45,9 +46,9 @@ class JobTracker:
         self._job = job
         away = job is not None and job.end_time is None
         self._spans = [Span(job.start_time, job.job_id)] if job is not None and away else []
-        # When the newest state and the newest progress report heard were sent.
-        self._stated_at: datetime | None = None
-        self._reported: datetime | None = None
+        # When the newest state and the newest progress report heard were sent. Whatever
+        # was sent before a stored Job last changed was heard by the collector that stored it.
+        self._stated_at = self._reported = job.updated_time if job is not None else None
         self._pose: TrailPoint | None = None  # the newest position
         self._heard = False  # whether the state channel has spoken since the last gap
         # When the Job was left off, while it is only taken to be resumed: the mower left
@@ -79,6 +80,8 @@ class JobTracker:
     def _on_state(self, reading: MowerState) -> list[Row]:
         """Decide what a state says of the Job; the Job to store, if it changed."""
         time, job, zone = reading.device_time, self._job, self._zone
+        if job is not None and time < job.start_time:
+            return []  # sent before this Job began: it is the Job before that it speaks of
         away = job is not None and job.end_time is None
         if reading.state == "isRunning" and not away:
             if job is not None and _unfinished(job):
@@ -108,7 +111,9 @@ class JobTracker:
         time, job, zone = report.device_time, self._job, self._zone
         if self._reported is not None and time < self._reported:
             return []
-        self._reported = time
+        heard, self._reported = self._reported, time
+        if job is not None and time < job.start_time:
+            return []  # sent before this Job began: it is the Job before that it speaks of
         left_off, self._left_off = self._left_off, None
         given_up: list[Row] = []
         # Progress sent since the mower docked: it has left again, unseen.
@@ -117,16 +122,19 @@ class JobTracker:
             if job is not None and job.end_time is None:
                 # Away on a Job, and the mower has started another: it gave the first up
                 # at the dock if it never took it up again, and else where last heard.
-                given_up = [replace(job, end_time=left_off or job.updated_time)]
+                last_heard = max(job.updated_time, heard or job.updated_time)
+                given_up = [replace(job, end_time=left_off or last_heard)]
             job, zone = self._begin(time), None
         elif left_unseen:
             job = replace(job, end_time=None)
         if report.area != 0:
-            percentage, zone = report.mowing_percentage, report.zone
+            zone = report.zone
+            # A report may leave either figure out: the Job keeps what it last knew.
+            percentage = _known(report.mowing_percentage, job.mowing_percentage)
             job = replace(
                 job,
                 mowing_percentage=percentage,
-                area=report.area,
+                area=_known(report.area, job.area),
                 completed=job.completed or (percentage is not None and percentage >= 100),
             )
         return [*given_up, *self._take(job, time, zone)]
@@ -171,11 +179,17 @@ def _unfinished(job: Job) -> bool:
 
 def _fell(job: Job, report: Progress) -> bool:
     """Whether the report counts from the start again, as only another Job would."""
+    if report.area == 0:  # an announcement: of another Job, if this one has reported at all
+        return job.area is not None or job.mowing_percentage is not None
     if job.area is not None and report.area is not None:
-        return report.area == 0 or report.area < job.area - AREA_FALL
+        return report.area < job.area - AREA_FALL
     if job.mowing_percentage is not None and report.mowing_percentage is not None:
         return report.mowing_percentage < job.mowing_percentage
     return False
+
+
+def _known(reported: Number | None, before: Number | None) -> Number | None:
+    return before if reported is None else reported
 
 
 def _job_id(start: datetime) -> str:

@@ -329,6 +329,27 @@ def test_a_job_and_what_was_recorded_of_it_survive_an_outage_on_disk(
     ]
 
 
+def test_the_latest_job_is_the_one_still_waiting_to_be_written(
+    database: str, tmp_path: Path
+) -> None:
+    # The database missed how the Job ended; the buffer file did not. A collector starting
+    # up must carry on from the Job as it ended, not as the database last saw it.
+    db, clock = Database(database), Clock()
+    storage = buffered(db, tmp_path, clock)
+    away = Job("DEVICE_1", "2026-09-30T12:00:00Z", start_time=START, updated_time=START)
+    ended = replace(away, end_time=START + timedelta(hours=1), updated_time=away.start_time)
+    ended = replace(ended, completed=True, updated_time=START + timedelta(hours=1))
+    storage.write_jobs([away])
+    db.go_down()
+    storage.write_jobs([ended])
+    storage.close()
+
+    db.down = False
+    restarted = buffered(db, tmp_path, clock)
+    restarted.connect()
+    assert restarted.latest_jobs() == [ended]
+
+
 def test_the_disk_buffer_never_exceeds_its_limit(database: str, tmp_path: Path) -> None:
     db, clock = Database(database), Clock()
     storage = buffered(db, tmp_path, clock, memory_rows=10, disk_bytes=1000)

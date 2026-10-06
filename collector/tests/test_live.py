@@ -430,6 +430,29 @@ def test_a_restart_inside_a_job_does_not_split_it(live: Live) -> None:
     assert [row[7] for row in live.trail()] == ["2026-09-21T14:13:20Z"]
 
 
+def test_a_report_from_before_a_restart_delivered_after_it_decides_nothing(live: Live) -> None:
+    location, state = LOCATION.format("DEVICE_1"), STATE.format("DEVICE_1")
+
+    async def scenario() -> None:
+        collector = await live.connected()
+        await live.broker.deliver(state, {"state": "isRunning", "battery": 90})
+        live.clock.now = NOW + 600
+        await live.broker.deliver(location, report(at(NOW + 600), area=40.0, percentage=6))
+        collector.stop()
+        live.vendor.state = "isRunning"
+        live.clock.now = NOW + 900
+        await live.connected()
+        # Sent five minutes before the report already stored: its smaller area is not a
+        # new Job's, though the new process never heard the later one itself.
+        await live.broker.deliver(location, report(at(NOW + 300), area=20.0, percentage=3))
+
+    asyncio.run(scenario())
+
+    with psycopg.connect(live.db.dsn) as conn:
+        jobs = conn.execute("SELECT start_time, end_time, area FROM job").fetchall()
+    assert jobs == [(at(NOW), None, 40.0)]
+
+
 def test_a_clean_shutdown_ends_the_recorded_stream_at_the_shutdown(live: Live) -> None:
     async def scenario() -> None:
         collector = await live.connected()

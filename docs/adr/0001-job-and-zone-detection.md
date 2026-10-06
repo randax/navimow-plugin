@@ -22,9 +22,10 @@ be away on one Job at a time.
 
 - the state channel says `isRunning` and the mower is not away, unless that resumes a Job
   (below); or
-- a progress report's area is back at zero, or has fallen by more than a square metre from
-  the latest Job's. This is how the mower announces a Job: with the area at zero, in the same
-  second as it leaves the dock. It holds whether or not the departure was seen; or
+- a progress report's area is back at zero when the latest Job has reported progress, or has
+  fallen by more than a square metre from that Job's. This is how the mower announces a Job:
+  with the area at zero, in the same second as it leaves the dock. It holds whether or not
+  the departure was seen; or
 - a progress report arrives and there is no Job it could belong to: none is known at all
   (collection began mid-Job), or the latest has nothing left to mow and the report was sent
   after it ended.
@@ -62,12 +63,15 @@ in the real capture, whose Job began in Zone 11. It is not stored as progress. A
 **Every stored row names the Job the mower was away on at the row's own time**, not at its
 arrival: Trail points (with their Zone), progress reports and states. At the dock, including
 during a charging break, a row names none. A message delivered after a newer one of its kind
-still gets stored in its place, but decides nothing.
+still gets stored in its place, but decides nothing; and neither does one sent before the
+latest Job began, which speaks of the Job before.
 
 **Outages do not split a Job.** A gap is stored as a gap. The state channel only speaks on a
 change, so after a gap the one status poll made on reconnecting stands in for it, until the
 channel speaks again; at any other time the poll is ignored, because the REST API runs a
-minute or two behind. A collector starting up carries on from each mower's latest stored Job.
+minute or two behind. A collector starting up carries on from each mower's latest stored Job,
+counting what the last one left waiting to be written, and from when that Job last changed:
+nothing sent before then decides anything.
 
 **The dock arrival pose** is the newest pose reported when `isDocked` is heard, if the two
 are no more than two minutes apart, and is kept on the Job.
@@ -103,6 +107,11 @@ round trip to the database to ask for one.
   the message that would have placed it differently keeps what it got: at worst the few
   positions between leaving the dock and a new Job's announcement, when the Job before was
   left unfinished, count towards that one.
+- The Zones already decided are not revised either. A report delivered after the mower turned
+  for the dock, naming a Zone it entered before that, is stored but moves no position into
+  that Zone.
+- After a restart inside a Job the Zone is unknown until the next progress report, some ten
+  seconds while mowing: the Job is stored, the Zone it was in is not.
 - A mower that stops for good away from the dock leaves its Job without an end until it is
   docked or starts another. That is what happened, so nothing is made up to close it.
 - A new Job whose announcement was missed, and which is first heard of only after it has
