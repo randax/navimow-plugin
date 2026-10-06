@@ -1,0 +1,323 @@
+<!doctype html>
+<!-- PROTOTYPE (throwaway), wayfinder ticket #15: three ways to render Coverage from a real Trail, each flat
+     and extruded, switchable via ?variant=A|B|C or the floating bar / arrow keys. Double-click this file to open.
+     Every control is also a URL parameter, so any view is a shareable link. -->
+<html lang="en"><head><meta charset="utf-8"><title>Coverage rendering prototype</title>
+<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@6.11.2/dist/maplibre-gl.css">
+<style>
+  :root{--bg:#111217;--panel:#181b1f;--border:#2c3235;--text:#ccccdc;--muted:#8e8e8e;--accent:#3d71d9}
+  *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font:13px/1.4 Inter,system-ui,sans-serif;height:100vh;display:flex;flex-direction:column;overflow:hidden}
+  header{height:44px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px;padding:0 16px;background:var(--panel)}
+  header b{color:#fff} header .crumb{color:var(--muted)}
+  #app{flex:1;display:flex;min-height:0}
+  .map{flex:1;position:relative} #map{position:absolute;inset:0}
+  .side{width:330px;border-left:1px solid var(--border);background:var(--panel);padding:14px;overflow:auto;display:flex;flex-direction:column;gap:10px}
+  h3{margin:6px 0 0;font-size:12px;color:#fff;text-transform:uppercase;letter-spacing:.04em}
+  label{display:flex;justify-content:space-between;align-items:center;gap:8px;color:var(--muted);font-size:12px}
+  select,input[type=range]{width:170px} select{background:#0b0c0e;border:1px solid var(--border);color:var(--text);padding:5px 6px;border-radius:2px}
+  pre#state{margin:0;font-size:11px;color:#9fa7b3;background:#0b0c0e;border:1px solid var(--border);padding:8px;white-space:pre-wrap}
+  .note{color:#ffb357;font-size:12px}
+  #legend{position:absolute;left:12px;bottom:34px;z-index:5;background:rgba(24,27,31,.92);border:1px solid var(--border);border-radius:4px;padding:8px 10px;width:230px;font-size:12px}
+  #legend .bar{height:10px;border-radius:2px;margin:5px 0 3px} #legend .ends{display:flex;justify-content:space-between;color:var(--muted)}
+  #switcher{position:fixed;bottom:14px;left:50%;transform:translateX(-50%);z-index:99;background:#ffe14d;color:#111;border-radius:999px;padding:6px 14px;display:flex;gap:12px;align-items:center;font-weight:600;box-shadow:0 4px 16px rgba(0,0,0,.6)}
+  #switcher button{background:#111;color:#ffe14d;border:none;border-radius:999px;width:28px;height:28px;cursor:pointer}
+</style></head><body>
+<header><span class="crumb">Dashboards</span>›<b>Navimow Map</b>›<span class="crumb">Coverage (prototype)</span></header>
+<div id="app">
+  <div class="map"><div id="map"></div><div id="legend"></div></div>
+  <aside class="side">
+    <h3>View</h3>
+    <label>Form <select data-opt="mode"><option value="flat">Flat</option><option value="3d">Extruded</option></select></label>
+    <label>Encodes <select data-opt="metric"><option value="visits">Visit count</option><option value="age">Time since mowed</option></select></label>
+    <label>Terrain (reloads) <input type="checkbox" data-opt="terrain"></label>
+    <label>Trail line on top <input type="checkbox" data-opt="trail"></label>
+    <h3>Coverage</h3>
+    <label>Cell size <select data-opt="cell"><option>0.1</option><option>0.25</option><option>0.5</option><option>1</option><option>2</option></select></label>
+    <label><span>Cutting width <span id="widthValue"></span></span> <input type="range" min="0.15" max="0.6" step="0.01" data-opt="width"></label>
+    <label>Cell counts <select data-opt="stamp"><option value="swath">Cutting width swept</option><option value="line">Centre line</option><option value="points">Raw points only</option></select></label>
+    <label>Only while cutting <input type="checkbox" data-opt="mowing"></label>
+    <h3>Load</h3>
+    <label>Jobs in range <select data-opt="jobs"><option>1</option><option>10</option><option>50</option></select></label>
+    <div class="note" id="note"></div>
+    <h3>State</h3>
+    <pre id="state"></pre>
+  </aside>
+</div>
+<div id="switcher"><button id="prev">←</button><span id="vlabel"></span><button id="next">→</button></div>
+<script src="trail.js"></script>
+<script type="module">
+const CDN = 'https://unpkg.com/maplibre-gl@6.11.2/dist/';   // the version the panel ships
+const { Map: GLMap, NavigationControl, setWorkerUrl } = await import(CDN + 'maplibre-gl.mjs');
+// A worker must be same-origin, so a blob stands in for it and pulls the real one in.
+setWorkerUrl(URL.createObjectURL(new Blob([`import '${CDN}maplibre-gl-worker.mjs';`], { type: 'text/javascript' })));
+
+// ---------- options, mirrored in the URL ----------
+const VARIANTS = { A: 'Heatmap', B: 'Visited-cell grid', C: 'Buffered line (cutting width)' };
+const opt = { variant: 'A', mode: 'flat', metric: 'visits', cell: 0.5, width: 0.43, stamp: 'swath', mowing: 1, jobs: 1, terrain: 0, trail: 0 };
+const params = new URLSearchParams(location.search);
+for (const k in opt) if (params.has(k)) opt[k] = typeof opt[k] === 'number' ? +params.get(k) : params.get(k);
+if (!VARIANTS[opt.variant]) opt.variant = 'A';
+const syncUrl = () => history.replaceState(null, '', '?' + new URLSearchParams(opt));
+
+// ---------- model: local metres in, GeoJSON out ----------
+const CAPTURE = window.CAPTURE;
+const DOCK = { lat: 59.964, lon: 10.672, rotation: 20 };   // the panel's provisioned placeholder, not the real garden
+const GAP_MS = 10_000;       // a longer silence breaks the line: the mower was docked or offline
+const REVISIT_MS = 20_000;   // a cell seen again after this long is another visit, not the same pass
+const CUTTING = 4;           // vehicleState while mowing in this capture; 5 is the drive home, 2 docked
+const RAD = Math.PI / 180;
+
+// Same flat-earth conversion as panel/src/model/dockOrigin.ts.
+const W = 1 - 0.00669437999014 * Math.sin(DOCK.lat * RAD) ** 2;
+const M_LAT = (6378137 * (1 - 0.00669437999014) * RAD) / W ** 1.5, M_LON = (6378137 * Math.cos(DOCK.lat * RAD) * RAD) / Math.sqrt(W);
+const B = DOCK.rotation * RAD;
+const ll = (x, y) => [DOCK.lon + (x * Math.sin(B) - y * Math.cos(B)) / M_LON, DOCK.lat + (x * Math.cos(B) + y * Math.sin(B)) / M_LAT];
+
+/** The Trail as [time, x, y]. More Jobs are the same Job again a day apart, nudged up to 0.2 m: a stand-in for a long time range. */
+function trailPoints() {
+  const one = CAPTURE.points.filter((p) => !opt.mowing || p[3] === CUTTING);
+  let seed = 1; const rand = () => ((seed = (seed * 16807) % 2147483647) / 2147483647) * 0.4 - 0.2;
+  const all = [];
+  for (let j = 0; j < opt.jobs; j++) {
+    const dx = j ? rand() : 0, dy = j ? rand() : 0;
+    for (const [t, x, y] of one) all.push([t + j * 86400e3, x + dx, y + dy]);
+  }
+  return all;
+}
+
+/** Unbroken runs of positions. */
+function runs(points) {
+  const out = [];
+  points.forEach((p, i) => (i && p[0] - points[i - 1][0] <= GAP_MS ? out.at(-1).push(p) : out.push([p])));
+  return out;
+}
+
+/**
+ * The one aggregation both encodings come from: per cell, how many separate visits and when the last was.
+ * Cells are squares on the mower's own axes, so the grid does not depend on the Dock origin.
+ */
+function aggregate(rs, cell, width, stamp) {
+  const t0 = performance.now();
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const r of rs) for (const [, x, y] of r) { minX = Math.min(minX, x); maxX = Math.max(maxX, x); minY = Math.min(minY, y); maxY = Math.max(maxY, y); }
+  const pad = width + 2 * cell, x0 = minX - pad, y0 = minY - pad;
+  const nx = Math.ceil((maxX - x0 + pad) / cell), ny = Math.ceil((maxY - y0 + pad) / cell);
+  const count = new Uint16Array(nx * ny), last = new Float64Array(nx * ny);
+  const r = stamp === 'swath' ? width / 2 : 0;
+  const visit = (x, y, t) => {
+    const cx = Math.floor((x - x0) / cell), cy = Math.floor((y - y0) / cell);
+    for (let iy = Math.floor((y - r - y0) / cell); iy <= Math.floor((y + r - y0) / cell); iy++)
+      for (let ix = Math.floor((x - r - x0) / cell); ix <= Math.floor((x + r - x0) / cell); ix++) {
+        // Cut when the cell's centre is under the deck; the cell the mower is in always counts, or coarse cells would be missed.
+        if ((ix !== cx || iy !== cy) && Math.hypot(x0 + (ix + 0.5) * cell - x, y0 + (iy + 0.5) * cell - y) > r) continue;
+        const i = iy * nx + ix;
+        if (!count[i] || t - last[i] > REVISIT_MS) count[i]++;
+        last[i] = t;
+      }
+  };
+  for (const run of rs) {
+    if (stamp === 'points') { for (const [t, x, y] of run) visit(x, y, t); continue; }
+    for (let i = 1; i < run.length; i++) {
+      const [ta, ax, ay] = run[i - 1], [tb, bx, by] = run[i];
+      const n = Math.max(1, Math.ceil(Math.hypot(bx - ax, by - ay) / (cell / 2)));
+      for (let k = i === 1 ? 0 : 1; k <= n; k++) visit(ax + ((bx - ax) * k) / n, ay + ((by - ay) * k) / n, ta + ((tb - ta) * k) / n);
+    }
+  }
+  stats.aggregateMs += performance.now() - t0;
+  return { x0, y0, nx, ny, cell, count, last };
+}
+
+/** Counts smoothed over neighbours: what a heatmap becomes once it has to be geometry. */
+function blur(g) {
+  let src = Float32Array.from(g.count);
+  for (let pass = 0; pass < 2; pass++) {
+    const dst = new Float32Array(src.length);
+    for (let iy = 1; iy < g.ny - 1; iy++) for (let ix = 1; ix < g.nx - 1; ix++) {
+      let s = 0;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) s += src[(iy + dy) * g.nx + ix + dx];
+      dst[iy * g.nx + ix] = s / 9;
+    }
+    src = dst;
+  }
+  return src;
+}
+
+const polygon = (ring, properties) => ({ type: 'Feature', properties, geometry: { type: 'Polygon', coordinates: [[...ring, ring[0]].map(([x, y]) => ll(x, y))] } });
+const collection = (features) => ({ type: 'FeatureCollection', features });
+
+/** One square per cell worth drawing. `age` is minutes since the cell was last visited. */
+function cellFeatures(g, end, values = g.count) {
+  const out = [], c = g.cell;
+  for (let iy = 0; iy < g.ny; iy++) for (let ix = 0; ix < g.nx; ix++) {
+    const i = iy * g.nx + ix;
+    if (values[i] < 0.05) continue;
+    const x = g.x0 + ix * c, y = g.y0 + iy * c;
+    out.push(polygon([[x, y], [x + c, y], [x + c, y + c], [x, y + c]], { visits: values[i], age: (end - g.last[i]) / 60e3 }));
+  }
+  return out;
+}
+
+/** Each step of the Trail as a rectangle as wide as the deck, run on by half a width so corners close. */
+function segmentQuads(rs, end, width) {
+  const out = [], h = width / 2, start = rs[0][0][0];
+  for (const run of rs) for (let i = 1; i < run.length; i++) {
+    const [, ax, ay] = run[i - 1], [t, bx, by] = run[i], len = Math.hypot(bx - ax, by - ay);
+    if (!len) continue;
+    const ux = ((bx - ax) / len) * h, uy = ((by - ay) / len) * h;
+    out.push(polygon([[ax - ux + uy, ay - uy - ux], [bx + ux + uy, by + uy - ux], [bx + ux - uy, by + uy + ux], [ax - ux - uy, ay - uy + ux]],
+      { visits: 1, age: (end - t) / 60e3, order: (t - start) / (end - start) }));
+  }
+  return out;
+}
+
+// ---------- paint ----------
+// Pixels per metre double with each zoom level, so an exponential base-2 ramp holds a size in metres on the ground.
+const PX_PER_M = 512 / (2 * Math.PI * 6378137 * Math.cos(DOCK.lat * RAD));
+const metres = (m) => ['interpolate', ['exponential', 2], ['zoom'], 0, m * PX_PER_M, 24, m * PX_PER_M * 2 ** 24];
+const RAMPS = { visits: ['#f6c443', '#e4572e', '#5a0b4d'], age: ['#22306e', '#3d9bd9', '#ffd23f'] };
+const LABELS = { visits: ['Visits', 'one', 'or more'], age: ['Time since mowed', 'just now', 'min ago'] };
+
+/** Colour, height and legend for the chosen encoding, scaled to the 98th percentile so one hot cell does not flatten the rest. */
+function encoding(features, prop = opt.metric) {
+  const lo = prop === 'visits' ? 1 : 0, sorted = features.map((f) => f.properties[prop]).sort((a, b) => a - b);
+  const hi = Math.max(lo + 1, sorted[Math.floor(sorted.length * 0.98)] ?? 0), colours = RAMPS[prop];
+  const scale = (outputs) => ['interpolate', ['linear'], ['get', prop], ...outputs.flatMap((o, i) => [lo + ((hi - lo) * i) / (outputs.length - 1), o])];
+  return { colour: scale(colours), height: scale([0.15, 3]), legend: { title: LABELS[prop][0], colours, ends: [LABELS[prop][1], `${hi.toFixed(prop === 'visits' ? 1 : 0)} ${LABELS[prop][2]}`] } };
+}
+
+// ---------- the three variants: each returns the GeoJSON and layers to draw ----------
+const SCENES = {
+  A(rs, end) {
+    if (opt.mode === 'flat') {
+      const radius = 2 * opt.cell, colours = ['#f6c443', '#e4572e', '#5a0b4d'];
+      return {
+        data: collection(rs.flat().map(([, x, y]) => ({ type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: ll(x, y) } }))),
+        // Intensity is set so a single pass lands low on the ramp whatever the radius or number of Jobs.
+        layers: [{ id: 'cov', type: 'heatmap', paint: { 'heatmap-radius': metres(radius), 'heatmap-intensity': 0.18 / (radius * radius * opt.jobs), 'heatmap-opacity': 0.8,
+          'heatmap-color': ['interpolate', ['linear'], ['heatmap-density'], 0, 'rgba(246,196,67,0)', 0.15, colours[0], 0.55, colours[1], 1, colours[2]] } }],
+        legend: { title: `Density (radius ${radius} m)`, colours, ends: ['sparse', 'dense'] },
+        note: 'A heatmap only sums, so it cannot show time since mowed. Its radius is twice the cell size.',
+      };
+    }
+    const g = aggregate(rs, opt.cell, opt.width, 'line'), features = cellFeatures(g, end, blur(g)), e = encoding(features, 'visits');
+    return {
+      data: collection(features),
+      layers: [{ id: 'cov', type: 'fill-extrusion', paint: { 'fill-extrusion-color': e.colour, 'fill-extrusion-height': e.height, 'fill-extrusion-opacity': 0.85 } }],
+      legend: { ...e.legend, title: 'Smoothed density', ends: ['sparse', 'dense'] },
+      note: 'MapLibre cannot extrude a heatmap layer, so this is the grid with its counts blurred: a density surface.',
+    };
+  },
+  B(rs, end) {
+    const features = cellFeatures(aggregate(rs, opt.cell, opt.width, opt.stamp), end), e = encoding(features);
+    return {
+      data: collection(features),
+      layers: [opt.mode === 'flat'
+        ? { id: 'cov', type: 'fill', paint: { 'fill-color': e.colour, 'fill-opacity': 0.8, 'fill-antialias': false } }
+        : { id: 'cov', type: 'fill-extrusion', paint: { 'fill-extrusion-color': e.colour, 'fill-extrusion-height': e.height, 'fill-extrusion-opacity': 0.85 } }],
+      legend: e.legend,
+    };
+  },
+  C(rs, end) {
+    if (opt.mode === '3d') {
+      // Later passes sit a little higher, so the newest wins where passes overlap.
+      const features = segmentQuads(rs, end, opt.width), e = encoding(features, 'age');
+      return {
+        data: collection(features),
+        layers: [{ id: 'cov', type: 'fill-extrusion', paint: { 'fill-extrusion-color': opt.metric === 'age' ? e.colour : '#e4572e', 'fill-extrusion-height': ['+', 0.15, ['*', 0.5, ['get', 'order']]], 'fill-extrusion-opacity': 0.85 } }],
+        legend: opt.metric === 'age' ? e.legend : { title: 'Mowed', colours: ['#e4572e', '#e4572e'], ends: ['', ''] },
+        note: 'A slab has no visit count: counting overlaps needs the passes rasterised, which is the grid.',
+      };
+    }
+    const paint = { 'line-width': metres(opt.width) }, layout = { 'line-cap': 'round', 'line-join': 'round' };
+    if (opt.metric === 'visits') {
+      return {
+        data: collection([{ type: 'Feature', properties: {}, geometry: { type: 'MultiLineString', coordinates: rs.filter((r) => r.length > 1).map((r) => r.map(([, x, y]) => ll(x, y))) } }]),
+        layers: [{ id: 'cov', type: 'line', layout, paint: { ...paint, 'line-color': '#e4572e', 'line-opacity': 0.45 } }],
+        legend: { title: 'Mowed (darker where passes cross)', colours: ['rgba(228,87,46,.45)', '#b93c1b'], ends: ['once', 'more'] },
+      };
+    }
+    // One short line per step, drawn oldest first, so the newest pass is the one left showing.
+    const features = rs.flatMap((r) => r.slice(1).map(([t, x, y], i) => ({ type: 'Feature', properties: { age: (end - t) / 60e3 }, geometry: { type: 'LineString', coordinates: [ll(r[i][1], r[i][2]), ll(x, y)] } })));
+    const e = encoding(features, 'age');
+    return { data: collection(features), layers: [{ id: 'cov', type: 'line', layout, paint: { ...paint, 'line-color': e.colour } }], legend: e.legend };
+  },
+};
+
+// ---------- map ----------
+const stats = { aggregateMs: 0 };
+const all = CAPTURE.points.map(([, x, y]) => ll(x, y));
+const bounds = all.reduce(([[w, s], [e, n]], [lon, lat]) => [[Math.min(w, lon), Math.min(s, lat)], [Math.max(e, lon), Math.max(n, lat)]], [[180, 90], [-180, -90]]);
+const camera = () => (opt.mode === '3d' ? { pitch: 55, bearing: -30 } : { pitch: 0, bearing: 0 });
+const map = new GLMap({
+  container: 'map', bounds, fitBoundsOptions: { padding: 60 }, ...camera(), maxPitch: 75, maxZoom: 23, keyboard: false,
+  style: {
+    version: 8,
+    sources: {
+      base: { type: 'raster', tiles: ['https://cache.kartverket.no/v1/wmts/1.0.0/topo/default/webmercator/{z}/{y}/{x}.png'], tileSize: 256, maxzoom: 18, attribution: '© Kartverket' },
+      dem: { type: 'raster-dem', tiles: ['https://tiles.mapterhorn.com/{z}/{x}/{y}.webp'], encoding: 'terrarium', tileSize: 512, maxzoom: 16, attribution: '© Mapterhorn' },
+      trail: { type: 'geojson', data: collection([]) },
+    },
+    // Terrain has to be in the first style or the camera jumps (found by the terrain prototype), hence the reload.
+    ...(opt.terrain ? { terrain: { source: 'dem' } } : {}),
+    layers: [{ id: 'base', type: 'raster', source: 'base' }, { id: 'trail', type: 'line', source: 'trail', paint: { 'line-color': '#111', 'line-width': 1, 'line-opacity': 0.7 } }],
+  },
+});
+map.addControl(new NavigationControl({ visualizePitch: true }), 'top-left');
+
+function render() {
+  stats.aggregateMs = 0;
+  const t0 = performance.now(), points = trailPoints(), rs = runs(points), scene = SCENES[opt.variant](rs, points.at(-1)[0]);
+  const built = performance.now(), aggregateMs = stats.aggregateMs;
+  if (map.getLayer('cov')) map.removeLayer('cov');
+  if (map.getSource('coverage')) map.removeSource('coverage');
+  map.addSource('coverage', { type: 'geojson', data: scene.data });
+  for (const layer of scene.layers) map.addLayer({ source: 'coverage', ...layer }, 'trail');
+  map.getSource('trail').setData(collection(opt.trail ? rs.filter((r) => r.length > 1).map((r) => ({ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: r.map(([, x, y]) => ll(x, y)) } })) : []));
+  map.easeTo({ ...camera(), duration: 400 });
+
+  const { title, colours, ends } = scene.legend;
+  document.getElementById('legend').innerHTML = `${title}<div class="bar" style="background:linear-gradient(90deg,${colours})"></div><div class="ends"><span>${ends[0]}</span><span>${ends[1]}</span></div>`;
+  document.getElementById('note').textContent = scene.note ?? '';
+  document.getElementById('vlabel').textContent = `${opt.variant} (${VARIANTS[opt.variant]})`;
+  document.getElementById('widthValue').textContent = `${opt.width} m`;
+
+  // The swept area at 5 cm, for one Job, against what the mower says it mowed: a check on the cutting width.
+  const fine = aggregate(runs(CAPTURE.points.filter((p) => p[3] === CUTTING)), 0.05, opt.width, 'swath');
+  const swept = fine.count.reduce((n, c) => n + (c > 0), 0) * 0.05 ** 2;
+  const length = rs.reduce((m, r) => m + r.slice(1).reduce((d, p, i) => d + Math.hypot(p[1] - r[i][1], p[2] - r[i][2]), 0), 0);
+  const show = (idleMs) => (document.getElementById('state').textContent = [
+    `variant ${opt.variant} · ${opt.mode} · ${opt.metric}`,
+    `Trail: ${points.length} points, ${rs.length} runs, ${Math.round(length)} m`,
+    `Coverage features: ${scene.data.features.length}`,
+    `GeoJSON: ${(JSON.stringify(scene.data).length / 1024).toFixed(0)} KB`,
+    `aggregate: ${aggregateMs.toFixed(0)} ms`,
+    `build (incl. aggregate): ${(built - t0).toFixed(0)} ms`,
+    `drawn after: ${idleMs === undefined ? '…' : idleMs.toFixed(0) + ' ms'}`,
+    ``,
+    `swept area at ${opt.width} m: ${swept.toFixed(0)} m²`,
+    `mower-reported area: ${CAPTURE.reportedArea} m²`,
+  ].join('\n'));
+  show();
+  map.once('idle', () => show(performance.now() - built));
+}
+
+// ---------- controls ----------
+for (const el of document.querySelectorAll('[data-opt]')) {
+  const k = el.dataset.opt, box = el.type === 'checkbox';
+  if (box) el.checked = !!opt[k]; else el.value = opt[k];
+  el.addEventListener('input', () => {
+    opt[k] = box ? +el.checked : typeof opt[k] === 'number' ? +el.value : el.value;
+    syncUrl();
+    if (k === 'terrain') location.reload(); else render();
+  });
+}
+const keys = Object.keys(VARIANTS);
+const cycle = (d) => { opt.variant = keys[(keys.indexOf(opt.variant) + d + keys.length) % keys.length]; syncUrl(); render(); };
+document.getElementById('prev').onclick = () => cycle(-1);
+document.getElementById('next').onclick = () => cycle(1);
+addEventListener('keydown', (e) => {
+  if (e.target.matches('input,select,textarea,[contenteditable]')) return;
+  if (e.key === 'ArrowLeft') cycle(-1); else if (e.key === 'ArrowRight') cycle(1);
+});
+map.on('load', render);
+</script></body></html>
