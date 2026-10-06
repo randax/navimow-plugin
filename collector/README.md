@@ -5,14 +5,93 @@ PostgreSQL, live and unattended, and works out which Job and Zone each part of
 it belongs to. It can also replay a raw capture through the same ingestion
 core, which is how it is tested.
 
-Install it for local development:
+## Install
+
+There are two ways to run it: as a container, or as a system service. Either
+needs a PostgreSQL database it can reach, which it fills with its own tables,
+and one interactive sign-in to Navimow. After that it is left alone.
+
+### As a container
+
+The image is built for 64-bit x86 and 64-bit ARM, so a Raspberry Pi on a 64-bit
+system runs it as it is. One command starts it:
 
 ```bash
-pip install -e 'collector[dev]'
+docker run -d --name navimow-collector --restart unless-stopped \
+  -e NAVIMOW_STORAGE_DSN=postgresql://user:password@host/navimow \
+  -v navimow-collector:/var/lib/navimow-collector \
+  ghcr.io/randax/navimow-collector
 ```
 
-Configure PostgreSQL in one TOML file. Values can be overridden with environment
-variables such as `NAVIMOW_STORAGE_MIGRATE=false`.
+It waits for a login and collects from the moment there is one. Sign in from
+inside the running container, as on any machine without a browser:
+
+```bash
+docker exec navimow-collector navimow-collector login --no-browser
+docker exec navimow-collector navimow-collector login --code '<the address the browser ended on>'
+```
+
+The first prints an address to open in a browser on any machine. Signing in
+there ends on a page that cannot load, at `localhost:1`, and the second command
+takes that page's whole address. [Navimow login](#navimow-login) has the rest.
+
+- **The volume** holds the login and the rows waiting for a database that is
+  away. Without it every new container has to be signed in again. A directory
+  mounted in its place must be writable by user 10001, which the collector runs
+  as.
+- **Configuration** is by environment variable, as above: every value in
+  [Configuration](#configuration) has one. To use a file, mount it and name it
+  in `NAVIMOW_CONFIG`.
+- **Health.** The image checks `/health` itself, so `docker ps` says whether the
+  collector is healthy. To reach `/health` and `/metrics` from outside the
+  container, add `-e NAVIMOW_HEALTH_LISTEN=0.0.0.0:9477 -p 9477:9477`. A
+  container that moves `health.listen` or turns it off needs a health check of
+  its own, or none.
+- **Versions.** Without a tag the newest release is pulled. To stay on one, name
+  it: `ghcr.io/randax/navimow-collector:0.1.0`.
+
+### As a system service
+
+For a machine with systemd and Python 3.11 or later, which Raspberry Pi OS
+Bookworm has. Install the collector into an environment of its own, for a user
+of its own, with the [sample unit](navimow-collector.service) and the
+[example configuration](navimow-collector.example.toml):
+
+```bash
+sudo useradd --system --shell /usr/sbin/nologin navimow
+sudo python3 -m venv /opt/navimow-collector
+sudo /opt/navimow-collector/bin/pip install randax-navimow-collector
+sudo ln -s /opt/navimow-collector/bin/navimow-collector /usr/local/bin/
+
+files=https://raw.githubusercontent.com/randax/navimow-plugin/main/collector
+sudo curl -fsSL -o /etc/systemd/system/navimow-collector.service $files/navimow-collector.service
+sudo curl -fsSL -o /etc/navimow-collector.toml $files/navimow-collector.example.toml
+sudo chown root:navimow /etc/navimow-collector.toml
+sudo chmod 640 /etc/navimow-collector.toml
+```
+
+In `/etc/navimow-collector.toml`, say where the database is, as `dsn` or in a
+file of its own as `dsn_file`, and take the `#` off `state_file` and
+`state_dir`: the service keeps its login and its buffer in
+`/var/lib/navimow-collector`, which systemd creates for it as it starts. So
+start it first, then sign in as the user it runs as:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now navimow-collector
+sudo -u navimow navimow-collector --config /etc/navimow-collector.toml login --no-browser
+sudo -u navimow navimow-collector --config /etc/navimow-collector.toml login --code '<the address the browser ended on>'
+```
+
+`journalctl -u navimow-collector -f` then shows it collecting. To upgrade, run
+the `pip install` again with `--upgrade` and restart the service.
+
+## Configuration
+
+One TOML file holds everything, and any value in it can be given instead as an
+environment variable named `NAVIMOW_<SECTION>_<KEY>`, such as
+`NAVIMOW_STORAGE_MIGRATE=false`. The file is the one named with `--config`, or
+in `NAVIMOW_CONFIG`.
 
 ```toml
 [storage]
@@ -24,10 +103,8 @@ migrate = true
 An inline `dsn = "postgresql://..."` is also accepted. Secret files have their
 trailing newline removed, and `NAVIMOW_STORAGE_DSN_FILE` can supply the path.
 
-```bash
-navimow-collector --config collector/navimow-collector.example.toml config
-navimow-collector --config collector/navimow-collector.example.toml replay fixtures/synthetic-job.jsonl.gz
-```
+`navimow-collector config` prints what the collector would run with, secrets
+left out.
 
 ## Navimow login
 
@@ -66,10 +143,11 @@ picks up the new login from the state file without a restart.
 
 ## Live collection
 
-After logging in once, start collecting and leave the collector alone:
+After logging in once, start collecting and leave the collector alone. The
+container and the system service both run this:
 
 ```bash
-navimow-collector --config collector/navimow-collector.example.toml collect
+navimow-collector --config /etc/navimow-collector.toml collect
 ```
 
 One process records every mower on the account, and every row carries its
@@ -241,14 +319,13 @@ login that needs renewing are all reported in the body and the metrics but
 answered with 200: reconnection and the buffer already deal with the first two,
 and no credential problem may ever restart the collector. A Navimow request
 that hangs, such as a token refresh, cannot stall the loop either: each tick waits
-at most 5 seconds for it, and the request carries on in the background. Use it as it is:
+at most 5 seconds for it, and the request carries on in the background. The
+container image's own health check is this endpoint, asked with Python, as the
+image has no curl:
 
 ```dockerfile
-HEALTHCHECK CMD curl -fsS http://127.0.0.1:9477/health || exit 1
+HEALTHCHECK CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9477/health', timeout=4)"]
 ```
-
-Without curl in the image, `python -c "import urllib.request;
-urllib.request.urlopen('http://127.0.0.1:9477/health')"` fails the same way.
 
 `GET /metrics` serves the same signals in the Prometheus text format:
 
@@ -299,7 +376,13 @@ collector was started with, and carries it in `command` as well:
 That error is logged once, when the login is found rejected; the hourly check
 that finds it still rejected logs a warning with the same command.
 
-## Tests
+## Develop
+
+```bash
+pip install -e 'collector[dev]'
+navimow-collector --config collector/navimow-collector.example.toml config
+navimow-collector replay fixtures/synthetic-job.jsonl.gz   # into the database NAVIMOW_STORAGE_DSN names
+```
 
 Run the tests with a local PostgreSQL installation (the suite starts `pg_ctl`
 automatically) or point it at an existing server:
@@ -307,3 +390,56 @@ automatically) or point it at an existing server:
 ```bash
 NAVIMOW_TEST_POSTGRES_DSN=postgresql://postgres@localhost:5432/postgres pytest collector
 ```
+
+Two more checks run on every pull request. `scripts/package.sh` builds the wheel
+and the source distribution and installs the wheel into an environment of its
+own. `scripts/smoke.sh`, which needs Docker, builds the container image and
+waits for it to report itself healthy beside a PostgreSQL.
+
+## Release
+
+The collector has its own version, the one in `pyproject.toml`, and its own
+tags, `collector/v<version>`. The panel's are `panel/v<version>`, and releasing
+either never releases the other: [why that holds](../README.md#two-versions).
+
+1. Set `version` in `pyproject.toml`, and in `CHANGELOG.md` rename
+   `## Unreleased` to `## <version>`. The changelog is written by hand, as
+   changes are made. Merge.
+2. Tag the merged commit and push the tag:
+   `git tag collector/v<version> && git push origin collector/v<version>`.
+
+`.github/workflows/collector-release.yml` then runs the tests, builds the
+package and the image as every pull request does, and publishes, in this order:
+
+- the image, for `linux/amd64` and `linux/arm64`, as
+  `ghcr.io/randax/navimow-collector:<version>` and `:latest`;
+- the wheel and the source distribution to the package index, as
+  `randax-navimow-collector`;
+- a GitHub release holding both of those, the sample unit and the example
+  configuration, with that version's changelog entries as its notes.
+
+It publishes nothing if the tag and `pyproject.toml` disagree, if the changelog
+has no entries for the version, or if `pyproject.toml` depends on a URL, which
+the package index refuses.
+
+**Before the first release**, three things that are done once:
+
+- **The SDK on the package index.** `pyproject.toml` installs
+  `randax-navimow-sdk` from its repository, by URL, so the release stops at the
+  check above. Once the SDK is published, depend on it as
+  `randax-navimow-sdk>=0.5,<0.6`, and take `git` out of the `Dockerfile` and
+  `allow-direct-references` out of `pyproject.toml`.
+- **A trusted publisher.** On pypi.org, under Publishing, add a pending
+  publisher for the project `randax-navimow-collector`: owner `randax`,
+  repository `navimow-plugin`, workflow `collector-release.yml`, environment
+  `pypi`. The workflow then needs no token.
+- **A public image.** GitHub keeps a new container package private. After the
+  first release, set `navimow-collector` to public under the repository's
+  Packages.
+
+## Licence
+
+GPL-3.0-only, in [`LICENSE`](LICENSE), in the package and in the image. It is
+inherited, not chosen: the collector imports the Navimow SDK, which is
+GPL-3.0-only. The panel in the same repository is Apache-2.0, and
+[the repository's README](../README.md#two-licences) explains the split.
