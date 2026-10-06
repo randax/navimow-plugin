@@ -323,8 +323,8 @@ const MapCanvas: React.FC<Props & { coverageLayer?: CoverageScene['layer'] }> = 
     reportErrors(created);
     // MapLibre ends a drag when the button is let go over its canvas, and one let go over a control
     // would hang until the pointer next moved. Capturing the pointer keeps the whole drag the map's.
-    const canvas = created.getCanvasContainer();
-    canvas.addEventListener('pointerdown', ({ pointerId }) => canvas.setPointerCapture(pointerId));
+    const canvasContainer = created.getCanvasContainer();
+    canvasContainer.addEventListener('pointerdown', ({ pointerId }) => canvasContainer.setPointerCapture(pointerId));
     // Only for data that arrived while the style was loading. MapLibre fires this after every restyle
     // in place too, where the Trail is already there and sending it again would re-tile it for nothing.
     topUp.current = false;
