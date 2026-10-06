@@ -32,6 +32,9 @@
     <label>Encodes <select data-opt="metric"><option value="visits">Visit count</option><option value="age">Time since mowed</option></select></label>
     <label>Terrain (reloads) <input type="checkbox" data-opt="terrain"></label>
     <label>Trail line on top <input type="checkbox" data-opt="trail"></label>
+    <h3>Dock origin</h3>
+    <label><span>Rotation <span id="rotValue"></span></span> <input type="range" min="0" max="359" step="1" data-opt="rot"></label>
+    <div style="color:var(--muted);font-size:12px">Drag the orange marker to move the dock.</div>
     <h3>Coverage</h3>
     <label>Cell size <select data-opt="cell"><option>0.1</option><option>0.25</option><option>0.5</option><option>1</option><option>2</option></select></label>
     <label><span>Cutting width <span id="widthValue"></span></span> <input type="range" min="0.15" max="0.6" step="0.01" data-opt="width"></label>
@@ -49,13 +52,14 @@
 <script type="module">
 const CDN = 'https://unpkg.com/maplibre-gl@6.11.2/dist/';   // the version the panel ships
 if (location.protocol === 'file:') document.body.insertAdjacentHTML('afterbegin', '<div style="background:#b3261e;color:#fff;padding:8px 16px">Opened as a file, so the map worker cannot start and no Coverage will be drawn. Run <code>python3 -m http.server 8015 -d prototype/coverage-rendering</code> from the repository root and open <code>http://localhost:8015/</code>.</div>');
-const { Map: GLMap, NavigationControl, setWorkerUrl } = await import(CDN + 'maplibre-gl.mjs');
+const { Map: GLMap, Marker, NavigationControl, setWorkerUrl } = await import(CDN + 'maplibre-gl.mjs');
 // A worker must be same-origin, so a blob stands in for it and pulls the real one in.
 setWorkerUrl(URL.createObjectURL(new Blob([`import '${CDN}maplibre-gl-worker.mjs';`], { type: 'text/javascript' })));
 
 // ---------- options, mirrored in the URL ----------
 const VARIANTS = { A: 'Heatmap', B: 'Visited-cell grid', C: 'Buffered line (cutting width)' };
-const opt = { variant: 'A', mode: 'flat', metric: 'visits', cell: 0.5, width: 0.43, stamp: 'swath', mowing: 1, jobs: 1, terrain: 0, trail: 0 };
+const opt = { variant: 'A', mode: 'flat', metric: 'visits', cell: 0.5, width: 0.43, stamp: 'swath', mowing: 1, jobs: 1, terrain: 0, trail: 0,
+  lat: 59.964, lon: 10.672, rot: 20 };   // Dock origin: the panel's provisioned placeholder unless the URL says otherwise
 const params = new URLSearchParams(location.search);
 for (const k in opt) if (params.has(k)) opt[k] = typeof opt[k] === 'number' ? +params.get(k) : params.get(k);
 if (!VARIANTS[opt.variant]) opt.variant = 'A';
@@ -63,18 +67,18 @@ const syncUrl = () => history.replaceState(null, '', '?' + new URLSearchParams(o
 
 // ---------- model: local metres in, GeoJSON out ----------
 const CAPTURE = window.CAPTURE;
-const DOCK = { lat: 59.964, lon: 10.672, rotation: 20 };   // the panel's provisioned placeholder, not the real garden
 const GAP_MS = 10_000;       // a longer silence breaks the line: the mower was docked or offline
 const REVISIT_MS = 20_000;   // a cell seen again after this long is another visit, not the same pass
 const CUTTING = 4;           // vehicleState while mowing in this capture; 5 is the drive home, 2 docked
 const RAD = Math.PI / 180;
 const stats = { aggregateMs: 0 };   // time spent in aggregate() during the current render
 
-// Same flat-earth conversion as panel/src/model/dockOrigin.ts.
-const W = 1 - 0.00669437999014 * Math.sin(DOCK.lat * RAD) ** 2;
-const M_LAT = (6378137 * (1 - 0.00669437999014) * RAD) / W ** 1.5, M_LON = (6378137 * Math.cos(DOCK.lat * RAD) * RAD) / Math.sqrt(W);
-const BEARING = DOCK.rotation * RAD;
-const ll = (x, y) => [DOCK.lon + (x * Math.sin(BEARING) - y * Math.cos(BEARING)) / M_LON, DOCK.lat + (x * Math.cos(BEARING) + y * Math.sin(BEARING)) / M_LAT];
+// Same flat-earth conversion as panel/src/model/dockOrigin.ts. `rot` is the compass bearing of the mower's x-axis.
+function ll(x, y) {
+  const w = 1 - 0.00669437999014 * Math.sin(opt.lat * RAD) ** 2, b = opt.rot * RAD;
+  const mLat = (6378137 * (1 - 0.00669437999014) * RAD) / w ** 1.5, mLon = (6378137 * Math.cos(opt.lat * RAD) * RAD) / Math.sqrt(w);
+  return [opt.lon + (x * Math.sin(b) - y * Math.cos(b)) / mLon, opt.lat + (x * Math.cos(b) + y * Math.sin(b)) / mLat];
+}
 
 /** The Trail as [time, x, y]. More Jobs are the same Job again a day apart, nudged up to 0.2 m: a stand-in for a long time range. */
 function trailPoints() {
@@ -175,7 +179,7 @@ function segmentQuads(ls, end, width) {
 
 // ---------- paint ----------
 // Pixels per metre double with each zoom level, so an exponential base-2 ramp holds a size in metres on the ground.
-const PX_PER_M = 512 / (2 * Math.PI * 6378137 * Math.cos(DOCK.lat * RAD));
+const PX_PER_M = 512 / (2 * Math.PI * 6378137 * Math.cos(opt.lat * RAD));
 const metres = (m) => ['interpolate', ['exponential', 2], ['zoom'], 0, m * PX_PER_M, 24, m * PX_PER_M * 2 ** 24];
 const RAMPS = { visits: ['#f6c443', '#e4572e', '#5a0b4d'], age: ['#22306e', '#3d9bd9', '#ffd23f'] };
 const LABELS = { visits: ['Visits', 'one', 'or more'], age: ['Time since mowed', 'just now', 'min ago'] };
@@ -265,6 +269,13 @@ const map = new GLMap({
   },
 });
 map.addControl(new NavigationControl({ visualizePitch: true }), 'top-left');
+// Drag the dock to move the whole Trail; the Rotation slider turns it about the dock.
+const dock = new Marker({ draggable: true, color: '#ff9830' }).setLngLat([opt.lon, opt.lat]).addTo(map);
+dock.on('dragend', () => {
+  const { lng, lat } = dock.getLngLat();
+  opt.lon = +lng.toFixed(6); opt.lat = +lat.toFixed(6);
+  syncUrl(); render();
+});
 
 function render() {
   stats.aggregateMs = 0;
@@ -283,10 +294,12 @@ function render() {
   document.getElementById('note').textContent = scene.note ?? '';
   document.getElementById('vlabel').textContent = `${opt.variant} (${VARIANTS[opt.variant]})`;
   document.getElementById('widthValue').textContent = `${opt.width} m`;
+  document.getElementById('rotValue').textContent = `${opt.rot}°`;
 
   const length = ls.reduce((m, r) => m + r.slice(1).reduce((d, p, i) => d + Math.hypot(p[1] - r[i][1], p[2] - r[i][2]), 0), 0);
   const show = (idleMs, swept) => (document.getElementById('state').textContent = [
     `variant ${opt.variant} · ${opt.mode} · ${opt.metric}`,
+    `Dock origin: ${opt.lat}, ${opt.lon}, rotation ${opt.rot}°`,
     `Trail: ${points.length} points, ${ls.length} unbroken legs, ${Math.round(length)} m`,
     `Coverage features: ${scene.data.features.length}`,
     `GeoJSON: ${kb.toFixed(0)} KB`,
