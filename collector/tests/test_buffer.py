@@ -16,7 +16,7 @@ import pytest
 from psycopg.conninfo import make_conninfo
 
 from navimow_collector.config import Secret, StorageConfig
-from navimow_collector.records import Gap, GapReason, TrailPoint
+from navimow_collector.records import Gap, GapReason, Job, MowerState, Progress, TrailPoint
 from navimow_collector.storage import Storage, StorageError, open_storage, postgres
 from navimow_collector.storage.buffered import REPLAY_ROWS, RETRY_SECONDS, BufferedStorage
 
@@ -78,6 +78,9 @@ class Observed:
     def check_schema(self) -> None:
         self._storage.check_schema()
 
+    def latest_jobs(self) -> Sequence[Job]:
+        return self._storage.latest_jobs()
+
     def write_trail(self, points: Sequence[TrailPoint]) -> int:
         if self._db.crash:
             raise self._db.crash
@@ -92,6 +95,15 @@ class Observed:
         if self._db.crash:
             raise self._db.crash
         return self._storage.write_gaps(gaps)
+
+    def write_jobs(self, jobs: Sequence[Job]) -> int:
+        return self._storage.write_jobs(jobs)
+
+    def write_progress(self, reports: Sequence[Progress]) -> int:
+        return self._storage.write_progress(reports)
+
+    def write_states(self, states: Sequence[MowerState]) -> int:
+        return self._storage.write_states(states)
 
     def close(self) -> None:
         self._storage.close()
@@ -282,6 +294,60 @@ def test_a_gap_held_during_an_outage_is_on_disk_at_once(database: str, tmp_path:
     buffered(db, tmp_path, clock).flush()
 
     assert gaps(database) == [(gap.mower_id, gap.start_time, gap.end_time, gap.reason)]
+
+
+def test_a_job_and_what_was_recorded_of_it_survive_an_outage_on_disk(
+    database: str, tmp_path: Path
+) -> None:
+    db, clock = Database(database), Clock()
+    storage = buffered(db, tmp_path, clock)
+    job = Job("DEVICE_1", "2026-09-30T12:00:00Z", start_time=START, updated_time=START)
+    report = Progress("DEVICE_1", START, START, 11, 2.5, 1, 4.25, 658.5, job.job_id)
+    state = MowerState("DEVICE_1", START, START, "isRunning", 90, job.job_id)
+    db.go_down()
+    storage.write_jobs([job])  # the mower is still away: its Job has no end yet
+    storage.write_progress([report])
+    storage.write_states([state])
+    storage.close()  # the collector stops; only the disk remembers
+
+    db.down = False
+    buffered(db, tmp_path, clock).flush()
+
+    with psycopg.connect(database) as conn:
+        stored = [
+            conn.execute(f"SELECT {columns} FROM {table}").fetchall()
+            for table, columns in (
+                ("job", "job_id, end_time, completed"),
+                ("job_progress", "job_id, zone, zone_progress, mowing_percentage, area, week_area"),
+                ("mower_state", "job_id, state, battery"),
+            )
+        ]
+    assert stored == [
+        [(job.job_id, None, False)],
+        [(job.job_id, 11, 2.5, 1, 4.25, 658.5)],
+        [(job.job_id, "isRunning", 90)],
+    ]
+
+
+def test_the_latest_job_is_the_one_still_waiting_to_be_written(
+    database: str, tmp_path: Path
+) -> None:
+    # The database missed how the Job ended; the buffer file did not. A collector starting
+    # up must carry on from the Job as it ended, not as the database last saw it.
+    db, clock = Database(database), Clock()
+    storage = buffered(db, tmp_path, clock)
+    away = Job("DEVICE_1", "2026-09-30T12:00:00Z", start_time=START, updated_time=START)
+    ended = replace(away, end_time=START + timedelta(hours=1), updated_time=away.start_time)
+    ended = replace(ended, completed=True, updated_time=START + timedelta(hours=1))
+    storage.write_jobs([away])
+    db.go_down()
+    storage.write_jobs([ended])
+    storage.close()
+
+    db.down = False
+    restarted = buffered(db, tmp_path, clock)
+    restarted.connect()
+    assert restarted.latest_jobs() == [ended]
 
 
 def test_the_disk_buffer_never_exceeds_its_limit(database: str, tmp_path: Path) -> None:

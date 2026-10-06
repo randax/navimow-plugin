@@ -14,7 +14,6 @@ import pytest
 
 from navimow_collector.cli import main
 from navimow_collector.ingest import Ingestor
-from navimow_collector.records import Gap, TrailPoint
 
 from .conftest import FIXTURE, gaps
 
@@ -186,13 +185,11 @@ class Batches:
     def __init__(self) -> None:
         self.sizes: list[int] = []
 
-    def write_trail(self, points: Sequence[TrailPoint]) -> int:
-        self.sizes.append(len(points))
-        return len(points)
+    def _note(self, rows: Sequence[object]) -> int:
+        self.sizes.append(len(rows))
+        return len(rows)
 
-    def write_gaps(self, gaps: Sequence[Gap]) -> int:
-        self.sizes.append(len(gaps))
-        return len(gaps)
+    write_trail = write_gaps = write_jobs = write_progress = write_states = _note
 
 
 def test_a_capture_of_gaps_alone_is_written_in_batches_not_held_to_its_end() -> None:

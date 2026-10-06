@@ -1,8 +1,9 @@
 # Navimow collector
 
 The collector records the Trail of every mower on a Navimow account into
-PostgreSQL, live and unattended. It can also replay a raw capture through the
-same ingestion core, which is how it is tested.
+PostgreSQL, live and unattended, and works out which Job and Zone each part of
+it belongs to. It can also replay a raw capture through the same ingestion
+core, which is how it is tested.
 
 Install it for local development:
 
@@ -110,12 +111,12 @@ After that, rows it cannot take are held in memory (1,000 rows), then appended
 to `buffer.jsonl` in the state directory (up to 64 MiB of rows waiting), and
 written when the database returns, by this process or the next. Once the file
 is full, or if it cannot be written, memory keeps what it can hold and beyond
-that the newest Trail points are dropped, gaps last, with an error logged. A clean stop moves what is in memory to
+that the newest rows are dropped, gaps last, with an error logged. A clean stop moves what is in memory to
 the file; a crash while the database is away loses what was still in memory, at
 most 1,000 rows. Gap rows go to the file at once, and the note of when a gap
 started is kept until its row has been handed over, so a crash at any point
 records the gap again rather than losing it. Only when the file cannot take it
-does a gap wait in memory with the Trail points, exposed to a crash like them.
+does a gap wait in memory with the other rows, exposed to a crash like them.
 
 A backlog is written back 200 rows at a time, a slice every tenth of a second,
 so collection, token refresh and shutdown carry on while it drains; a stop in
@@ -158,6 +159,40 @@ write there. Should the directory stop being writable while it collects,
 collection goes on and the failure is logged every minute, but the connection
 note stays at its last value: the gap recorded at the next restart then starts
 too early and lies across Trail that was in fact collected.
+
+## Jobs and Zones
+
+Nothing the mower sends names a Job, so the collector decides where each one
+begins and ends. In short: a Job starts when the mower leaves the dock, a return
+to charge is part of it, and it ends when the mower is back at the dock with the
+Job finished or given up. The rules, and the real capture they were checked
+against, are in [ADR 0001](../docs/adr/0001-job-and-zone-detection.md).
+
+| Table          | One row per                 | Holds                                                                                              |
+| -------------- | --------------------------- | -------------------------------------------------------------------------------------------------- |
+| `job`          | Job                         | `start_time`, `end_time`, `completed`, `mowing_percentage`, `area` (m²) and the dock arrival pose  |
+| `trail_point`  | position                    | the pose, with the `job_id` and `zone` it was mowed in                                             |
+| `job_progress` | progress report             | `zone`, `zone_progress` and `mowing_percentage` (both percent), `area` and `week_area` (m²)        |
+| `mower_state`  | state channel message       | `state` and `battery`: the status timeline and the battery level over time                         |
+
+Every row carries its `mower_id`, and every row but a `job` names its Job in
+`job_id`, which is empty while the mower is at the dock, a charging break
+included. A Job's `job_id` is the second it started, in UTC, such as
+`2026-09-30T13:33:33Z`.
+
+A `job` row is rewritten as the Job goes on. While the mower is away its
+`end_time` is empty; a Job that ended with `completed` false was interrupted, and
+is taken up again if the mower next leaves the dock to carry on with it. `arrival_x`,
+`arrival_y` and `arrival_theta` are the pose the mower docked in, which is where
+the dock stands on the mower's own axes: a starting point for the Dock origin.
+
+The layout is provisional until the schema is settled; changes to it only ever
+add columns. A Trail recorded before this version has no `job_id`: replaying a
+capture over rows already stored does not fill it in.
+
+A collector that restarts carries on from each mower's latest stored Job, so a
+restart or an outage inside a Job leaves a gap in it rather than splitting it.
+`replay` does not: a capture is decided on its own, whatever is already stored.
 
 ## Health and metrics
 

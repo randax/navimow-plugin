@@ -127,7 +127,7 @@ class Collector:
         self._session = session
         self._tokens = tokens
         self._storage = storage
-        self._ingestor = Ingestor(storage)
+        self._ingestor = Ingestor(storage, jobs=storage.latest_jobs())
         self._connect = connect
         self._clock = clock
         self._mowers: tuple[str, ...] = ()

@@ -53,7 +53,9 @@ from .test_buffer import Database, points
 
 NOW = 1_790_000_000.0
 LOCATION = "/downlink/vehicle/{}/realtimeDate/location"
+STATE = "/downlink/vehicle/{}/realtimeDate/state"
 CREDENTIALS = "mqtt/userInfo/get/v2"
+STATUS = "smarthome/getVehicleStatus"
 # Vendor prose gathered by the token research (docs/research/token-flow.md, section 5).
 TOO_FREQUENT = "Request too frequent. Please retry after 1 minute."
 
@@ -68,6 +70,7 @@ class Vendor:
         self.token = "access"
         self.broker_host = "mqtt.example"
         self.broker_password: str | None = None  # by default, derived from the token
+        self.state = "isDocked"  # what a status poll says of every mower
         self.offline = False
         self.clock: Clock | None = None
         self.takes: dict[str, float] = {}  # seconds an endpoint takes to answer
@@ -114,7 +117,7 @@ class Vendor:
             }
         assert (method, endpoint) == ("POST", "smarthome/getVehicleStatus")
         assert body == {"devices": [{"id": mower} for mower in self.mowers]}
-        states = [{"id": mower, "vehicleState": "isDocked"} for mower in self.mowers]
+        states = [{"id": mower, "vehicleState": self.state} for mower in self.mowers]
         return {"payload": {"devices": states}}
 
     def count(self, endpoint: str) -> int:
@@ -218,9 +221,18 @@ class Live:
     def trail(self) -> list[tuple[Any, ...]]:
         with psycopg.connect(self.db.dsn) as conn:
             return conn.execute(
-                "SELECT mower_id, device_time, received_time, x, y, theta, vehicle_state"
-                " FROM trail_point ORDER BY mower_id, device_time"
+                "SELECT mower_id, device_time, received_time, x, y, theta, vehicle_state,"
+                " job_id, zone FROM trail_point ORDER BY mower_id, device_time"
             ).fetchall()
+
+    def jobs(self) -> dict[str, list[tuple[Any, ...]]]:
+        """Every Job, and what was recorded of each besides its Trail."""
+        tables = {"job": "start_time", "job_progress": "device_time", "mower_state": "device_time"}
+        with psycopg.connect(self.db.dsn) as conn:
+            return {
+                table: conn.execute(f"SELECT * FROM {table} ORDER BY mower_id, {key}").fetchall()
+                for table, key in tables.items()
+            }
 
 
 @pytest.fixture
@@ -253,9 +265,9 @@ def test_live_messages_produce_exactly_the_rows_replay_produces(
     live: Live, config_file: Path, fixture: Path
 ) -> None:
     assert main(["--config", str(config_file), "replay", str(fixture)]) == 0
-    replayed = live.trail()
+    replayed, jobs = live.trail(), live.jobs()
     with psycopg.connect(live.db.dsn) as conn:
-        conn.execute("TRUNCATE trail_point")
+        conn.execute("TRUNCATE trail_point, job, job_progress, mower_state")
 
     async def scenario() -> None:
         await live.connected()
@@ -269,6 +281,8 @@ def test_live_messages_produce_exactly_the_rows_replay_produces(
 
     assert len(replayed) > 1000
     assert live.trail() == replayed
+    assert len(jobs["job"]) == 1 and len(jobs["job_progress"]) > 30
+    assert live.jobs() == jobs
 
 
 def test_one_process_records_every_mower_on_the_account(database: str, tmp_path: Path) -> None:
@@ -368,6 +382,99 @@ def test_a_restart_writes_a_gap_from_when_the_stream_last_flowed(live: Live) -> 
     asyncio.run(scenario())
 
     assert gaps(live.db.dsn) == [("DEVICE_1", at(NOW + 600), at(NOW + 3600), "restart")]
+
+
+def report(time: datetime, area: float, percentage: int) -> list[dict[str, Any]]:
+    """One progress message as the real mower sends it while mowing Zone 11."""
+    return [
+        {
+            "action": 8,
+            "currentMowBoundary": 11,
+            "currentMowProgress": 100 * percentage,
+            "mowStartType": 1,
+            "mowingPercentage": percentage,
+            "mowingWeekArea": str(654.3 + area),
+            "subAction": 6,
+            "subtotalArea": str(area),
+            "time": int(time.timestamp() * 1000),
+            "type": 2,
+        }
+    ]
+
+
+def test_a_restart_inside_a_job_does_not_split_it(live: Live) -> None:
+    location, state = LOCATION.format("DEVICE_1"), STATE.format("DEVICE_1")
+
+    async def scenario() -> None:
+        collector = await live.connected()
+        await live.broker.deliver(state, {"state": "isRunning", "battery": 90})
+        live.clock.now = NOW + 600
+        await live.broker.deliver(location, report(at(NOW + 600), area=40.0, percentage=6))
+        collector.stop()
+        # The mower mows on while the collector is away, and the status poll on its return
+        # fails: nothing but the stored Job says the mower is out on one.
+        live.vendor.failing[STATUS] = Response(200, json.dumps({"code": 0, "desc": TOO_FREQUENT}))
+        live.clock.now = NOW + 900
+        await live.connected()
+        live.clock.now = NOW + 1000
+        await live.broker.deliver(location, pose(at(NOW + 1000)))
+        live.clock.now = NOW + 1200
+        await live.broker.deliver(location, report(at(NOW + 1200), area=80.0, percentage=12))
+
+    asyncio.run(scenario())
+
+    with psycopg.connect(live.db.dsn) as conn:
+        jobs = conn.execute("SELECT job_id, start_time, end_time, area FROM job").fetchall()
+    assert jobs == [("2026-09-21T14:13:20Z", at(NOW), None, 80.0)]
+    # A position that arrives before anything else is said of the Job belongs to it too.
+    assert [row[7] for row in live.trail()] == ["2026-09-21T14:13:20Z"]
+
+
+def test_a_report_from_before_a_restart_delivered_after_it_decides_nothing(live: Live) -> None:
+    location, state = LOCATION.format("DEVICE_1"), STATE.format("DEVICE_1")
+
+    async def scenario() -> None:
+        collector = await live.connected()
+        await live.broker.deliver(state, {"state": "isRunning", "battery": 90})
+        live.clock.now = NOW + 600
+        await live.broker.deliver(location, report(at(NOW + 600), area=40.0, percentage=6))
+        collector.stop()
+        live.vendor.state = "isRunning"
+        live.clock.now = NOW + 900
+        await live.connected()
+        # Sent five minutes before the report already stored: its smaller area is not a
+        # new Job's, though the new process never heard the later one itself.
+        await live.broker.deliver(location, report(at(NOW + 300), area=20.0, percentage=3))
+
+    asyncio.run(scenario())
+
+    with psycopg.connect(live.db.dsn) as conn:
+        jobs = conn.execute("SELECT start_time, end_time, area FROM job").fetchall()
+    assert jobs == [(at(NOW), None, 40.0)]
+
+
+def test_a_report_delivered_again_after_a_restart_keeps_the_job_it_was_stored_with(
+    live: Live,
+) -> None:
+    location, state = LOCATION.format("DEVICE_1"), STATE.format("DEVICE_1")
+
+    async def scenario() -> None:
+        collector = await live.connected()
+        await live.broker.deliver(state, {"state": "isRunning", "battery": 90})
+        live.clock.now = NOW + 600
+        await live.broker.deliver(location, report(at(NOW + 600), area=40.0, percentage=6))
+        live.clock.now = NOW + 700
+        await live.broker.deliver(state, {"state": "isDocked", "battery": 15})
+        collector.stop()
+        live.clock.now = NOW + 900
+        await live.connected()
+        await live.broker.deliver(location, report(at(NOW + 600), area=40.0, percentage=6))
+
+    asyncio.run(scenario())
+
+    with psycopg.connect(live.db.dsn) as conn:
+        reports = conn.execute("SELECT device_time, job_id FROM job_progress").fetchall()
+    assert reports == [(at(NOW + 600), "2026-09-21T14:13:20Z")]
 
 
 def test_a_clean_shutdown_ends_the_recorded_stream_at_the_shutdown(live: Live) -> None:
