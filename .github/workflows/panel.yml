@@ -35,6 +35,9 @@ jobs:
       - run: pnpm run lint
       - run: pnpm run test:ci
       - run: pnpm run build
+      # What a release does, short of publishing, so that a tag is never the first time it runs.
+      - run: scripts/package.sh
+      - run: scripts/smoke.sh
       - run: docker compose up -d --build
       - run: pnpm exec playwright install --with-deps chromium
       - name: Wait for Grafana

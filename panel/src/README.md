@@ -167,8 +167,9 @@ under **Overlay**:
 
 ## Tile hosts
 
-Every tile host must allow cross-origin requests. If Grafana's content security policy is enabled,
-add the hosts in use to its `connect-src`:
+Every tile host must allow cross-origin requests. Grafana's content security policy is off by
+default. If it is enabled, the map stays blank until the hosts in use are added to the `connect-src`
+of `content_security_policy_template`, under `[security]` in `grafana.ini`:
 
 | Source                                | Host                             |
 | ------------------------------------- | -------------------------------- |

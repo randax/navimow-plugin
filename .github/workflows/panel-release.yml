@@ -1,0 +1,48 @@
+name: Panel release
+
+# A tag with the panel's prefix is the only thing that releases the panel. The collector has its
+# own prefix, collector/v*, so releasing either never releases the other.
+on:
+  push:
+    tags: ['panel/v*']
+
+defaults:
+  run:
+    working-directory: panel
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Version from the tag
+        run: echo "VERSION=${GITHUB_REF_NAME#panel/v}" >> "$GITHUB_ENV"
+      # First, since it needs nothing built: no release without its changelog entry.
+      - run: scripts/release-notes.sh "$VERSION" > "$RUNNER_TEMP/notes.md"
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: panel/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: panel/.nvmrc
+          cache: pnpm
+          cache-dependency-path: panel/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run typecheck
+      - run: pnpm run lint
+      - run: pnpm run test:ci
+      - run: pnpm run build
+      # Fails unless package.json carries the version in the tag.
+      - run: scripts/package.sh "$VERSION"
+      - run: scripts/smoke.sh
+      # Unsigned on purpose, see the README. The bundled dashboards ride along, since someone who
+      # has just installed a panel is in Grafana and wants something to open.
+      - name: Publish
+        run: >-
+          gh release create "$GITHUB_REF_NAME" --verify-tag
+          --title "Panel $VERSION" --notes-file "$RUNNER_TEMP/notes.md"
+          artifacts/* ../dashboards/*.json
+        env:
+          GH_TOKEN: ${{ github.token }}
