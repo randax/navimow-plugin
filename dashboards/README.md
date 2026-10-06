@@ -65,3 +65,7 @@ Edit it in Grafana, export it with **Share → Export → Export as JSON**, and 
 The panel's browser tests open these files as they are, against a PostgreSQL filled by replaying
 a real capture (`panel/tests/seed.py`), so `pnpm run e2e` in `panel/` says whether every panel
 still has something to show.
+
+## Licence
+
+Apache-2.0, as the panel they are released with: [`../panel/LICENSE`](../panel/LICENSE).
