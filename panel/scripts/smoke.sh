@@ -7,7 +7,7 @@ cd "$(dirname "$0")/.."
 id=randax-navimowmap-panel
 archives=(artifacts/"$id"-*.zip)
 archive=${archives[0]}
-[[ -f $archive ]] || { echo "no archive in artifacts/: run scripts/package.sh first" >&2; exit 1; }
+[[ ${#archives[@]} -eq 1 && -f $archive ]] || { echo "artifacts/ should hold one archive: run scripts/package.sh" >&2; exit 1; }
 (cd artifacts && shasum -a 256 -c "$(basename "$archive").sha256")
 version=${archive#"artifacts/$id-"}
 version=${version%.zip}
@@ -23,10 +23,12 @@ container=$(docker run -d -p 127.0.0.1::3000 \
 trap 'docker rm -f "$container" >/dev/null' EXIT
 url=http://$(docker port "$container" 3000/tcp)
 
+started=
 for _ in $(seq 60); do
-  curl -sf "$url/api/health" >/dev/null && break
+  curl -sf "$url/api/health" >/dev/null && started=yes && break
   sleep 1
 done
+[[ $started ]] || { echo "Grafana did not start within a minute:" >&2; docker logs --tail 20 "$container" >&2; exit 1; }
 
 loaded=$(curl -sf -u admin:admin "$url/api/plugins/$id/settings") || {
   echo "Grafana did not load $id from $archive" >&2

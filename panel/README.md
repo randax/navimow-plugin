@@ -139,12 +139,15 @@ Nothing else needs a policy change: the MapLibre worker is served from the plugi
 ## Release
 
 The panel has its own version, the one in `package.json`, and its own tags, `panel/v<version>`. The
-collector's are `collector/v<version>`, and releasing either never releases the other. The two meet
-only in the database, whose schema only ever gains columns, so a panel reading an older collector's
-data draws less rather than failing.
+collector's are `collector/v<version>`, and releasing either never releases the other:
+[why that holds](../README.md#two-versions).
 
 1. Set `version` in `package.json`, and in `CHANGELOG.md` rename `## Unreleased` to
-   `## <version>`. The changelog is written by hand, as changes are made. Merge.
+   `## <version>`. The changelog is written by hand, as changes are made. Give the same version to
+   the `pluginVersion` of the panel saved in an earlier shape in
+   `provisioning/dashboards/navimow-trail.json`: Grafana migrates a panel saved under any other
+   version, which that panel is there to avoid, and its browser test fails until the two agree.
+   Merge.
 2. Tag the merged commit and push the tag: `git tag panel/v<version> && git push origin panel/v<version>`.
 
 `.github/workflows/panel-release.yml` then builds the panel, packs it (`scripts/package.sh`), loads
@@ -152,7 +155,8 @@ the archive into a stock Grafana with nothing set but the setting above (`script
 publishes a GitHub release holding the archive, its SHA-256 and the bundled dashboards, with that
 version's changelog entries as its notes. It publishes nothing if the tag and `package.json`
 disagree, or if the changelog has no entries for the version. Every pull request packs and loads
-the archive too, so a tag is never the first time that runs.
+the archive too, so a tag is never the first time that runs. To run the two scripts by hand, after
+`pnpm run build`, they need `jq`, `zip` and Docker.
 
 ## Licence
 
