@@ -66,12 +66,13 @@ const GAP_MS = 10_000;       // a longer silence breaks the line: the mower was 
 const REVISIT_MS = 20_000;   // a cell seen again after this long is another visit, not the same pass
 const CUTTING = 4;           // vehicleState while mowing in this capture; 5 is the drive home, 2 docked
 const RAD = Math.PI / 180;
+const stats = { aggregateMs: 0 };   // time spent in aggregate() during the current render
 
 // Same flat-earth conversion as panel/src/model/dockOrigin.ts.
 const W = 1 - 0.00669437999014 * Math.sin(DOCK.lat * RAD) ** 2;
 const M_LAT = (6378137 * (1 - 0.00669437999014) * RAD) / W ** 1.5, M_LON = (6378137 * Math.cos(DOCK.lat * RAD) * RAD) / Math.sqrt(W);
-const B = DOCK.rotation * RAD;
-const ll = (x, y) => [DOCK.lon + (x * Math.sin(B) - y * Math.cos(B)) / M_LON, DOCK.lat + (x * Math.cos(B) + y * Math.sin(B)) / M_LAT];
+const BEARING = DOCK.rotation * RAD;
+const ll = (x, y) => [DOCK.lon + (x * Math.sin(BEARING) - y * Math.cos(BEARING)) / M_LON, DOCK.lat + (x * Math.cos(BEARING) + y * Math.sin(BEARING)) / M_LAT];
 
 /** The Trail as [time, x, y]. More Jobs are the same Job again a day apart, nudged up to 0.2 m: a stand-in for a long time range. */
 function trailPoints() {
@@ -85,8 +86,8 @@ function trailPoints() {
   return all;
 }
 
-/** Unbroken runs of positions. */
-function runs(points) {
+/** The Trail as unbroken legs: stretches of positions with no gap between them. */
+function legs(points) {
   const out = [];
   points.forEach((p, i) => (i && p[0] - points[i - 1][0] <= GAP_MS ? out.at(-1).push(p) : out.push([p])));
   return out;
@@ -96,10 +97,10 @@ function runs(points) {
  * The one aggregation both encodings come from: per cell, how many separate visits and when the last was.
  * Cells are squares on the mower's own axes, so the grid does not depend on the Dock origin.
  */
-function aggregate(rs, cell, width, stamp) {
+function aggregate(ls, cell, width, stamp) {
   const t0 = performance.now();
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  for (const r of rs) for (const [, x, y] of r) { minX = Math.min(minX, x); maxX = Math.max(maxX, x); minY = Math.min(minY, y); maxY = Math.max(maxY, y); }
+  for (const r of ls) for (const [, x, y] of r) { minX = Math.min(minX, x); maxX = Math.max(maxX, x); minY = Math.min(minY, y); maxY = Math.max(maxY, y); }
   const pad = width + 2 * cell, x0 = minX - pad, y0 = minY - pad;
   const nx = Math.ceil((maxX - x0 + pad) / cell), ny = Math.ceil((maxY - y0 + pad) / cell);
   const count = new Uint16Array(nx * ny), last = new Float64Array(nx * ny);
@@ -115,10 +116,10 @@ function aggregate(rs, cell, width, stamp) {
         last[i] = t;
       }
   };
-  for (const run of rs) {
-    if (stamp === 'points') { for (const [t, x, y] of run) visit(x, y, t); continue; }
-    for (let i = 1; i < run.length; i++) {
-      const [ta, ax, ay] = run[i - 1], [tb, bx, by] = run[i];
+  for (const leg of ls) {
+    if (stamp === 'points') { for (const [t, x, y] of leg) visit(x, y, t); continue; }
+    for (let i = 1; i < leg.length; i++) {
+      const [ta, ax, ay] = leg[i - 1], [tb, bx, by] = leg[i];
       const n = Math.max(1, Math.ceil(Math.hypot(bx - ax, by - ay) / (cell / 2)));
       for (let k = i === 1 ? 0 : 1; k <= n; k++) visit(ax + ((bx - ax) * k) / n, ay + ((by - ay) * k) / n, ta + ((tb - ta) * k) / n);
     }
@@ -158,10 +159,10 @@ function cellFeatures(g, end, values = g.count) {
 }
 
 /** Each step of the Trail as a rectangle as wide as the deck, run on by half a width so corners close. */
-function segmentQuads(rs, end, width) {
-  const out = [], h = width / 2, start = rs[0][0][0];
-  for (const run of rs) for (let i = 1; i < run.length; i++) {
-    const [, ax, ay] = run[i - 1], [t, bx, by] = run[i], len = Math.hypot(bx - ax, by - ay);
+function segmentQuads(ls, end, width) {
+  const out = [], h = width / 2, start = ls[0][0][0];
+  for (const leg of ls) for (let i = 1; i < leg.length; i++) {
+    const [, ax, ay] = leg[i - 1], [t, bx, by] = leg[i], len = Math.hypot(bx - ax, by - ay);
     if (!len) continue;
     const ux = ((bx - ax) / len) * h, uy = ((by - ay) / len) * h;
     out.push(polygon([[ax - ux + uy, ay - uy - ux], [bx + ux + uy, by + uy - ux], [bx + ux - uy, by + uy + ux], [ax - ux - uy, ay - uy + ux]],
@@ -178,20 +179,20 @@ const RAMPS = { visits: ['#f6c443', '#e4572e', '#5a0b4d'], age: ['#22306e', '#3d
 const LABELS = { visits: ['Visits', 'one', 'or more'], age: ['Time since mowed', 'just now', 'min ago'] };
 
 /** Colour, height and legend for the chosen encoding, scaled to the 98th percentile so one hot cell does not flatten the rest. */
-function encoding(features, prop = opt.metric) {
-  const lo = prop === 'visits' ? 1 : 0, sorted = features.map((f) => f.properties[prop]).sort((a, b) => a - b);
-  const hi = Math.max(lo + 1, sorted[Math.floor(sorted.length * 0.98)] ?? 0), colours = RAMPS[prop];
+function encoding(features, prop = opt.metric, lo = prop === 'visits' ? 1 : 0) {
+  const sorted = features.map((f) => f.properties[prop]).sort((a, b) => a - b);
+  const hi = Math.max(lo + 0.5, sorted[Math.floor(sorted.length * 0.98)] ?? 0), colours = RAMPS[prop];
   const scale = (outputs) => ['interpolate', ['linear'], ['get', prop], ...outputs.flatMap((o, i) => [lo + ((hi - lo) * i) / (outputs.length - 1), o])];
   return { colour: scale(colours), height: scale([0.15, 3]), legend: { title: LABELS[prop][0], colours, ends: [LABELS[prop][1], `${hi.toFixed(prop === 'visits' ? 1 : 0)} ${LABELS[prop][2]}`] } };
 }
 
 // ---------- the three variants: each returns the GeoJSON and layers to draw ----------
 const SCENES = {
-  A(rs, end) {
+  A(ls, end) {
     if (opt.mode === 'flat') {
-      const radius = 2 * opt.cell, colours = ['#f6c443', '#e4572e', '#5a0b4d'];
+      const radius = 2 * opt.cell, colours = RAMPS.visits;
       return {
-        data: collection(rs.flat().map(([, x, y]) => ({ type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: ll(x, y) } }))),
+        data: collection(ls.flat().map(([, x, y]) => ({ type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: ll(x, y) } }))),
         // Intensity is set so a single pass lands low on the ramp whatever the radius or number of Jobs.
         layers: [{ id: 'cov', type: 'heatmap', paint: { 'heatmap-radius': metres(radius), 'heatmap-intensity': 0.18 / (radius * radius * opt.jobs), 'heatmap-opacity': 0.8,
           'heatmap-color': ['interpolate', ['linear'], ['heatmap-density'], 0, 'rgba(246,196,67,0)', 0.15, colours[0], 0.55, colours[1], 1, colours[2]] } }],
@@ -199,7 +200,7 @@ const SCENES = {
         note: 'A heatmap only sums, so it cannot show time since mowed. Its radius is twice the cell size.',
       };
     }
-    const g = aggregate(rs, opt.cell, opt.width, 'line'), features = cellFeatures(g, end, blur(g)), e = encoding(features, 'visits');
+    const g = aggregate(ls, opt.cell, opt.width, 'line'), features = cellFeatures(g, end, blur(g)), e = encoding(features, 'visits', 0.05);
     return {
       data: collection(features),
       layers: [{ id: 'cov', type: 'fill-extrusion', paint: { 'fill-extrusion-color': e.colour, 'fill-extrusion-height': e.height, 'fill-extrusion-opacity': 0.85 } }],
@@ -207,8 +208,8 @@ const SCENES = {
       note: 'MapLibre cannot extrude a heatmap layer, so this is the grid with its counts blurred: a density surface.',
     };
   },
-  B(rs, end) {
-    const features = cellFeatures(aggregate(rs, opt.cell, opt.width, opt.stamp), end), e = encoding(features);
+  B(ls, end) {
+    const features = cellFeatures(aggregate(ls, opt.cell, opt.width, opt.stamp), end), e = encoding(features);
     return {
       data: collection(features),
       layers: [opt.mode === 'flat'
@@ -217,10 +218,10 @@ const SCENES = {
       legend: e.legend,
     };
   },
-  C(rs, end) {
+  C(ls, end) {
     if (opt.mode === '3d') {
       // Later passes sit a little higher, so the newest wins where passes overlap.
-      const features = segmentQuads(rs, end, opt.width), e = encoding(features, 'age');
+      const features = segmentQuads(ls, end, opt.width), e = encoding(features, 'age');
       return {
         data: collection(features),
         layers: [{ id: 'cov', type: 'fill-extrusion', paint: { 'fill-extrusion-color': opt.metric === 'age' ? e.colour : '#e4572e', 'fill-extrusion-height': ['+', 0.15, ['*', 0.5, ['get', 'order']]], 'fill-extrusion-opacity': 0.85 } }],
@@ -231,20 +232,19 @@ const SCENES = {
     const paint = { 'line-width': metres(opt.width) }, layout = { 'line-cap': 'round', 'line-join': 'round' };
     if (opt.metric === 'visits') {
       return {
-        data: collection([{ type: 'Feature', properties: {}, geometry: { type: 'MultiLineString', coordinates: rs.filter((r) => r.length > 1).map((r) => r.map(([, x, y]) => ll(x, y))) } }]),
+        data: collection([{ type: 'Feature', properties: {}, geometry: { type: 'MultiLineString', coordinates: ls.filter((r) => r.length > 1).map((r) => r.map(([, x, y]) => ll(x, y))) } }]),
         layers: [{ id: 'cov', type: 'line', layout, paint: { ...paint, 'line-color': '#e4572e', 'line-opacity': 0.45 } }],
         legend: { title: 'Mowed (darker where passes cross)', colours: ['rgba(228,87,46,.45)', '#b93c1b'], ends: ['once', 'more'] },
       };
     }
     // One short line per step, drawn oldest first, so the newest pass is the one left showing.
-    const features = rs.flatMap((r) => r.slice(1).map(([t, x, y], i) => ({ type: 'Feature', properties: { age: (end - t) / 60e3 }, geometry: { type: 'LineString', coordinates: [ll(r[i][1], r[i][2]), ll(x, y)] } })));
+    const features = ls.flatMap((r) => r.slice(1).map(([t, x, y], i) => ({ type: 'Feature', properties: { age: (end - t) / 60e3 }, geometry: { type: 'LineString', coordinates: [ll(r[i][1], r[i][2]), ll(x, y)] } })));
     const e = encoding(features, 'age');
     return { data: collection(features), layers: [{ id: 'cov', type: 'line', layout, paint: { ...paint, 'line-color': e.colour } }], legend: e.legend };
   },
 };
 
 // ---------- map ----------
-const stats = { aggregateMs: 0 };
 const all = CAPTURE.points.map(([, x, y]) => ll(x, y));
 const bounds = all.reduce(([[w, s], [e, n]], [lon, lat]) => [[Math.min(w, lon), Math.min(s, lat)], [Math.max(e, lon), Math.max(n, lat)]], [[180, 90], [-180, -90]]);
 const camera = () => (opt.mode === '3d' ? { pitch: 55, bearing: -30 } : { pitch: 0, bearing: 0 });
@@ -266,13 +266,14 @@ map.addControl(new NavigationControl({ visualizePitch: true }), 'top-left');
 
 function render() {
   stats.aggregateMs = 0;
-  const t0 = performance.now(), points = trailPoints(), rs = runs(points), scene = SCENES[opt.variant](rs, points.at(-1)[0]);
-  const built = performance.now(), aggregateMs = stats.aggregateMs;
+  const t0 = performance.now(), points = trailPoints(), ls = legs(points), scene = SCENES[opt.variant](ls, points.at(-1)[0]);
+  const buildMs = performance.now() - t0, aggregateMs = stats.aggregateMs, kb = JSON.stringify(scene.data).length / 1024;
+  const built = performance.now();   // measuring the size is not part of building or drawing
   if (map.getLayer('cov')) map.removeLayer('cov');
   if (map.getSource('coverage')) map.removeSource('coverage');
   map.addSource('coverage', { type: 'geojson', data: scene.data });
   for (const layer of scene.layers) map.addLayer({ source: 'coverage', ...layer }, 'trail');
-  map.getSource('trail').setData(collection(opt.trail ? rs.filter((r) => r.length > 1).map((r) => ({ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: r.map(([, x, y]) => ll(x, y)) } })) : []));
+  map.getSource('trail').setData(collection(opt.trail ? ls.filter((r) => r.length > 1).map((r) => ({ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: r.map(([, x, y]) => ll(x, y)) } })) : []));
   map.easeTo({ ...camera(), duration: 400 });
 
   const { title, colours, ends } = scene.legend;
@@ -281,24 +282,26 @@ function render() {
   document.getElementById('vlabel').textContent = `${opt.variant} (${VARIANTS[opt.variant]})`;
   document.getElementById('widthValue').textContent = `${opt.width} m`;
 
-  // The swept area at 5 cm, for one Job, against what the mower says it mowed: a check on the cutting width.
-  const fine = aggregate(runs(CAPTURE.points.filter((p) => p[3] === CUTTING)), 0.05, opt.width, 'swath');
-  const swept = fine.count.reduce((n, c) => n + (c > 0), 0) * 0.05 ** 2;
-  const length = rs.reduce((m, r) => m + r.slice(1).reduce((d, p, i) => d + Math.hypot(p[1] - r[i][1], p[2] - r[i][2]), 0), 0);
-  const show = (idleMs) => (document.getElementById('state').textContent = [
+  const length = ls.reduce((m, r) => m + r.slice(1).reduce((d, p, i) => d + Math.hypot(p[1] - r[i][1], p[2] - r[i][2]), 0), 0);
+  const show = (idleMs, swept) => (document.getElementById('state').textContent = [
     `variant ${opt.variant} · ${opt.mode} · ${opt.metric}`,
-    `Trail: ${points.length} points, ${rs.length} runs, ${Math.round(length)} m`,
+    `Trail: ${points.length} points, ${ls.length} unbroken legs, ${Math.round(length)} m`,
     `Coverage features: ${scene.data.features.length}`,
-    `GeoJSON: ${(JSON.stringify(scene.data).length / 1024).toFixed(0)} KB`,
+    `GeoJSON: ${kb.toFixed(0)} KB`,
     `aggregate: ${aggregateMs.toFixed(0)} ms`,
-    `build (incl. aggregate): ${(built - t0).toFixed(0)} ms`,
+    `build (incl. aggregate): ${buildMs.toFixed(0)} ms`,
     `drawn after: ${idleMs === undefined ? '…' : idleMs.toFixed(0) + ' ms'}`,
     ``,
-    `swept area at ${opt.width} m: ${swept.toFixed(0)} m²`,
+    `swept area at ${opt.width} m: ${swept === undefined ? '…' : swept.toFixed(0) + ' m²'}`,
     `mower-reported area: ${CAPTURE.reportedArea} m²`,
   ].join('\n'));
   show();
-  map.once('idle', () => show(performance.now() - built));
+  map.once('idle', () => {
+    const idleMs = performance.now() - built;
+    // The swept area at 5 cm, for one Job, against what the mower says it mowed: a check on the cutting width.
+    const fine = aggregate(legs(CAPTURE.points.filter((p) => p[3] === CUTTING)), 0.05, opt.width, 'swath');
+    show(idleMs, fine.count.reduce((n, c) => n + (c > 0), 0) * 0.05 ** 2);
+  });
 }
 
 // ---------- controls ----------
