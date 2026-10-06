@@ -37,8 +37,9 @@ percentage carry on from where they stood, and that is what tells a resumed Job 
 one: a new one is announced with its area at zero, which starts it even after the departure
 was taken for a resume.
 
-**A Job ends** when the state channel says `isDocked`. The end is provisional while the Job
-is unfinished, since a charging break looks the same. `isDocking` does not end it (a return
+**A Job ends** when the state channel says `isDocked`, unless the mower has reported progress
+since that was sent. The end is provisional while the Job is unfinished, since a charging
+break looks the same. `isDocking` does not end it (a return
 can be called off), and neither do `isPaused`, `isLifted`, `Error`, `Offline` or `isIdle`: an
 interrupted Job stays away until the mower is at the dock, however long that takes.
 
@@ -64,7 +65,8 @@ in the real capture, whose Job began in Zone 11. It is not stored as progress. A
 arrival: Trail points (with their Zone), progress reports and states. At the dock, including
 during a charging break, a row names none. A message delivered after a newer one of its kind
 still gets stored in its place, but decides nothing; and neither does one sent before the
-latest Job began, which speaks of the Job before.
+latest Job began, which speaks of the Job before. A row delivered again never replaces the
+one stored: only a Job's own row is rewritten, as the Job goes on.
 
 **Outages do not split a Job.** A gap is stored as a gap. The state channel only speaks on a
 change, so after a gap the one status poll made on reconnecting stands in for it, until the
@@ -112,6 +114,12 @@ round trip to the database to ask for one.
   that Zone.
 - After a restart inside a Job the Zone is unknown until the next progress report, some ten
   seconds while mowing: the Job is stored, the Zone it was in is not.
+- A restart keeps the Job, not what the collector was in the middle of deciding. Restarted in
+  the second between a mower leaving the dock and announcing a new Job, it can take that Job
+  for the one before resumed, or end the one before at the departure instead of at the dock.
+- A state held up across an outage, and sent before the status poll that followed the
+  outage, is still believed over that poll: the two are stamped by different clocks, and
+  the poll is the one known to run behind.
 - A mower that stops for good away from the dock leaves its Job without an end until it is
   docked or starts another. That is what happened, so nothing is made up to close it.
 - A new Job whose announcement was missed, and which is first heard of only after it has

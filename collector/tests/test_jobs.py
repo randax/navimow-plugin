@@ -283,9 +283,10 @@ def test_progress_through_the_job_and_through_each_zone_is_recorded(synthetic: s
     [job] = jobs(synthetic)
     reports = progress(synthetic)
     # 33 reports from the Job. The announcement, which reports no progress, is not stored;
-    # and two were sent in the same millisecond, of which the one delivered last stands.
+    # and two were sent in the same millisecond, of which the one delivered first stands,
+    # as for every row but a Job: a row delivered again never replaces the one stored.
     assert len(reports) == 31
-    assert reports[-1]["mowing_percentage"] == 100
+    assert (reports[-1]["mowing_percentage"], job["mowing_percentage"]) == (99, 100)
     assert {r["job_id"] for r in reports} == {job["job_id"]}
     change = next(i for i, r in enumerate(reports) if r["zone"] == 11)
     before, after = reports[change - 1], reports[change]
@@ -567,3 +568,28 @@ def test_a_report_from_before_the_job_began_says_nothing_of_it(replay: Replay) -
     first, second = jobs(replay([*day, *next_day[:left], held_up, *next_day[left:]]))
     assert (first["completed"], first["end_time"]) == (True, ms(1788090811063))
     assert (second["start_time"], second["area"]) == (ms(LEFT_DOCK + DAY_MS), 300.0)
+
+
+def test_a_docking_from_before_the_latest_report_does_not_end_the_job(replay: Replay) -> None:
+    # The isDocked turns up late, stamped a minute before a progress report already heard.
+    # Whatever dock visit it tells of, the mower has reported mowing since.
+    mowing = [r for r in fixture() if r["recv_ms"] < MID_JOB]
+    stray = state(MID_JOB, "isDocked", sent_ms=1788086676268 - 60_000)
+    [job] = jobs(replay([*mowing, stray]))
+    assert (job["end_time"], job["area"]) == (None, 120.0)
+
+
+def test_a_report_held_up_from_before_the_charging_break_does_not_confirm_a_resume(
+    replay: Replay,
+) -> None:
+    # As when a Job is given up while charging; but between the departure and the new Job's
+    # announcement, a report the mower sent on its way to the dock is delivered. It is not
+    # progress since the break, so the first Job still ended when the mower docked.
+    day = fixture()
+    charging = [r for r in day if r["recv_ms"] < 1788089000000]
+    [last] = [r for r in charging if is_progress(r) and r["payload"][0]["subtotalArea"] == "190.00"]
+    another = [later(r, 90 * 60_000) for r in day if r["recv_ms"] >= LEFT_DOCK]
+    held_up = {**later(last, 5_000), "recv_ms": another[0]["recv_ms"] + 1}
+    first, second = jobs(replay([*charging, another[0], held_up, *another[1:]]))
+    assert (first["end_time"], first["completed"]) == (ms(1788087728135), False)
+    assert second["start_time"] == ms(1788085297268 + 90 * 60_000)

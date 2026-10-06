@@ -38,8 +38,7 @@ class Writer(Protocol):
         ...
 
     def write_progress(self, reports: Sequence[Progress]) -> int:
-        """Store progress reports; one sent at the same instant as one already stored
-        replaces it. Return how many were new or replaced."""
+        """Store progress reports, skipping any already stored; return how many were new."""
         ...
 
     def write_states(self, states: Sequence[MowerState]) -> int:

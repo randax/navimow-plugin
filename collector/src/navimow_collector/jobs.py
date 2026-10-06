@@ -91,6 +91,8 @@ class JobTracker:
             else:
                 job = self._begin(time)
         elif reading.state == "isDocked" and job is not None and away:
+            if self._reported is not None and time < self._reported:
+                return []  # it has reported progress since: this is not where the Job ends
             job = replace(job, end_time=time)
             pose = self._pose
             if pose is not None and abs(time - pose.device_time) <= ARRIVAL_POSE_AGE:
@@ -114,7 +116,9 @@ class JobTracker:
         heard, self._reported = self._reported, time
         if job is not None and time < job.start_time:
             return []  # sent before this Job began: it is the Job before that it speaks of
-        left_off, self._left_off = self._left_off, None
+        left_off = self._left_off
+        if left_off is not None and time > left_off:
+            self._left_off = None  # progress since the dock: the Job was indeed resumed
         given_up: list[Row] = []
         # Progress sent since the mower docked: it has left again, unseen.
         left_unseen = job is not None and job.end_time is not None and time > job.end_time

@@ -453,6 +453,30 @@ def test_a_report_from_before_a_restart_delivered_after_it_decides_nothing(live:
     assert jobs == [(at(NOW), None, 40.0)]
 
 
+def test_a_report_delivered_again_after_a_restart_keeps_the_job_it_was_stored_with(
+    live: Live,
+) -> None:
+    location, state = LOCATION.format("DEVICE_1"), STATE.format("DEVICE_1")
+
+    async def scenario() -> None:
+        collector = await live.connected()
+        await live.broker.deliver(state, {"state": "isRunning", "battery": 90})
+        live.clock.now = NOW + 600
+        await live.broker.deliver(location, report(at(NOW + 600), area=40.0, percentage=6))
+        live.clock.now = NOW + 700
+        await live.broker.deliver(state, {"state": "isDocked", "battery": 15})
+        collector.stop()
+        live.clock.now = NOW + 900
+        await live.connected()
+        await live.broker.deliver(location, report(at(NOW + 600), area=40.0, percentage=6))
+
+    asyncio.run(scenario())
+
+    with psycopg.connect(live.db.dsn) as conn:
+        reports = conn.execute("SELECT device_time, job_id FROM job_progress").fetchall()
+    assert reports == [(at(NOW + 600), "2026-09-21T14:13:20Z")]
+
+
 def test_a_clean_shutdown_ends_the_recorded_stream_at_the_shutdown(live: Live) -> None:
     async def scenario() -> None:
         collector = await live.connected()

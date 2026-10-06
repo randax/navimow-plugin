@@ -120,11 +120,8 @@ def _insert(row: type[Row], table: str) -> str:
     return f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({', '.join(['%s'] * len(columns))})"
 
 
-def _upsert(row: type[Row], table: str) -> str:
-    """Insert the row, replacing a stored one with the same key: its first two fields."""
-    key, rest = [field.name for field in fields(row)][:2], fields(row)[2:]
-    replaced = ", ".join(f"{field.name} = EXCLUDED.{field.name}" for field in rest)
-    return f"{_insert(row, table)} ON CONFLICT ({', '.join(key)}) DO UPDATE SET {replaced}"
+# Whatever may change in a Job once it is stored: everything but its key.
+_JOB_CHANGES = ", ".join(f"{field.name} = EXCLUDED.{field.name}" for field in fields(Job)[2:])
 
 
 class PostgresStorage:
@@ -207,13 +204,15 @@ class PostgresStorage:
 
     def write_jobs(self, jobs: Sequence[Job]) -> int:
         return self._write(
-            _upsert(Job, "job") + " WHERE job.updated_time <= EXCLUDED.updated_time",
+            _insert(Job, "job") + f" ON CONFLICT (mower_id, job_id) DO UPDATE SET {_JOB_CHANGES}"
+            " WHERE job.updated_time <= EXCLUDED.updated_time",
             [astuple(job) for job in jobs],
         )
 
     def write_progress(self, reports: Sequence[Progress]) -> int:
         return self._write(
-            _upsert(Progress, "job_progress"), [astuple(report) for report in reports]
+            _insert(Progress, "job_progress") + " ON CONFLICT DO NOTHING",
+            [astuple(report) for report in reports],
         )
 
     def write_states(self, states: Sequence[MowerState]) -> int:
