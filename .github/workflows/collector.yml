@@ -1,6 +1,16 @@
 name: Collector
 
-on: [push, pull_request]
+on:
+  # Branches only: a tag's push is the release's to answer, and it runs all of this itself.
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_call:
+    inputs:
+      version:
+        description: The version being released, which the package built here must then carry
+        type: string
+        default: ""
 
 jobs:
   test:
@@ -35,3 +45,29 @@ jobs:
       - run: mypy
         working-directory: collector
       - run: pytest collector
+
+  # What a release publishes, short of publishing it, so that a tag is never the first time
+  # either is built.
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: pip install build twine
+      - run: collector/scripts/package.sh "$VERSION"
+        env:
+          VERSION: ${{ inputs.version }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: collector-dist
+          path: collector/dist/
+          if-no-files-found: error
+
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: collector/scripts/smoke.sh

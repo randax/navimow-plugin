@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
@@ -8,7 +8,8 @@ version = "0.1.0"
 description = "Collector recording Navimow mower Trails into a database"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "GPL-3.0-only" }
+license = "GPL-3.0-only"
+license-files = ["LICENSE"]
 dependencies = [
   "psycopg[binary]>=3.2,<4",
   "randax-navimow-sdk @ git+https://github.com/randax/navimow-sdk@v0.5.0",
@@ -18,7 +19,11 @@ dependencies = [
 allow-direct-references = true
 
 [project.optional-dependencies]
-dev = ["pytest", "ruff", "mypy"]
+dev = ["pytest", "ruff", "mypy", "build", "twine"]
+
+[project.urls]
+Homepage = "https://github.com/randax/navimow-plugin/tree/main/collector"
+Changelog = "https://github.com/randax/navimow-plugin/blob/main/collector/CHANGELOG.md"
 
 [project.scripts]
 navimow-collector = "navimow_collector.cli:main"

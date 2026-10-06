@@ -20,7 +20,7 @@ jobs:
       - name: Version from the tag
         run: echo "VERSION=${GITHUB_REF_NAME#panel/v}" >> "$GITHUB_ENV"
       # First, since it needs nothing built: no release without its changelog entry.
-      - run: scripts/release-notes.sh "$VERSION" > "$RUNNER_TEMP/notes.md"
+      - run: ../tools/release-notes.sh CHANGELOG.md "$VERSION" > "$RUNNER_TEMP/notes.md"
       - uses: pnpm/action-setup@v4
         with:
           package_json_file: panel/package.json

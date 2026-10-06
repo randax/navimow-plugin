@@ -1,0 +1,32 @@
+# A sample unit for a collector installed with pip into /opt/navimow-collector and run by a
+# system user called navimow. Copy it to /etc/systemd/system/, then:
+#
+#   systemctl daemon-reload && systemctl enable --now navimow-collector
+#
+# /etc/navimow-collector.toml should keep auth.state_file and collector.state_dir in
+# /var/lib/navimow-collector, which systemd creates for the service and nothing else can read.
+
+[Unit]
+Description=Navimow collector
+Documentation=https://github.com/randax/navimow-plugin/tree/main/collector
+Wants=network-online.target
+After=network-online.target postgresql.service
+
+[Service]
+User=navimow
+ExecStart=/opt/navimow-collector/bin/navimow-collector --config /etc/navimow-collector.toml collect
+StateDirectory=navimow-collector
+StateDirectoryMode=0700
+# A database that is not up yet stops the collector as it starts, and this starts it again. A
+# login that needs renewing never stops it: it keeps running and says what to run in its log.
+Restart=on-failure
+RestartSec=30
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+
+[Install]
+WantedBy=multi-user.target

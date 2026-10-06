@@ -1,0 +1,6 @@
+# Only what the Dockerfile copies is needed; the rest would only slow the build down.
+**/__pycache__
+.venv
+.*_cache
+dist
+tests

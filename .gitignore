@@ -5,6 +5,7 @@ __pycache__/
 collector/.mypy_cache/
 collector/.pytest_cache/
 collector/.ruff_cache/
+collector/dist/
 .claude/worktrees/
 prototype/*/node_modules/
 prototype/*/dist/
