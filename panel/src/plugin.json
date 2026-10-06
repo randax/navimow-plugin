@@ -13,7 +13,10 @@
       "small": "img/logo.svg",
       "large": "img/logo.svg"
     },
-    "links": [],
+    "links": [
+      { "name": "Source", "url": "https://github.com/randax/navimow-plugin" },
+      { "name": "Licence", "url": "https://github.com/randax/navimow-plugin/blob/main/panel/LICENSE" }
+    ],
     "screenshots": [],
     "version": "%VERSION%",
     "updated": "%TODAY%"
