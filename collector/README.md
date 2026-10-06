@@ -11,6 +11,14 @@ There are two ways to run it: as a container, or as a system service. Either
 needs a PostgreSQL database it can reach, which it fills with its own tables,
 and one interactive sign-in to Navimow. After that it is left alone.
 
+The image and the package below are published by the collector's releases, of
+which there has been none yet: see
+[Before the first release](#release). Until then, build the image from this
+directory with `docker build -t ghcr.io/randax/navimow-collector collector`, and
+in place of the package name give pip
+`"git+https://github.com/randax/navimow-plugin#subdirectory=collector"`, which
+needs git.
+
 ### As a container
 
 The image is built for 64-bit x86 and 64-bit ARM, so a Raspberry Pi on a 64-bit
@@ -41,7 +49,9 @@ takes that page's whole address. [Navimow login](#navimow-login) has the rest.
   as.
 - **Configuration** is by environment variable, as above: every value in
   [Configuration](#configuration) has one. To use a file, mount it and name it
-  in `NAVIMOW_CONFIG`.
+  in `NAVIMOW_CONFIG`. The image itself sets `NAVIMOW_AUTH_STATE_FILE` and
+  `NAVIMOW_COLLECTOR_STATE_DIR` to the volume, and the environment wins over a
+  file, so those two stay there whatever a file says.
 - **Health.** The image checks `/health` itself, so `docker ps` says whether the
   collector is healthy. To reach `/health` and `/metrics` from outside the
   container, add `-e NAVIMOW_HEALTH_LISTEN=0.0.0.0:9477 -p 9477:9477`. A
@@ -70,9 +80,10 @@ sudo chown root:navimow /etc/navimow-collector.toml
 sudo chmod 640 /etc/navimow-collector.toml
 ```
 
-In `/etc/navimow-collector.toml`, say where the database is, as `dsn` or in a
-file of its own as `dsn_file`, and take the `#` off `state_file` and
-`state_dir`: the service keeps its login and its buffer in
+In `/etc/navimow-collector.toml`, say where the database is: either put its
+DSN in the file that `dsn_file` names, or replace the `dsn_file` line with
+`dsn = "postgresql://..."`, as the two cannot both be set. Take the `#` off
+`state_file` and `state_dir`: the service keeps its login and its buffer in
 `/var/lib/navimow-collector`, which systemd creates for it as it starts. So
 start it first, then sign in as the user it runs as:
 
@@ -143,8 +154,8 @@ picks up the new login from the state file without a restart.
 
 ## Live collection
 
-After logging in once, start collecting and leave the collector alone. The
-container and the system service both run this:
+After logging in once, start collecting and leave the collector alone. This is
+what the system service runs, and the container the same without a file:
 
 ```bash
 navimow-collector --config /etc/navimow-collector.toml collect
@@ -420,7 +431,9 @@ package and the image as every pull request does, and publishes, in this order:
 
 It publishes nothing if the tag and `pyproject.toml` disagree, if the changelog
 has no entries for the version, or if `pyproject.toml` depends on a URL, which
-the package index refuses.
+the package index refuses. The image goes first because its tag can be pushed
+again and a version on the package index cannot: should a later step fail, put
+right what stopped it and re-run the failed jobs, not the whole workflow.
 
 **Before the first release**, three things that are done once:
 

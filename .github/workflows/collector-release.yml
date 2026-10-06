@@ -23,12 +23,14 @@ jobs:
       - id: version
         run: echo "version=${GITHUB_REF_NAME#collector/v}" >> "$GITHUB_OUTPUT"
       - name: No release without its changelog entry
-        run: tools/release-notes.sh collector/CHANGELOG.md "${GITHUB_REF_NAME#collector/v}"
+        run: tools/release-notes.sh collector/CHANGELOG.md "$VERSION"
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
       # The package index refuses a package that depends on a URL, and by then the image would
       # be out under this version.
       - name: No dependency on a URL
         run: |
-          if grep -n ' @ ' collector/pyproject.toml; then
+          if grep -nE '^ *"[^"]+ @ ' collector/pyproject.toml; then
             echo "::error::pyproject.toml depends on a URL, which the package index refuses: depend on a released version instead"
             exit 1
           fi

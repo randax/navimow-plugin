@@ -16,20 +16,22 @@ trap 'docker rm -f "$name" "$name-postgres" >/dev/null 2>&1; docker network rm "
 # No password: a throwaway database, reachable only on this network.
 docker run -d --name "$name-postgres" --network "$name" -e POSTGRES_HOST_AUTH_METHOD=trust postgres:16 >/dev/null
 # Over TCP, which the server that only sets the database up does not listen on.
+ready=
 for _ in $(seq 60); do
-  docker exec "$name-postgres" pg_isready -q -h 127.0.0.1 -U postgres && break
+  docker exec "$name-postgres" pg_isready -q -h 127.0.0.1 -U postgres && ready=yes && break
   sleep 1
 done
+[[ $ready ]] || { echo "PostgreSQL did not start within a minute" >&2; exit 1; }
 
 docker run -d --name "$name" --network "$name" -e NAVIMOW_STORAGE_DSN="$dsn" "$image" >/dev/null
 health=
-for _ in $(seq 60); do
+for _ in $(seq 90); do
   health=$(docker inspect -f '{{.State.Health.Status}}' "$name")
   [[ $health == healthy ]] && break
   sleep 1
 done
 [[ $health == healthy ]] || {
-  echo "the collector is ${health:-not running}, not healthy, a minute after starting:" >&2
+  echo "the collector is ${health:-not running}, not healthy, 90 seconds after starting:" >&2
   docker logs --tail 20 "$name" >&2
   exit 1
 }

@@ -66,7 +66,7 @@ jobs:
           path: collector/dist/
           if-no-files-found: error
 
-  image:
+  smoke:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

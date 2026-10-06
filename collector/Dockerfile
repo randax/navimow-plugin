@@ -25,7 +25,7 @@ VOLUME /var/lib/navimow-collector
 EXPOSE 9477
 # 503 only when the collection loop has stopped, the one fault a restart fixes. It asks the
 # default health.listen: a container that moves it or turns it off needs its own check.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --start-interval=2s \
+HEALTHCHECK --interval=15s --timeout=5s --start-period=30s \
   CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9477/health', timeout=4)"]
 ENTRYPOINT ["navimow-collector"]
 CMD ["collect"]
