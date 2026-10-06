@@ -62,6 +62,43 @@ Set other column names under **Zone progress columns**. The panel tells the two 
 their columns, so their order does not matter: any query result with a Zone and a progress column is
 read as Zone progress.
 
+## Coverage
+
+Coverage shows where the mower has cut, worked out in the panel from the same positions as the
+Trail: nothing extra to query. The **Coverage** button on the panel switches between three styles:
+
+- **Grid** (default): the lawn as square cells, coloured by how often each was cut. The patch that
+  is never cut stays empty, and the ground that is cut again and again goes dark.
+- **Heatmap**: the same counts, smoothed into a glow.
+- **Buffered line**: the Trail drawn as wide as the mower cuts, darker where passes cross.
+
+**Raised**, on the same button, stands Coverage up from the ground and tilts the map to show it:
+cells become columns, the Heatmap a surface, the Buffered line a slab. The button also holds the key
+to the colours. While Coverage is shown the Trail is drawn as a faint hairline over it, so that it
+does not paint over what lies beneath; hide Coverage under **Show or hide** to have the Trail back
+in full.
+
+Under **Coverage** in the panel options:
+
+- **Style** and **Raised** set how the panel opens; the button changes it from there, for as long
+  as the dashboard is open.
+- **Colour by** chooses what colour and height tell: **Visit count**, or **Time since mowed**,
+  measured back from the latest position in the time range. Only the Grid shows either. A Heatmap
+  shows visit count only, and a raised Buffered line shows where the mower has cut but not how
+  often; the panel says so on the map when a style cannot show what is asked for.
+- **Cell size** is the side of a Grid cell, 0.5 m unless changed, from 0.25 m to 5 m. Smaller is
+  finer and slower to draw.
+- **Cutting width** is the width of the mower's cutting deck, 0.43 m unless changed.
+
+A cell counts as cut when the mower passes over it, on the line between one position and the next:
+positions alone are too far apart to fill a grid. A second pass over a cell is a second visit;
+standing on it is not. Positions more than 20 seconds apart are not joined, so a gap in the data is
+a gap in Coverage, and a mower sitting in its dock, which reports every few minutes, adds nothing.
+
+The Grid and the Heatmap stay light however long the time range, as a lawn has only so many cells.
+A Buffered line is a shape for every step the mower took: beyond 20,000 steps, about five Jobs, it
+draws the latest ones and says so.
+
 ## Controls on the panel
 
 The buttons at the top right of the map steer the view. None of them changes what is saved.
@@ -73,7 +110,8 @@ The buttons at the top right of the map steer the view. None of them changes wha
   the zoom to you. It is off unless **Follow the mower** under **Map view** in the panel options
   starts it on, as for a wall display, so a refresh does not take a map you are panning around back
   to the mower. It needs a mower on the map to follow.
-- **Show or hide**: the Trail and the Boundary, each on its own.
+- **Show or hide**: the Trail, Coverage and the Boundary, each on its own.
+- **Coverage**: the style Coverage is drawn in, flat or raised, and the key to its colours.
 
 Use the dashboard's time picker to look at another period; the panel has no time control of its own.
 

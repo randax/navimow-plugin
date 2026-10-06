@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { dateTimeFormat, type PanelProps } from '@grafana/data';
 import { getTemplateSrv, locationService } from '@grafana/runtime';
 import { resolveBaseMap } from '../model/baseMap';
+import { coverageScene, coverageSettings, coverageState, type CoverageState } from '../model/coverage';
 import { jobAt, trailDetail, zoneDetail, type DetailContext } from '../model/hover';
 import { boundaryFeatures, resolveLawn } from '../model/lawn';
 import { resolveOverlay } from '../model/overlay';
@@ -12,6 +13,7 @@ import { mowerAt, trailScene } from '../model/trail';
 import { followState, viewState, type FollowState, type ViewState } from '../model/view';
 import { readZoneProgress } from '../model/zoneProgress';
 import type { MapPanelOptions } from '../types';
+import { CoverageControl } from './CoverageControl';
 import { MapView, useByValue, type MapHit } from './MapView';
 import { MapWarning } from './MapWarning';
 import { PanelMessage } from './PanelMessage';
@@ -50,6 +52,8 @@ export const MapPanel: React.FC<PanelProps<MapPanelOptions>> = ({ options, data,
   const [followed, setFollowed] = useSwitch<FollowState>((previous) => followState(options.follow, previous));
   const { following } = followed;
   const [hidden, setHidden] = useState<Hideable[]>([]);
+  const [covered, setCovered] = useSwitch<CoverageState>((previous) => coverageState(options.coverage, previous));
+  const covering = useByValue(coverageSettings(options.coverage, covered));
   const { trailColumns, zoneProgressColumns, lawns, lawn: single, dockOrigin: atRoot } = options;
   // Keyed on the places the Lawn may be saved, so a fresh options object alone changes nothing.
   const lawn = useMemo(() => resolveLawn({ lawns, lawn: single, dockOrigin: atRoot }), [lawns, single, atRoot]);
@@ -72,6 +76,12 @@ export const MapPanel: React.FC<PanelProps<MapPanelOptions>> = ({ options, data,
     [data.series, zoneProgressColumns]
   );
   const boundary = useMemo(() => boundaryFeatures(lawn?.boundary, progress), [lawn?.boundary, progress]);
+  // From the Trails as drawn, so Coverage narrows to the selected Job with them.
+  const placed = 'scene' in trail ? trail.scene : undefined;
+  const coverage = useMemo(
+    () => (placed?.trails && placed.origin ? coverageScene(placed.trails, placed.origin, covering) : undefined),
+    [placed, covering]
+  );
   // Aged separately, so the minute tick restyles the marker without placing the Trail again.
   const now = useNow();
   const last = 'scene' in trail ? trail.scene.mower : undefined;
@@ -110,6 +120,8 @@ export const MapPanel: React.FC<PanelProps<MapPanelOptions>> = ({ options, data,
       view={view}
       trail={scene}
       boundary={boundary}
+      coverage={coverage}
+      raised={covering.raised}
       mower={mower}
       width={width}
       height={height}
@@ -121,9 +133,18 @@ export const MapPanel: React.FC<PanelProps<MapPanelOptions>> = ({ options, data,
         hit.on === 'trail' ? trailDetail(scene, hit.trail, hit.at, context) : zoneDetail(hit.zone, context)
       }
       selectionAt={selectionAt}
+      controls={
+        <CoverageControl
+          style={covered.style}
+          raised={covered.raised}
+          legend={coverage?.legend}
+          onChange={(to) => setCovered({ ...covered, ...to })}
+        />
+      }
     >
       {terrain.source && <ViewSwitch view={view} onChange={(to) => setViewed({ ...viewed, view: to })} />}
       {trail.warning && <MapWarning text={trail.warning} />}
+      {coverage?.note && !hidden.includes('coverage') && <MapWarning text={coverage.note} />}
     </MapView>
   );
 };

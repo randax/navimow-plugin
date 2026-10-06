@@ -22,7 +22,11 @@ _Avoid_: Calibration point, anchor, home
 
 **Coverage**:
 The area of the lawn a Trail has visited, derived from the Trail itself.
-_Avoid_: Heatmap, mowed area, progress map
+_Avoid_: Mowed area, progress map, and Heatmap for Coverage as a whole: a Heatmap is one of its styles
+
+**Coverage style**:
+One of the three ways Coverage is drawn: Grid (square cells), Heatmap (the cells smoothed) or Buffered line (the Trail as wide as the mower cuts).
+_Avoid_: Mode, layer, rendering, visualisation
 
 **Boundary**:
 The user-drawn outline of the lawn and its Zones, as polygons.

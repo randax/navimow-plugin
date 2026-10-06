@@ -20,6 +20,12 @@ export interface Camera {
 // Looking straight down, relief is all but invisible; this tilt shows a slope as a slope.
 const TERRAIN_PITCH = 60;
 
+/**
+ * The tilt to give a map whose Coverage has just been raised, if it needs one. From straight above,
+ * columns show only their tops, which is the flat picture again; a map already tilted is the owner's.
+ */
+export const pitchToSeeRaised = (pitch: number): number | undefined => (pitch < 1 ? TERRAIN_PITCH : undefined);
+
 /** The view the panel opens in: terrain once Terrain is enabled, unless the owner has it start flat. */
 export const initialView = (options?: TerrainOptions | null): View =>
   terrainEnabled(options) && options?.startIn !== 'flat' ? 'terrain' : 'flat';

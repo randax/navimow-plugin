@@ -20,6 +20,8 @@ Provisioned dashboards (`provisioning/`, development only):
   in delivery order) fed through TestData, and the same data without matching column names.
 - `/d/navimow-terrain`: the same Trail with Terrain, starting flat and starting in terrain.
 - `/d/navimow-overlay`: the same Trail with the hillshade Overlay at full opacity.
+- `/d/navimow-coverage`: the same Trail with Coverage as a Grid, a Heatmap and a Buffered line, and
+  raised over Terrain.
 
 `plugin.json` changes need a Grafana restart: `docker compose restart`.
 

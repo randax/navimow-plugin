@@ -29,6 +29,8 @@ const test = base.extend<{
   overlayDashboard: Dashboard;
   interactionDashboard: Dashboard;
   openInteraction: (title: string) => Promise<Locator>;
+  coverageDashboard: Dashboard;
+  openCoverage: (title: string) => Promise<Locator>;
 }>({
   // Pull requests must not depend on, or load, third-party tile services: tiles come from fixtures.
   // The nightly run sets LIVE_TILES=1 to exercise the real hosts.
@@ -94,6 +96,11 @@ const test = base.extend<{
     use(await readProvisionedDashboard({ fileName: 'navimow-interaction.json' })),
   openInteraction: async ({ gotoDashboardPage, interactionDashboard }, use) =>
     use(async (title) => (await gotoDashboardPage(interactionDashboard)).getPanelByTitle(title).locator),
+  // The real Trail again, with Coverage in each style, and raised over Terrain.
+  coverageDashboard: async ({ readProvisionedDashboard }, use) =>
+    use(await readProvisionedDashboard({ fileName: 'navimow-coverage.json' })),
+  openCoverage: async ({ gotoDashboardPage, coverageDashboard }, use) =>
+    use(async (title) => (await gotoDashboardPage(coverageDashboard)).getPanelByTitle(title).locator),
 });
 
 /** Waits for an image tile from the host; a 200 carrying an error document does not count. */
@@ -193,6 +200,28 @@ const pointAt = async (panel: Locator, east: number, north: number) => {
 /** The map's control with this name. */
 const control = (panel: Locator, name: string) =>
   panel.getByTestId('navimow-map-controls').getByRole('button', { name });
+
+/** Shows or hides something from the panel's list, puts the list away and waits for the map to come to rest. */
+const setShown = async (page: Page, panel: Locator, name: string, shown: boolean) => {
+  await control(panel, 'Show or hide').click();
+  // Sought on the page: the list opens outside the panel, as every Grafana popover does.
+  const entry = page.getByRole('checkbox', { name });
+  await (shown ? entry.check({ force: true }) : entry.uncheck({ force: true }));
+  await page.keyboard.press('Escape');
+  await expect(entry).toHaveCount(0);
+  await expectDrawn(panel);
+};
+
+/**
+ * How much of the Base map Coverage covers, in pixels: the fixture's green that comes back when
+ * Coverage is hidden. The Trail is hidden first, as its line lies over the same ground.
+ */
+const coveredPixels = async (page: Page, panel: Locator) => {
+  await setShown(page, panel, 'Trail', false);
+  const covered = (await pixelsOf(page, panel)).baseMap;
+  await setShown(page, panel, 'Coverage', false);
+  return (await pixelsOf(page, panel)).baseMap - covered;
+};
 
 test('draws the default Kartverket Base map with its attribution, uncollapsed', async ({ openMap, page }) => {
   const [panel] = await Promise.all([openMap('Kartverket topo'), tileFrom(page, 'cache.kartverket.no')]);
@@ -785,12 +814,13 @@ test('the controls zoom, turn north up and fit the view to the Trail again', asy
   await control(panel, 'Zoom out').click();
   await cameraAtRest(panel, (camera) => Math.abs(camera.zoom - (framed.zoom - 1)) < 0.01);
 
-  // Dragging with the right button turns the map; the compass turns it back.
+  // Dragging with the right button turns the map; the compass turns it back. Dragged to the left,
+  // away from the controls: in a narrow panel a drag to the right ends on one of them.
   const box = (await panel.getByTestId('navimow-map').boundingBox())!;
   const [x, y] = [box.x + box.width / 2, box.y + box.height / 2];
   await page.mouse.move(x, y);
   await page.mouse.down({ button: 'right' });
-  await page.mouse.move(x + 120, y, { steps: 10 });
+  await page.mouse.move(x - 120, y, { steps: 10 });
   await page.mouse.up({ button: 'right' });
   await cameraAtRest(panel, (camera) => Math.abs(camera.bearing) > 5);
   await control(panel, 'Turn north up').click();
@@ -906,4 +936,62 @@ test('positions from two mowers are drawn with a warning that names them', async
   const one = await openInteraction('Two Jobs');
   await expectDrawn(one);
   await expect(one.getByTestId('navimow-map-warning')).toHaveCount(0);
+});
+
+for (const { title, note } of [
+  { title: 'Grid' },
+  { title: 'Heatmap, by time since mowed', note: 'A Heatmap shows how often each part was cut, not how long ago.' },
+  { title: 'Buffered line' },
+]) {
+  test(`Coverage of a real Trail is drawn, and can be hidden: ${title}`, async ({ openCoverage, page }) => {
+    test.skip(LIVE_TILES, NEEDS_FIXTURE_TILES);
+    const panel = await openCoverage(title);
+    await expectDrawn(panel);
+    // What a style cannot show of what the options ask for is said beside the map, while it is shown.
+    const warning = panel.getByTestId('navimow-map-warning');
+    await (note ? expect(warning).toContainText(note) : expect(warning).toHaveCount(0));
+    expect(await coveredPixels(page, panel)).toBeGreaterThan(500);
+    await expect(warning).toHaveCount(0);
+  });
+}
+
+test('the Coverage control switches the style and raises it, tilting the map to show it', async ({
+  openCoverage,
+  page,
+}) => {
+  const panel = await openCoverage('Grid');
+  await expectDrawn(panel);
+  expect((await cameraOf(panel)).pitch).toBe(0);
+
+  await control(panel, 'Coverage').click();
+  // Sought on the page: it opens outside the panel, as every Grafana popover does.
+  const coverage = page.getByTestId('navimow-map-coverage');
+  await expect(coverage.getByRole('radio', { name: 'Grid' })).toBeChecked();
+  // The key to the colours is kept with the control.
+  await expect(coverage).toContainText('Visits');
+
+  await coverage.getByRole('radio', { name: 'Buffered line' }).check({ force: true });
+  await expectDrawn(panel);
+  const warning = panel.getByTestId('navimow-map-warning');
+  await expect(warning).toHaveCount(0);
+
+  await coverage.getByRole('checkbox', { name: 'Raised' }).check({ force: true });
+  await cameraAtRest(panel, (camera) => camera.pitch === 60);
+  await expect(warning).toContainText('Raised, a Buffered line shows where the mower has cut, not how often.');
+
+  await coverage.getByRole('radio', { name: 'Heatmap' }).check({ force: true });
+  await expect(warning).toHaveCount(0);
+  await expectDrawn(panel);
+  // Lowering it leaves the tilt, which is the owner's from here.
+  await coverage.getByRole('checkbox', { name: 'Raised' }).uncheck({ force: true });
+  await expectDrawn(panel);
+  expect((await cameraOf(panel)).pitch).toBe(60);
+});
+
+test('a panel can open with Coverage raised, standing on Terrain 400 m up', async ({ openCoverage, page }) => {
+  test.skip(LIVE_TILES, NEEDS_FIXTURE_TILES);
+  const panel = await openCoverage('Raised over Terrain');
+  await cameraAtRest(panel, (camera) => Math.round(camera.groundElevation) === 400 && camera.pitch === 60);
+  await expectDrawn(panel);
+  expect(await coveredPixels(page, panel)).toBeGreaterThan(500);
 });

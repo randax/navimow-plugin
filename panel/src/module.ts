@@ -3,6 +3,7 @@ import { getTemplateSrv } from '@grafana/runtime';
 import { CalibrationEditor } from './components/CalibrationEditor';
 import { DockOriginField, type DockOriginFieldSettings } from './components/DockOriginField';
 import { MapPanel } from './components/MapPanel';
+import { CELL_SIZE, COVERAGE_ENCODINGS, COVERAGE_STYLES, CUTTING_WIDTH } from './model/coverage';
 import { BASE_MAP_PRESETS, CUSTOM_BASE_MAP, MAX_ZOOM, TILE_SIZE, type CustomSlot } from './model/baseMap';
 import { LAWN_PATH, migrateLawn, type Lawn } from './model/lawn';
 import { CUSTOM_OVERLAY, DEFAULT_OVERLAY_OPACITY, OVERLAY_PRESETS } from './model/overlay';
@@ -267,6 +268,50 @@ export const plugin = new PanelPlugin<MapPanelOptions>(MapPanel)
     ZONE_PROGRESS_COLUMN_EDITORS,
     DEFAULT_ZONE_PROGRESS_COLUMNS
   );
+  const coverage = ['Coverage'];
+  builder
+    .addRadio({
+      path: 'coverage.style',
+      name: 'Style',
+      description:
+        'How Coverage is drawn when the panel opens. The Coverage button on the panel switches it from there.',
+      category: coverage,
+      defaultValue: COVERAGE_STYLES[0].value,
+      settings: { options: COVERAGE_STYLES },
+    })
+    .addBooleanSwitch({
+      path: 'coverage.raised',
+      name: 'Raised',
+      description:
+        'Opens the panel with Coverage standing up from the ground and the map tilted to see it. The Coverage button on the panel raises and lowers it from there.',
+      category: coverage,
+      defaultValue: false,
+    })
+    .addRadio({
+      path: 'coverage.encoding',
+      name: 'Colour by',
+      description:
+        'Visit count shows the ground that is cut twice and the patch that never is. Time since mowed shows what is due. The Grid shows either; the panel says when another style cannot.',
+      category: coverage,
+      defaultValue: COVERAGE_ENCODINGS[0].value,
+      settings: { options: COVERAGE_ENCODINGS },
+    })
+    .addNumberInput({
+      path: 'coverage.cellSize',
+      name: 'Cell size',
+      description: 'The side of a cell of the Grid, in metres. Smaller is finer and slower to draw.',
+      category: coverage,
+      defaultValue: CELL_SIZE.default,
+      settings: { min: CELL_SIZE.min, max: CELL_SIZE.max, step: 0.05 },
+    })
+    .addNumberInput({
+      path: 'coverage.cuttingWidth',
+      name: 'Cutting width',
+      description: "The width of the mower's cutting deck, in metres: how wide a strip each pass cuts.",
+      category: coverage,
+      defaultValue: CUTTING_WIDTH.default,
+      settings: { min: CUTTING_WIDTH.min, max: CUTTING_WIDTH.max, step: 0.01 },
+    });
   builder
     .addSelect({
       path: 'jobVariable',

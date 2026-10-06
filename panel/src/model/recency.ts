@@ -10,6 +10,10 @@ const MIN = 60_000;
 const HOUR = 60 * MIN;
 const DAY = 24 * HOUR;
 
+/** A length of time in the largest unit that says something: minutes, then hours, then days. */
+export const duration = (ms: number): string =>
+  ms < HOUR ? `${Math.floor(ms / MIN)} min` : ms < 2 * DAY ? `${Math.floor(ms / HOUR)} h` : `${Math.floor(ms / DAY)} d`;
+
 /**
  * Whether a position from `time` still describes the mower at `now`. `now` is the wall clock, which
  * the panel re-reads every minute, not the fetch time or the end of the dashboard's range: with
@@ -21,11 +25,5 @@ export function recency(time: number, now: number): Recency {
   if (age < STALE_AFTER_MS) {
     return { stale: false };
   }
-  const amount =
-    age < HOUR
-      ? `${Math.floor(age / MIN)} min`
-      : age < 2 * DAY
-        ? `${Math.floor(age / HOUR)} h`
-        : `${Math.floor(age / DAY)} d`;
-  return { stale: true, lastSeen: `Last seen ${amount} ago` };
+  return { stale: true, lastSeen: `Last seen ${duration(age)} ago` };
 }
