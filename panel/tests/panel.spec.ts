@@ -818,13 +818,12 @@ test('the controls zoom, turn north up and fit the view to the Trail again', asy
   await control(panel, 'Zoom out').click();
   await cameraAtRest(panel, (camera) => Math.abs(camera.zoom - (framed.zoom - 1)) < 0.01);
 
-  // Dragging with the right button turns the map; the compass turns it back. Dragged to the left,
-  // away from the controls: in a narrow panel a drag to the right ends on one of them.
+  // Dragging with the right button turns the map; the compass turns it back.
   const box = (await panel.getByTestId('navimow-map').boundingBox())!;
   const [x, y] = [box.x + box.width / 2, box.y + box.height / 2];
   await page.mouse.move(x, y);
   await page.mouse.down({ button: 'right' });
-  await page.mouse.move(x - 120, y, { steps: 10 });
+  await page.mouse.move(x + 120, y, { steps: 10 });
   await page.mouse.up({ button: 'right' });
   await cameraAtRest(panel, (camera) => Math.abs(camera.bearing) > 5);
   await control(panel, 'Turn north up').click();
@@ -840,6 +839,30 @@ test('the controls zoom, turn north up and fit the view to the Trail again', asy
   await control(panel, 'Fit to Trail').click();
   await cameraAtRest(panel, (camera) => Math.abs(camera.zoom - framed.zoom) < 0.001);
   expectSamePlace(await cameraOf(panel), framed);
+});
+
+test('a drag let go over a control leaves the map at rest', async ({ openInteraction, page }) => {
+  const panel = await openInteraction('Two Jobs');
+  await expectDrawn(panel);
+  const framed = await cameraOf(panel);
+  const box = (await panel.getByTestId('navimow-map').boundingBox())!;
+  const [x, y] = [box.x + box.width / 2, box.y + box.height / 2];
+  const zoomIn = (await control(panel, 'Zoom in').boundingBox())!;
+  const dragOntoControl = async (button: 'left' | 'right') => {
+    await page.mouse.move(x, y);
+    await page.mouse.down({ button });
+    await page.mouse.move(zoomIn.x + zoomIn.width / 2, zoomIn.y + zoomIn.height / 2, { steps: 10 });
+    await page.mouse.up({ button });
+  };
+
+  // Panned, and the control was only where the drag ended, not pressed.
+  await dragOntoControl('left');
+  const panned = await cameraAtRest(panel, (camera) => Math.abs(camera.center[1] - framed.center[1]) > 0.0001);
+  expect(panned.zoom).toBeCloseTo(framed.zoom, 3);
+
+  // And turned.
+  await dragOntoControl('right');
+  await cameraAtRest(panel, (camera) => Math.abs(camera.bearing) > 5);
 });
 
 test('the view is the owner’s until following is switched on, which puts the mower in the middle', async ({
