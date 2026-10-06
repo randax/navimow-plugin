@@ -10,4 +10,4 @@
 - Serves `/health` for a container or service manager, and `/metrics` in the Prometheus text format.
 - Creates and migrates its own tables, unless told not to. The schema only ever gains tables and columns.
 - Replays a raw capture through the same ingestion as live collection.
-- Released as a container image for 64-bit x86 and ARM and as `randax-navimow-collector` on the package index, with a sample systemd unit.
+- Released as a container image for 64-bit x86 and ARM and as `navimow-collector` on the package index, with a sample systemd unit.

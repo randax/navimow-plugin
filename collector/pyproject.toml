@@ -3,7 +3,7 @@ requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
-name = "randax-navimow-collector"
+name = "navimow-collector"
 version = "0.1.0"
 description = "Collector recording Navimow mower Trails into a database"
 readme = "README.md"

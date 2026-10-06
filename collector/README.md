@@ -70,7 +70,7 @@ of its own, with the [sample unit](navimow-collector.service) and the
 ```bash
 sudo useradd --system --shell /usr/sbin/nologin navimow
 sudo python3 -m venv /opt/navimow-collector
-sudo /opt/navimow-collector/bin/pip install randax-navimow-collector
+sudo /opt/navimow-collector/bin/pip install navimow-collector
 sudo ln -s /opt/navimow-collector/bin/navimow-collector /usr/local/bin/
 
 files=https://raw.githubusercontent.com/randax/navimow-plugin/main/collector
@@ -425,7 +425,7 @@ package and the image as every pull request does, and publishes, in this order:
 - the image, for `linux/amd64` and `linux/arm64`, as
   `ghcr.io/randax/navimow-collector:<version>` and `:latest`;
 - the wheel and the source distribution to the package index, as
-  `randax-navimow-collector`;
+  `navimow-collector`;
 - a GitHub release holding both of those, the sample unit and the example
   configuration, with that version's changelog entries as its notes.
 
@@ -443,7 +443,7 @@ right what stopped it and re-run the failed jobs, not the whole workflow.
   `randax-navimow-sdk>=0.5,<0.6`, and take `git` out of the `Dockerfile` and
   `allow-direct-references` out of `pyproject.toml`.
 - **A trusted publisher.** On pypi.org, under Publishing, add a pending
-  publisher for the project `randax-navimow-collector`: owner `randax`,
+  publisher for the project `navimow-collector`: owner `randax`,
   repository `navimow-plugin`, workflow `collector-release.yml`, environment
   `pypi`. The workflow then needs no token.
 - **A public image.** GitHub keeps a new container package private. After the

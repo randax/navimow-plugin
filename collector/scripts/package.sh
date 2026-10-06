@@ -12,9 +12,9 @@ rm -rf dist
 python -m build --outdir dist >/dev/null
 python -m twine check --strict dist/*
 
-wheels=(dist/randax_navimow_collector-*.whl)
+wheels=(dist/navimow_collector-*.whl)
 wheel=${wheels[0]}
-version=${wheel#dist/randax_navimow_collector-}
+version=${wheel#dist/navimow_collector-}
 version=${version%%-*}
 if [[ -n ${1:-} && $1 != "$version" ]]; then
   echo "asked to package $1, but pyproject.toml says $version: its version must match the tag" >&2
