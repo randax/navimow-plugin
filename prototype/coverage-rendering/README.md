@@ -1,6 +1,6 @@
 # Prototype: Coverage rendering from a real Trail (throwaway)
 
-Wayfinder ticket #15. Open `index.html` in a browser (double-click; needs internet for Kartverket tiles and the MapLibre CDN). Switch variants with the yellow bar, the arrow keys, or `?variant=A|B|C`. Every control in the sidebar is also a URL parameter, so any view is a link: `?variant=B&mode=3d&metric=age&cell=0.25`.
+Wayfinder ticket #15. From the repository root, run `python3 -m http.server 8015 -d prototype/coverage-rendering` and open <http://localhost:8015/> (needs internet for Kartverket tiles and the MapLibre CDN). Double-clicking `index.html` does not work: MapLibre 6 runs its worker as a module, which browsers refuse to start for a page opened as a file, so the map appears with no Coverage on it. Switch variants with the yellow bar, the arrow keys, or `?variant=A|B|C`. Every control in the sidebar is also a URL parameter, so any view is a link: `?variant=B&mode=3d&metric=age&cell=0.25`.
 
 Question: which of three Coverage renderings reads best, flat and extruded, and what must the collector precompute versus what the panel can compute itself?
 

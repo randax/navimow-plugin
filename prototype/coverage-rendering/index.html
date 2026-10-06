@@ -1,6 +1,7 @@
 <!doctype html>
 <!-- PROTOTYPE (throwaway), wayfinder ticket #15: three ways to render Coverage from a real Trail, each flat
-     and extruded, switchable via ?variant=A|B|C or the floating bar / arrow keys. Double-click this file to open.
+     and extruded, switchable via ?variant=A|B|C or the floating bar / arrow keys. Serve this folder and open it over HTTP
+     (see README): opened as a file, the browser will not start MapLibre 6's worker and no Coverage is drawn.
      Every control is also a URL parameter, so any view is a shareable link. -->
 <html lang="en"><head><meta charset="utf-8"><title>Coverage rendering prototype</title>
 <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@6.11.2/dist/maplibre-gl.css">
@@ -47,6 +48,7 @@
 <script src="trail.js"></script>
 <script type="module">
 const CDN = 'https://unpkg.com/maplibre-gl@6.11.2/dist/';   // the version the panel ships
+if (location.protocol === 'file:') document.body.insertAdjacentHTML('afterbegin', '<div style="background:#b3261e;color:#fff;padding:8px 16px">Opened as a file, so the map worker cannot start and no Coverage will be drawn. Run <code>python3 -m http.server 8015 -d prototype/coverage-rendering</code> from the repository root and open <code>http://localhost:8015/</code>.</div>');
 const { Map: GLMap, NavigationControl, setWorkerUrl } = await import(CDN + 'maplibre-gl.mjs');
 // A worker must be same-origin, so a blob stands in for it and pulls the real one in.
 setWorkerUrl(URL.createObjectURL(new Blob([`import '${CDN}maplibre-gl-worker.mjs';`], { type: 'text/javascript' })));
