@@ -21,7 +21,7 @@ from mower_sdk.mqtt import NavimowMQTT
 from .auth import RETRY_DELAYS, TokenManager, redact, replace_file
 from .health import Snapshot
 from .ingest import Ingestor
-from .records import GapReason
+from .records import CHANNEL_TOPIC, STORED_CHANNELS, GapReason
 from .storage.buffered import BufferedStorage
 
 API_URL = "https://navimow-fra.ninebot.com"
@@ -41,6 +41,8 @@ DRAIN_SECONDS = 0.1
 VENDOR_WAIT_SECONDS = 5
 # Every topic the broker delivers for a mower, whatever the channel.
 MOWER_TOPIC = re.compile(r"^/downlink/vehicle/([^/]+)/")
+# How much of a message nothing is stored of is logged, in characters.
+UNSTORED_LOGGED = 300
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -151,6 +153,7 @@ class Collector:
         # so startup is not a stall), and when each mower was last heard from.
         self._ticked_at = clock()
         self._heard: dict[str, float] = {}
+        self._unstored: dict[tuple[str, str], int] = {}
         self._vendor_work: asyncio.Future[None] | None = None
 
     async def collect(
@@ -194,11 +197,11 @@ class Collector:
     def snapshot(self) -> Snapshot:
         """Every signal the health endpoint reports, read from another thread.
 
-        Only single attributes are read, and the one dict is copied first, so a value may be
+        Only single attributes are read, and each dict is copied first, so a value may be
         a moment old but is never torn.
         """
         now = self._clock()
-        heard = dict(self._heard)
+        heard, unstored = dict(self._heard), dict(self._unstored)
         mowers = dict.fromkeys(self._mowers) | heard
         return Snapshot(
             seconds_since_tick=_age(now, self._ticked_at),
@@ -213,6 +216,7 @@ class Collector:
             rows_written=self._storage.written,
             rows_dropped=self._storage.dropped,
             rows_rejected=self._storage.rejected,
+            unstored_messages=unstored,
         )
 
     def stop(self) -> None:
@@ -375,7 +379,22 @@ class Collector:
     async def _on_raw(self, topic: str, payload: bytes) -> None:
         if match := MOWER_TOPIC.match(topic):
             self._heard[match.group(1)] = self._clock()
+        if (match := CHANNEL_TOPIC.fullmatch(topic)) and match.group(2) not in STORED_CHANNELS:
+            self._note_unstored(match.group(1), match.group(2), payload)
         self._feed({"kind": "mqtt", "topic": topic, "payload": _parse(payload)})
+
+    def _note_unstored(self, mower: str, channel: str, payload: bytes) -> None:
+        """Count a message nothing is stored of. The first from each mower on each channel
+        is logged with what it carried, which is how what the channel carries gets known."""
+        seen = self._unstored.get((mower, channel), 0)
+        self._unstored[mower, channel] = seen + 1
+        _LOGGER.log(
+            logging.DEBUG if seen else logging.INFO,
+            "Mower %s sent a message on the %s channel, of which nothing is stored: %s",
+            mower,
+            channel,
+            payload.decode("utf-8", errors="replace")[:UNSTORED_LOGGED],
+        )
 
     def _feed(self, record: dict[str, object]) -> None:
         """Hand the core a record in the capture format, exactly as replay does."""
@@ -390,6 +409,7 @@ class Collector:
             raise RestError(f"malformed mower list: {error!r}") from error
         if not mowers:
             raise RestError("this Navimow account has no mowers")
+        self._feed({"kind": "rest", "endpoint": "authList", "payload": answer})
         return mowers
 
     async def _fetch_credentials(self, token: str) -> BrokerCredentials:

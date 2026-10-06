@@ -12,7 +12,7 @@ import math
 import socket
 import threading
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
@@ -43,6 +43,8 @@ class Snapshot:
     rows_written: int = 0
     rows_dropped: int = 0
     rows_rejected: int = 0
+    # Messages on channels nothing is stored of, counted by mower and channel.
+    unstored_messages: Mapping[tuple[str, str], int] = field(default_factory=dict)
 
     @property
     def live(self) -> bool:
@@ -73,7 +75,14 @@ def to_json(snapshot: Snapshot) -> str:
             "seconds_since_tick": snapshot.seconds_since_tick,
             "broker": {"connected": snapshot.broker_connected},
             "mowers": {
-                mower: {"last_message_age_seconds": age}
+                mower: {
+                    "last_message_age_seconds": age,
+                    "unstored_messages": {
+                        channel: count
+                        for (sender, channel), count in snapshot.unstored_messages.items()
+                        if sender == mower
+                    },
+                }
                 for mower, age in snapshot.last_message_ages.items()
             },
             "database": {
@@ -158,6 +167,15 @@ def to_prometheus(snapshot: Snapshot) -> str:
                 "counter",
                 "Rows the database refused for what they hold.",
                 [("", snapshot.rows_rejected)],
+            ),
+            _metric(
+                "unstored_messages_total",
+                "counter",
+                "Messages on channels of which nothing is stored.",
+                [
+                    (_labels(mower_id=mower, channel=channel), count)
+                    for (mower, channel), count in snapshot.unstored_messages.items()
+                ],
             ),
         ]
     )

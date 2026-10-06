@@ -11,7 +11,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import NamedTuple, TypeVar
 
-from .records import Job, MowerState, Progress, Row, TrailPoint
+from .records import Job, MowerState, Progress, Row, TrailPoint, ZoneList
 
 Reading = TypeVar("Reading", MowerState, Progress)
 Number = TypeVar("Number", int, float)
@@ -142,6 +142,13 @@ class JobTracker:
                 completed=job.completed or (percentage is not None and percentage >= 100),
             )
         return [*given_up, *self._take(job, time, zone)]
+
+    def zones(self, listed: ZoneList) -> list[Row]:
+        """The Zones a Job covers are the ones last listed while the mower was away on it."""
+        job = self._job
+        if job is None or self._span(listed.device_time).job_id != job.job_id:
+            return []  # listed at the dock, or on a Job before this one
+        return self._take(replace(job, zones=listed.zones), listed.device_time, self._zone)
 
     @property
     def _zone(self) -> int | None:

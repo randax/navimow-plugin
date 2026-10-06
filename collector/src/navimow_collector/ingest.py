@@ -31,6 +31,7 @@ class Ingestor:
     def feed(self, record: Mapping[str, object]) -> None:
         parsed = parse_record(record)
         self.placeholders_discarded += parsed.placeholders_discarded
+        self._rows.extend(parsed.mowers)
         for gap in parsed.gaps:
             self._tracker(gap.mower_id).gap()
             self._rows.append(gap)
@@ -40,6 +41,8 @@ class Ingestor:
             self._rows.extend(self._tracker(state.mower_id).state(state))
         for report in parsed.progress:
             self._rows.extend(self._tracker(report.mower_id).progress(report))
+        for listed in parsed.zone_lists:
+            self._rows.extend(self._tracker(listed.mower_id).zones(listed))
         for point in parsed.points:
             self._rows.extend(self._tracker(point.mower_id).point(point))
         if len(self._rows) >= self._batch_size:

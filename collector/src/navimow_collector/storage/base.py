@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Protocol, Self
 
-from ..records import Gap, Job, MowerState, Progress, Row, TrailPoint
+from ..records import Gap, Job, Mower, MowerState, Progress, Row, TrailPoint
 
 
 class StorageError(Exception):
@@ -45,6 +45,11 @@ class Writer(Protocol):
         """Store states, skipping any already stored; return how many were new."""
         ...
 
+    def write_mowers(self, mowers: Sequence[Mower]) -> int:
+        """Store mowers; one already stored is replaced by a later description that differs.
+        Return how many were new or replaced."""
+        ...
+
 
 def write_rows(writer: Writer, rows: Sequence[Row]) -> dict[type[Row], int]:
     """Hand each kind of row to its writer, a Job before the rows which name it; return how
@@ -60,6 +65,8 @@ def write_rows(writer: Writer, rows: Sequence[Row]) -> dict[type[Row], int]:
         stored[MowerState] = writer.write_states(states)
     if gaps := [row for row in rows if isinstance(row, Gap)]:
         stored[Gap] = writer.write_gaps(gaps)
+    if mowers := [row for row in rows if isinstance(row, Mower)]:
+        stored[Mower] = writer.write_mowers(mowers)
     return stored
 
 

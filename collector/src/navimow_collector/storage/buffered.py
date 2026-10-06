@@ -15,7 +15,7 @@ from pathlib import Path
 from time import monotonic
 from typing import Any, BinaryIO, get_args
 
-from ..records import Gap, GapReason, Job, MowerState, Progress, Row, TrailPoint
+from ..records import Gap, GapReason, Job, Mower, MowerState, Progress, Row, TrailPoint
 from .base import RejectedError, Storage, StorageError, write_rows
 
 RETRY_SECONDS = 10
@@ -136,6 +136,9 @@ class BufferedStorage:
 
     def write_states(self, states: Sequence[MowerState]) -> int:
         return self._write(states)
+
+    def write_mowers(self, mowers: Sequence[Mower]) -> int:
+        return self._write(mowers)
 
     def flush(self) -> None:
         """Write some of what is waiting, unless the database was found unreachable just now.
@@ -400,6 +403,8 @@ def _decode(line: bytes) -> Row | None:
                 values[key] = datetime.fromisoformat(value)
         if kind is Gap:
             values["reason"] = GapReason(values["reason"])
+        if kind is Job and values.get("zones") is not None:
+            values["zones"] = tuple(values["zones"])
         return kind(**values)
     except (AttributeError, KeyError, TypeError, ValueError):
         return None

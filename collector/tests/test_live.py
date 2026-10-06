@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import gzip
 import json
+import logging
 import os
 import signal
 import socket
@@ -54,6 +55,7 @@ from .test_buffer import Database, points
 NOW = 1_790_000_000.0
 LOCATION = "/downlink/vehicle/{}/realtimeDate/location"
 STATE = "/downlink/vehicle/{}/realtimeDate/state"
+CHANNELS = ("event", "attributes")  # the two which carry nothing that is stored
 CREDENTIALS = "mqtt/userInfo/get/v2"
 STATUS = "smarthome/getVehicleStatus"
 # Vendor prose gathered by the token research (docs/research/token-flow.md, section 5).
@@ -107,7 +109,11 @@ class Vendor:
 
     def _answer(self, method: str, endpoint: str, body: dict[str, Any] | None) -> dict[str, Any]:
         if (method, endpoint) == ("GET", "smarthome/authList"):
-            return {"payload": {"devices": [{"id": mower} for mower in self.mowers]}}
+            described = {"model": "X420", "firmware": "005D"}
+            devices = [
+                {"id": mower, "name": f"Mower {mower}", **described} for mower in self.mowers
+            ]
+            return {"payload": {"devices": devices}}
         if (method, endpoint) == ("GET", CREDENTIALS):
             return {
                 "mqttHost": self.broker_host,
@@ -297,6 +303,19 @@ def test_one_process_records_every_mower_on_the_account(database: str, tmp_path:
 
     assert live.broker.mowers == ["DEVICE_1", "DEVICE_2"]
     assert [(row[0], row[3]) for row in live.trail()] == [("DEVICE_1", 1.0), ("DEVICE_2", 7.0)]
+
+
+def test_every_mower_is_recorded_as_the_account_describes_it(database: str, tmp_path: Path) -> None:
+    live = Live(database, tmp_path, "DEVICE_1", "DEVICE_2")
+
+    asyncio.run(live.connected())
+
+    with psycopg.connect(live.db.dsn) as conn:
+        mowers = conn.execute("SELECT * FROM mower ORDER BY mower_id").fetchall()
+    assert mowers == [
+        ("DEVICE_1", "Mower DEVICE_1", "X420", "005D", at(NOW)),
+        ("DEVICE_2", "Mower DEVICE_2", "X420", "005D", at(NOW)),
+    ]
 
 
 def test_a_reconnection_writes_a_gap_with_its_start_end_and_reason(
@@ -879,7 +898,35 @@ def test_health_reports_the_broker_the_database_and_the_buffer(live: Live) -> No
     )
     assert status_code(outage) == 200  # reported, not failed: a restart would not help
     assert (recovered.database_reachable, recovered.buffered_rows) == (True, 0)
-    assert recovered.rows_written == 2  # the backlog counts once it is written
+    # The mower itself, written on connecting; the backlog counts once it is written.
+    assert recovered.rows_written == 1 + 2
+
+
+def test_a_message_on_a_channel_nothing_stores_is_counted_and_logged(
+    live: Live, caplog: pytest.LogCaptureFixture
+) -> None:
+    # No capture has yet held a message on the event or attributes channels, so nothing is
+    # stored of them: the first one a mower sends has to be noticed, and readable.
+    event, attributes = (f"/downlink/vehicle/DEVICE_1/realtimeDate/{c}" for c in CHANNELS)
+
+    async def scenario() -> Snapshot:
+        collector = await live.connected()
+        await live.broker.deliver(event, {"level": "error", "message": "Mower lifted"})
+        await live.broker.deliver(event, {"level": "error", "message": "Mower stuck"})
+        await live.broker.deliver(attributes, {"signal_strength": -67})
+        await live.broker.deliver(LOCATION.format("DEVICE_1"), pose(at(NOW)))
+        return collector.snapshot()
+
+    with caplog.at_level(logging.INFO):
+        snapshot = asyncio.run(scenario())
+
+    assert snapshot.unstored_messages == {
+        ("DEVICE_1", "event"): 2,
+        ("DEVICE_1", "attributes"): 1,
+    }
+    assert "Mower lifted" in caplog.text and "signal_strength" in caplog.text
+    assert "Mower stuck" not in caplog.text  # one line a channel says what it carries
+    assert len(live.trail()) == 1
 
 
 def test_health_fails_once_the_collection_loop_stops_ticking(live: Live) -> None:
@@ -967,7 +1014,9 @@ def test_collecting_continues_until_stopped_then_disconnects(live: Live) -> None
 
 
 def test_a_backlog_is_drained_promptly_without_holding_the_loop(live: Live) -> None:
-    backlog = 2 * REPLAY_ROWS + 150
+    # The mower is written as the collector starts: a write like any other, which takes a
+    # slice of the backlog with it.
+    backlog = 3 * REPLAY_ROWS + 150
     live.db.go_down()
     outage = BufferedStorage(live.db.open, live.state / "buffer.jsonl", clock=live.clock)
     outage.write_trail(points(*range(backlog)))

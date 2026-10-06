@@ -1,16 +1,17 @@
-"""PostgreSQL storage for the provisional schema."""
+"""PostgreSQL storage: the reference backend for the schema in docs/adr/0002-data-schema.md."""
 
 from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import astuple, fields
+from dataclasses import astuple, fields, replace
+from typing import Any
 
 import psycopg
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from ..config import StorageConfig
-from ..records import Gap, Job, MowerState, Progress, Row, TrailPoint
+from ..records import Gap, Job, Mower, MowerState, Progress, Row, TrailPoint
 from .base import RejectedError, SchemaError, StorageError
 
 # Live collection writes from its event loop, so a database call should not wait for long:
@@ -38,8 +39,8 @@ def _translated() -> Iterator[None]:
         raise StorageError(f"postgres: {error}".strip()) from error
 
 
-# The layout is provisional until schema decision #9. Migrations are additive only:
-# never drop or rename a column, so newer consumers can tolerate older collectors.
+# Migrations are additive only: never drop or rename a column, so newer consumers can
+# tolerate older collectors.
 # A mower reports one pose per instant, so (mower_id, device_time) identifies a point:
 # a redelivered point is skipped rather than duplicated, which makes replay idempotent.
 MIGRATIONS = (
@@ -110,14 +111,36 @@ MIGRATIONS = (
         PRIMARY KEY (mower_id, device_time)
     )
     """,
+    "ALTER TABLE job ADD COLUMN IF NOT EXISTS zones integer[]",
+    # One row per mower, as the account's device list last described it.
+    """
+    CREATE TABLE IF NOT EXISTS mower (
+        mower_id text PRIMARY KEY,
+        name text,
+        model text,
+        firmware text,
+        updated_time timestamptz NOT NULL
+    )
+    """,
 )
-TABLES = ("trail_point", "collector_gap", "job", "job_progress", "mower_state")
+TABLES = ("trail_point", "collector_gap", "job", "job_progress", "mower_state", "mower")
 
 
 def _insert(row: type[Row], table: str) -> str:
     """Insert every field of the row into the column of the same name."""
     columns = [field.name for field in fields(row)]
     return f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({', '.join(['%s'] * len(columns))})"
+
+
+def _values(job: Job) -> tuple[object, ...]:
+    """A Job's values in column order. psycopg writes a list as an array, a tuple as a record."""
+    return tuple(list(value) if isinstance(value, tuple) else value for value in astuple(job))
+
+
+def _job(row: tuple[Any, ...]) -> Job:
+    """The Job a row of its columns holds, with the array of its Zones as the tuple a Job keeps."""
+    job = Job(*row)
+    return job if job.zones is None else replace(job, zones=tuple(job.zones))
 
 
 # Whatever may change in a Job once it is stored: everything but its key.
@@ -182,7 +205,7 @@ class PostgresStorage:
                 f"SELECT DISTINCT ON (mower_id) {columns} FROM job"
                 " ORDER BY mower_id, start_time DESC"
             ).fetchall()
-        return [Job(*row) for row in found]
+        return [_job(row) for row in found]
 
     def write_trail(self, points: Sequence[TrailPoint]) -> int:
         return self._write(
@@ -206,7 +229,7 @@ class PostgresStorage:
         return self._write(
             _insert(Job, "job") + f" ON CONFLICT (mower_id, job_id) DO UPDATE SET {_JOB_CHANGES}"
             " WHERE job.updated_time <= EXCLUDED.updated_time",
-            [astuple(job) for job in jobs],
+            [_values(job) for job in jobs],
         )
 
     def write_progress(self, reports: Sequence[Progress]) -> int:
@@ -219,6 +242,17 @@ class PostgresStorage:
         return self._write(
             _insert(MowerState, "mower_state") + " ON CONFLICT DO NOTHING",
             [astuple(state) for state in states],
+        )
+
+    def write_mowers(self, mowers: Sequence[Mower]) -> int:
+        return self._write(
+            _insert(Mower, "mower") + " ON CONFLICT (mower_id) DO UPDATE"
+            " SET name = EXCLUDED.name, model = EXCLUDED.model, firmware = EXCLUDED.firmware,"
+            " updated_time = EXCLUDED.updated_time"
+            " WHERE mower.updated_time < EXCLUDED.updated_time"
+            " AND (mower.name, mower.model, mower.firmware)"
+            " IS DISTINCT FROM (EXCLUDED.name, EXCLUDED.model, EXCLUDED.firmware)",
+            [astuple(mower) for mower in mowers],
         )
 
     def _write(self, statement: str, rows: Sequence[tuple[object, ...]]) -> int:
