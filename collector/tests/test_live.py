@@ -912,7 +912,7 @@ def test_a_database_that_stops_answering_holds_up_neither_collection_nor_a_stop(
             await until(live.db.held)
             await live.broker.deliver(location, pose(at(NOW + 3)), written=False)
             live.clock.now = NOW + 3400  # the token falls due for its refresh
-            await until(lambda: live.vendor.count("oauth/getAccessToken"))
+            await until(lambda: live.broker.credentials.access_token == "access-1")
             ticked = ticks
             await until(lambda: ticks > ticked + 1)
             snapshot = collector.snapshot()
