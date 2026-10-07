@@ -264,11 +264,12 @@ class BufferedStorage:
     async def _send_memory(self, room: int) -> None:
         """Send the oldest rows in memory. They stay there until the database has taken
         them, ahead of rows admitted meanwhile and counted with them. Those may move what
-        memory holds to the file: rows it took are sent again from there, in their place."""
+        memory holds to the file, or drop some of it: the file sends again what it took of
+        these rows, so whatever is left of them stays to be sent again after it, in order."""
         rows = self._memory[:room]
         await self._send(rows)
-        sent = {id(row) for row in rows}
-        self._memory = [row for row in self._memory if id(row) not in sent]
+        if self._memory[: len(rows)] == rows:
+            del self._memory[: len(rows)]
 
     async def _send(self, rows: Sequence[Row]) -> int:
         """Write rows now, raising StorageError only when the database cannot be reached."""

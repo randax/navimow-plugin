@@ -392,6 +392,33 @@ def test_a_write_given_up_on_keeps_its_rows_ahead_of_those_admitted_since(
     assert storage.buffered == 0
 
 
+def test_rows_the_file_took_only_some_of_while_they_were_written_keep_their_order(
+    database: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The file sends again the rows it took, so the rest of what was written with them is
+    # sent again after them: the later description of the Job must be the last one written.
+    monkeypatch.setattr(postgres, "STATEMENT_TIMEOUT_MS", 0)
+    db, spill = Database(database), tmp_path / "buffer.jsonl"
+    storage = BackgroundStorage(db.open, spill, clock=Clock(), disk_bytes=450)  # one Job
+    storage.connect()
+    job = Job("DEVICE_1", "2026-09-30T12:00:00Z", start_time=START, updated_time=START)
+    gap = Gap("DEVICE_1", START, START + timedelta(seconds=1), GapReason.RECONNECT)
+
+    async def scenario() -> None:
+        storage.write_jobs([job, replace(job, mowing_percentage=40)])
+        storage.write_trail(points(0))
+        async with unanswered(db, storage) as writing:
+            storage.write_gaps([gap])  # memory goes to the file, which has room for one row
+            assert spill.read_bytes().count(b"\n") == 1
+        await writing
+
+    asyncio.run(scenario())
+
+    with psycopg.connect(database) as conn:
+        assert conn.execute("SELECT mowing_percentage FROM job").fetchall() == [(40,)]
+    assert (storage.buffered, len(gaps(database))) == (0, 1)
+
+
 def test_a_buffer_written_out_by_a_thread_is_not_flushed_by_waiting_on_the_database(
     database: str, tmp_path: Path
 ) -> None:
