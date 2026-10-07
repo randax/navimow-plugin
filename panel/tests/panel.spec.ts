@@ -31,6 +31,8 @@ const test = base.extend<{
   openInteraction: (title: string) => Promise<Locator>;
   coverageDashboard: Dashboard;
   openCoverage: (title: string) => Promise<Locator>;
+  lifecycleDashboard: Dashboard;
+  openLifecycle: (title: string) => Promise<Locator>;
 }>({
   // Pull requests must not depend on, or load, third-party tile services: tiles come from fixtures.
   // The nightly run sets LIVE_TILES=1 to exercise the real hosts.
@@ -101,6 +103,13 @@ const test = base.extend<{
     use(await readProvisionedDashboard({ fileName: 'navimow-coverage.json' })),
   openCoverage: async ({ gotoDashboardPage, coverageDashboard }, use) =>
     use(async (title) => (await gotoDashboardPage(coverageDashboard)).getPanelByTitle(title).locator),
+  // A made-up lawn again, in a row that can be collapsed: three Jobs side by side, each running from
+  // 15 m south of the dock to 15 m north of it. Job a is 10 m west of the dock, Job b runs through it
+  // and Job c is 10 m east, where it ends with a turn 10 m further east.
+  lifecycleDashboard: async ({ readProvisionedDashboard }, use) =>
+    use(await readProvisionedDashboard({ fileName: 'navimow-map-lifecycle.json' })),
+  openLifecycle: async ({ gotoDashboardPage, lifecycleDashboard }, use) =>
+    use(async (title) => (await gotoDashboardPage(lifecycleDashboard)).getPanelByTitle(title).locator),
 });
 
 /** Waits for an image tile from the host; a 200 carrying an error document does not count. */
@@ -170,14 +179,14 @@ const pixelsOf = async (page: Page, panel: Locator) => {
 };
 const NEEDS_FIXTURE_TILES = 'real tiles have no known colours or height';
 
-// The interaction dashboard's dock, and the length of a degree there.
+// The dock of the made-up lawns, and the length of a degree there.
 const DOCK = { lon: 10.672, lat: 59.964 };
 const METRES_PER_DEGREE = { lon: 55860.6, lat: 111411.7 };
 
 /**
- * A place on the interaction dashboard's map, in metres east and north of the dock, as a position
- * to point at. The map there looks straight down with north up, where a metre is the same number
- * of pixels in both directions.
+ * A place on the map of a made-up lawn, in metres east and north of the dock, as a position to
+ * point at. The map there looks straight down with north up, where a metre is the same number of
+ * pixels in both directions.
  */
 const metresFromDock = async (panel: Locator, east: number, north: number) => {
   const { center, zoom } = await cameraOf(panel);
@@ -195,6 +204,29 @@ const pointAt = async (panel: Locator, east: number, north: number) => {
   const { x, y } = await metresFromDock(panel, east, north);
   await map.hover({ position: { x: x + 2, y: y + 2 } });
   await map.hover({ position: { x, y } });
+};
+
+/**
+ * The colour drawn at a place on the map of a made-up lawn: of the pixels within a few of it, the
+ * one least like the fixture Base map's green, as a line two pixels wide is easily missed by one.
+ */
+const colourAt = async (page: Page, panel: Locator, east: number, north: number) => {
+  const screenshot = await panel.getByTestId('navimow-map').screenshot();
+  return page.evaluate(
+    async ({ png, x, y }) => {
+      const image = new Image();
+      image.src = `data:image/png;base64,${png}`;
+      await image.decode();
+      const canvas = Object.assign(document.createElement('canvas'), { width: image.width, height: image.height });
+      const context = canvas.getContext('2d')!;
+      context.drawImage(image, 0, 0);
+      const { data } = context.getImageData(Math.round(x) - 4, Math.round(y) - 4, 9, 9);
+      const pixels = Array.from({ length: data.length / 4 }, (_, i) => [...data.slice(4 * i, 4 * i + 3)]);
+      const fromGreen = ([r, g, b]: number[]) => Math.hypot(r - 122, g - 184, b - 107);
+      return pixels.reduce((a, b) => (fromGreen(b) > fromGreen(a) ? b : a));
+    },
+    { png: screenshot.toString('base64'), ...(await metresFromDock(panel, east, north)) }
+  );
 };
 
 /** The map's control with this name. */
@@ -383,28 +415,163 @@ test('a panel saved by an earlier version keeps its whole Dock origin when one v
 
 test('each panel releases its map when it unmounts', async ({
   gotoDashboardPage,
-  readProvisionedDashboard,
+  lifecycleDashboard,
   selectors,
   page,
 }) => {
   const warnings: string[] = [];
   page.on('console', (m) => m.text().includes('Too many active WebGL contexts') && warnings.push(m.text()));
-  const dashboardPage = await gotoDashboardPage(
-    await readProvisionedDashboard({ fileName: 'navimow-map-lifecycle.json' })
-  );
+  const dashboardPage = await gotoDashboardPage(lifecycleDashboard);
   const maps = page.locator('canvas.maplibregl-canvas');
+  // The Trail puts the mower on each map, to be taken off with it.
+  const mowers = page.getByRole('img', { name: /^Mower/ });
   const row = dashboardPage.getByGrafanaSelector(selectors.components.DashboardRow.title('Map row'));
   await expect(maps).toHaveCount(1);
+  await expect(mowers).toHaveCount(1);
 
   // Collapsing a row unmounts its panels. Twenty remounts pass Chromium's cap of 16 live WebGL
   // contexts if any leak, and it then evicts the oldest with a console warning.
   for (let round = 0; round < 20; round++) {
     await row.click();
     await expect(maps).toHaveCount(0);
+    await expect(mowers).toHaveCount(0);
     await row.click();
     await expect(maps).toHaveCount(1);
+    await expect(mowers).toHaveCount(1);
   }
   expect(warnings).toEqual([]);
+});
+
+test('a Base map switch redraws every Trail, on the map that was there', async ({
+  gotoPanelEditPage,
+  lifecycleDashboard,
+  page,
+}) => {
+  const panelEditPage = await gotoPanelEditPage({ dashboard: lifecycleDashboard, id: '11' });
+  const panel = panelEditPage.panel.locator;
+  const map = panel.getByTestId('navimow-map');
+  await expectDrawn(panel);
+  await expect(map).toHaveAttribute('data-trails-drawn', '3');
+  const canvas = await panel.locator('canvas.maplibregl-canvas').elementHandle();
+
+  await Promise.all([
+    panelEditPage.getCustomOptions('Base map').getSelect('Base map').selectOption('OpenStreetMap'),
+    tileFrom(page, 'tile.openstreetmap.org'),
+  ]);
+  // The new style is in and has been drawn, which is when the Trails are counted again.
+  await expect(panel.locator('.maplibregl-ctrl-attrib')).toContainText('© OpenStreetMap contributors');
+  await expectDrawn(panel);
+  await expect(map).toHaveAttribute('data-trails-drawn', '3');
+  expect(await canvas?.evaluate((element) => element.isConnected)).toBe(true);
+});
+
+test('Trails that arrive in the middle of a Base map switch are drawn on the new Base map', async ({
+  gotoPanelEditPage,
+  lifecycleDashboard,
+  page,
+}) => {
+  // The panel opens on Job a alone, the others cut from what the query asks for until a refresh.
+  let jobs = /job-a/;
+  await page.route(/\/api\/ds\/query/, (route) => {
+    const body = route.request().postDataJSON();
+    const [header, ...rows]: string[] = body.queries[0].csvContent.split('\n');
+    body.queries[0].csvContent = [header, ...rows.filter((row) => jobs.test(row))].join('\n');
+    return route.fallback({ postData: body });
+  });
+  // And the new Base map's tiles are kept back, until the test serves them.
+  let serveTiles = () => {};
+  const served = new Promise<void>((serve) => (serveTiles = serve));
+  await page.route(
+    (url) => url.host === 'tile.openstreetmap.org',
+    async (route) => {
+      await served;
+      await route.fallback();
+    }
+  );
+  const panelEditPage = await gotoPanelEditPage({ dashboard: lifecycleDashboard, id: '11' });
+  const panel = panelEditPage.panel.locator;
+  const map = panel.getByTestId('navimow-map');
+  await expectDrawn(panel);
+  await expect(map).toHaveAttribute('data-trails-drawn', '1');
+  const mower = panel.getByRole('img', { name: /^Mower/ });
+  const afterJobA = (await mower.boundingBox())!;
+
+  await panelEditPage.getCustomOptions('Base map').getSelect('Base map').selectOption('OpenStreetMap');
+  // The switch is under way, and stays so for as long as the new Base map has no tiles.
+  await expect(map).not.toHaveAttribute('data-map-idle');
+  jobs = /job-[abc]/;
+  await panelEditPage.refreshPanel();
+  // The panel has the new Trails once the mower is where they end, 30 m east of where Job a did.
+  await expect.poll(async () => (await mower.boundingBox())!.x).toBeGreaterThan(afterJobA.x + 50);
+  await expect(map).not.toHaveAttribute('data-map-idle');
+
+  serveTiles();
+  await expectDrawn(panel);
+  await expect(panel.locator('.maplibregl-ctrl-attrib')).toContainText('© OpenStreetMap contributors');
+  await expect(map).toHaveAttribute('data-trails-drawn', '3');
+  // The mower moved there: it was not put on the map a second time.
+  await expect(mower).toHaveCount(1);
+});
+
+test('the panel opens with the whole Trail in view, and little else', async ({ openLifecycle }) => {
+  const panel = await openLifecycle('Map in a row');
+  await expectDrawn(panel);
+  const { width, height } = (await panel.getByTestId('navimow-map').boundingBox())!;
+  // The Trail's corners: Job a starts in the south-west, and Job c ends in the north-east.
+  const southWest = await metresFromDock(panel, -10, -15);
+  const northEast = await metresFromDock(panel, 20, 15);
+  expect(southWest.x).toBeGreaterThan(0);
+  expect(southWest.y).toBeLessThan(height);
+  expect(northEast.x).toBeLessThan(width);
+  expect(northEast.y).toBeGreaterThan(0);
+  // Seen from near enough to be a lawn, not a dot on the map of Norway that a panel starts from.
+  expect(southWest.y - northEast.y).toBeGreaterThan(height / 4);
+});
+
+test('each Job is drawn as a Trail in a colour of its own', async ({ openLifecycle, page }) => {
+  test.skip(LIVE_TILES, NEEDS_FIXTURE_TILES);
+  const panel = await openLifecycle('Map in a row');
+  await expectDrawn(panel);
+  await expect(panel.getByTestId('navimow-map')).toHaveAttribute('data-trails-drawn', '3');
+  // Coverage lies over the same ground, and the Trail is drawn faintly while it shows.
+  await setShown(page, panel, 'Coverage', false);
+
+  // Each Job where it passes 5 m south of the dock: 10 m west of it, through it, and 10 m east.
+  await expect(async () => {
+    const colours = [
+      await colourAt(page, panel, -10, -5),
+      await colourAt(page, panel, 0, -5),
+      await colourAt(page, panel, 10, -5),
+    ];
+    const apart = ([r, g, b]: number[], [r2, g2, b2]: number[]) => Math.hypot(r - r2, g - g2, b - b2);
+    const FIXTURE_GREEN = [122, 184, 107];
+    for (const [i, colour] of colours.entries()) {
+      expect(apart(colour, FIXTURE_GREEN), `a Trail is drawn where Job ${'abc'[i]} ran`).toBeGreaterThan(60);
+      for (const other of colours.slice(i + 1)) {
+        expect(apart(colour, other), `${colour} and ${other} are told apart`).toBeGreaterThan(60);
+      }
+    }
+  }).toPass({ timeout: 20_000 });
+});
+
+test('the mower is an arrow pointing where it was last heading, faded once that was long ago', async ({
+  openLifecycle,
+}) => {
+  const panel = await openLifecycle('Map in a row');
+  await expectDrawn(panel);
+  // The fixture is from September 2026, so its last position is days old by now.
+  const mower = panel.getByRole('img', { name: /^Mower, last seen \d+ d ago$/ });
+  await expect(mower).toHaveCSS('opacity', '0.75');
+  await expect(panel.getByText(/^Last seen \d+ d ago$/)).toBeVisible();
+
+  // An arrow, where a mower of unknown heading is a dot. Job c ended on its way east: a quarter
+  // turn to the right of the arrow's own up.
+  await expect(mower.locator('path')).toHaveCount(1);
+  const turned = await mower.evaluate((marker) => {
+    const { a, b } = new DOMMatrix(getComputedStyle(marker).transform);
+    return (Math.atan2(b, a) * 180) / Math.PI;
+  });
+  expect(turned).toBeCloseTo(90, 1);
 });
 
 test('the switch on the panel recreates the map in terrain and back, without the view jumping', async ({
