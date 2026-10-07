@@ -1118,7 +1118,7 @@ def test_collecting_continues_until_stopped_then_disconnects(live: Live) -> None
     assert gaps(live.db.dsn) == [("DEVICE_1", at(NOW + 45), at(NOW + 3600), "restart")]
 
 
-def test_a_backlog_is_drained_promptly_without_holding_the_loop(live: Live) -> None:
+def test_a_backlog_is_written_out_without_waiting_for_further_ticks(live: Live) -> None:
     # The mower is written as the collector starts: a write like any other, which takes a
     # slice of the backlog with it.
     backlog = 3 * REPLAY_ROWS + 150

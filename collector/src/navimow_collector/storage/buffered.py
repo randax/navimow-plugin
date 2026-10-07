@@ -51,7 +51,7 @@ class _Attempt:
     outage: StorageError | None = None  # why the database could not be reached, if so
 
 
-def _attempt(
+def _make_attempt(
     storage: Storage | None, opener: Callable[[], Storage], rows: Sequence[Row]
 ) -> _Attempt:
     """Write rows over the connection given, or a new one. Nothing of the buffer is touched,
@@ -79,7 +79,7 @@ def _store(storage: Storage, rows: Sequence[Row], refused: list[tuple[Row, Rejec
         return 0
 
 
-def _now(steps: Coroutine[Any, Any, _T]) -> _T:
+def _at_once(steps: Coroutine[Any, Any, _T]) -> _T:
     """Run to its end a coroutine with nothing to wait for: the buffer's steps are written
     once, for a caller who waits on the database itself and for one with a loop to keep free."""
     try:
@@ -209,7 +209,7 @@ class BufferedStorage:
         At most REPLAY_ROWS rows a call, oldest first: the backlog of a long outage written
         in one go would hold the caller for minutes. `draining` says whether to call again.
         """
-        _now(self._flush())
+        _at_once(self._flush())
 
     async def _flush(self) -> None:
         if not self.draining:
@@ -248,7 +248,7 @@ class BufferedStorage:
         self.flush()
         if not self.buffered:
             try:
-                return _now(self._send(rows))
+                return _at_once(self._send(rows))
             except StorageError as error:
                 self._outage(error)
         self._admit(rows)
@@ -294,7 +294,7 @@ class BufferedStorage:
 
     async def _ask_database(self, rows: Sequence[Row]) -> _Attempt:
         """Have the database take rows, the caller waiting for as long as that takes."""
-        return _attempt(self._storage, self._open, rows)
+        return _make_attempt(self._storage, self._open, rows)
 
     def _outage(self, error: StorageError) -> None:
         if self._storage is not None:
@@ -370,14 +370,12 @@ class BufferedStorage:
                 self._forget_position_in_another_file(spill)
                 if self._uncounted:
                     self._spilled, self._uncounted = sum(1 for _ in spill), False
-                spill.seek(self._replayed)
+                start = spill.seek(self._replayed)
                 lines = list(islice(spill, limit))
                 self._unreadable_until = None
-                end, read_from = spill.tell(), _identity(spill)
             # A line cut short by a crash is skipped rather than blocking the rest.
             await self._send([row for row in map(_decode, lines) if row is not None])
-            self._replayed, self._replayed_file = end, read_from
-            if self._more_in_file():
+            if self._more_in_file_after(start, b"".join(lines)):
                 self._spilled = max(self._spilled - len(lines), 1)  # more for a later call
                 return len(lines)
         except (FileNotFoundError, NotADirectoryError):
@@ -401,12 +399,20 @@ class BufferedStorage:
             _LOGGER.error("Buffer file %s is sent but cannot be removed: %s", self._spill, error)
         return len(lines)
 
-    def _more_in_file(self) -> bool:
-        """Whether the buffer file holds rows past those sent. It is looked at afresh: while
-        they were being sent, rows may have been added to it, or the file emptied or replaced."""
+    def _more_in_file_after(self, start: int, sent: bytes) -> bool:
+        """Note that the lines read from `start` are sent; return whether the file holds more.
+
+        The file is looked at afresh: while they were being sent, rows may have been added
+        to it, or it may have been emptied or replaced. Only lines still where they were
+        read move the position past them; otherwise all the file holds now is unsent.
+        """
         try:
             with self._spill.open("rb") as spill:
-                self._forget_position_in_another_file(spill)
+                spill.seek(start)
+                if spill.read(len(sent)) != sent:
+                    self._replayed = 0
+                elif sent:
+                    self._replayed, self._replayed_file = spill.tell(), _identity(spill)
                 return _size(spill) > self._replayed
         except (FileNotFoundError, NotADirectoryError):
             return False
@@ -468,7 +474,8 @@ class BackgroundStorage(BufferedStorage):
         self._unanswered: list[threading.Thread] = []  # attempts given up on, still waiting
 
     async def drain(self) -> None:
-        """Write what is waiting, a slice at a time, until none is or the database is away."""
+        """Write what is waiting, a slice at a time, until none is or the database is away.
+        One drain at a time, which is the caller's to see to."""
         while self.draining:
             await self._flush()
 
@@ -491,7 +498,7 @@ class BackgroundStorage(BufferedStorage):
 
         def work() -> None:
             try:
-                attempt = _attempt(storage, self._open, rows)
+                attempt = _make_attempt(storage, self._open, rows)
             except BaseException as error:  # raised where the answer is awaited
                 with suppress(InvalidStateError):
                     done.set_exception(error)
@@ -513,6 +520,10 @@ class BackgroundStorage(BufferedStorage):
                 # is left with the connection, to close it should the database ever let go.
                 self._storage = None
                 self._unanswered.append(thread)
+            elif done.exception() is None:
+                # Answered, even if a stop means nobody waits to hear it: the connection
+                # the attempt left open is the buffer's again, to use or to close.
+                self._storage = done.result().storage
         if done.cancelled():
             return _Attempt(
                 None, outage=StorageError(f"no answer within {self._deadline:g} seconds")

@@ -172,8 +172,7 @@ def test_a_locked_table_delays_rows_rather_than_stalling_the_collector(
     storage = buffered(db, tmp_path, clock)
     storage.write_trail(points(1))
 
-    with psycopg.connect(database) as maintenance:
-        maintenance.execute("LOCK TABLE trail_point IN ACCESS EXCLUSIVE MODE")
+    with db.suspended():
         assert finishes(lambda: storage.write_trail(points(2)), within=5)
         assert storage.buffered == 1
 
@@ -191,8 +190,7 @@ def test_a_statement_timeout_the_operator_set_is_not_shortened(
     storage.write_trail(points(1))
     slow = threading.Thread(target=lambda: storage.write_trail(points(2)), daemon=True)
 
-    with psycopg.connect(database) as maintenance:
-        maintenance.execute("LOCK TABLE trail_point IN ACCESS EXCLUSIVE MODE")
+    with db.suspended():
         slow.start()
         slow.join(1)  # five times the collector's own limit
         assert slow.is_alive()
@@ -277,6 +275,31 @@ def test_a_database_that_keeps_not_answering_is_not_given_ever_more_connections(
 
     assert asyncio.run(scenario()) == 2  # the one it had, and one more to try afresh
     assert db.trail() == [1]
+
+
+def test_a_buffer_file_emptied_while_its_rows_are_being_written_loses_none_added_since(
+    database: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(postgres, "STATEMENT_TIMEOUT_MS", 0)
+    db, spill = Database(database), tmp_path / "buffer.jsonl"
+    storage = BackgroundStorage(db.open, spill, clock=Clock(), memory_rows=0)
+    storage.connect()
+
+    async def scenario() -> None:
+        storage.write_trail(points(0))
+        with db.suspended():
+            writing = asyncio.ensure_future(storage.drain())
+            while not db.held():
+                await asyncio.sleep(0.01)
+            spill.write_bytes(b"")  # an operator making room
+            storage.write_trail(points(1))
+            storage.write_trail(points(2))  # the file is now longer than what was sent of it
+        await writing
+
+    asyncio.run(scenario())
+
+    assert db.trail() == [0, 1, 2]
+    assert storage.buffered == 0
 
 
 def test_rows_written_during_an_outage_arrive_when_the_database_returns(

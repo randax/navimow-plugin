@@ -178,9 +178,7 @@ class Collector:
     async def tick(self) -> None:
         """Do whatever is due; called every few seconds for the life of the process."""
         work = self._vendor_work
-        if work is None or work.done():
-            if work is not None:
-                work.result()  # what went wrong in the background is raised here, as inline
+        if work is None or _over(work):
             work = self._vendor_work = asyncio.ensure_future(self._keep_access())
         with suppress(TimeoutError):
             await asyncio.wait_for(asyncio.shield(work), VENDOR_WAIT_SECONDS)
@@ -192,12 +190,8 @@ class Collector:
 
     def _write_out(self) -> None:
         """Have what waits in the buffer written, off this loop and one write at a time."""
-        work = self._writing
-        if work is None or work.done():
-            if work is not None and not work.cancelled():
-                work.result()  # what went wrong in the background is raised here, as inline
-            if self._storage.draining:
-                self._writing = asyncio.ensure_future(self._storage.drain())
+        if (self._writing is None or _over(self._writing)) and self._storage.draining:
+            self._writing = asyncio.ensure_future(self._storage.drain())
 
     async def written(self) -> None:
         """Wait until nothing more is being written: every row fed so far is in the database,
@@ -466,6 +460,14 @@ class Collector:
             desc = answer.get("desc") if isinstance(answer, dict) else None
             raise RestError(_loggable(str(desc or text), token))
         return answer
+
+
+def _over(work: asyncio.Future[None]) -> bool:
+    """Whether background work has ended. What went wrong in it is raised here, as if it
+    had been done inline; work that was called off went wrong in nothing."""
+    if work.done() and not work.cancelled():
+        work.result()
+    return work.done()
 
 
 def _loggable(text: str, token: str) -> str:
