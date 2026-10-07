@@ -38,7 +38,6 @@ from navimow_collector.auth import (
 from navimow_collector.cli import main
 from navimow_collector.health import STALL_SECONDS, Snapshot, status_code
 from navimow_collector.live import (
-    DRAIN_SECONDS,
     KEEPALIVE_SECONDS,
     TICK_SECONDS,
     Broker,
@@ -46,7 +45,14 @@ from navimow_collector.live import (
     Collector,
     connect_broker,
 )
-from navimow_collector.storage.buffered import REPLAY_ROWS, RETRY_SECONDS, BufferedStorage
+from navimow_collector.storage import postgres
+from navimow_collector.storage.buffered import (
+    REPLAY_ROWS,
+    RETRY_SECONDS,
+    WRITE_SECONDS,
+    BackgroundStorage,
+    BufferedStorage,
+)
 
 from .conftest import FIXTURE, Clock, free_port, gaps
 from .test_auth import Request, Response, logged_in, token
@@ -141,11 +147,18 @@ class FakeBroker:
     on_disconnected: Callable[[], Awaitable[None]] | None = None
     on_raw: Callable[[str, bytes], Awaitable[None]] | None = None
 
-    def __init__(self, credentials: BrokerCredentials, mowers: Sequence[str]) -> None:
+    def __init__(
+        self,
+        credentials: BrokerCredentials,
+        mowers: Sequence[str],
+        written: Callable[[], Awaitable[None]],
+    ) -> None:
         self.credentials = credentials
         self.mowers = list(mowers)
         self.connecting = False
         self.is_connected = False
+        # The collector writes off its loop: a test waits here for what its message became.
+        self.written = written
 
     def connect_async(self) -> None:
         self.connecting = True
@@ -169,15 +182,18 @@ class FakeBroker:
         assert self.connecting and self.on_connected
         self.is_connected = True
         await self.on_connected()
+        await self.written()
 
     async def drop(self) -> None:
         assert self.on_disconnected
         self.is_connected = False
         await self.on_disconnected()
 
-    async def deliver(self, topic: str, payload: Any) -> None:
+    async def deliver(self, topic: str, payload: Any, *, written: bool = True) -> None:
         assert self.on_raw
         await self.on_raw(topic, json.dumps(payload).encode())
+        if written:
+            await self.written()
 
 
 class Live:
@@ -193,25 +209,30 @@ class Live:
         self.brokers: list[FakeBroker] = []
 
     def start(
-        self, connect: Callable[[BrokerCredentials, Sequence[str]], Broker] | None = None
+        self,
+        connect: Callable[[BrokerCredentials, Sequence[str]], Broker] | None = None,
+        deadline: float = WRITE_SECONDS,
     ) -> Collector:
         """A new collector process over whatever state the last one left behind."""
-        storage = BufferedStorage(self.db.open, self.state / "buffer.jsonl", clock=self.clock)
-        storage.connect()
+        self.storage = BackgroundStorage(
+            self.db.open, self.state / "buffer.jsonl", clock=self.clock, deadline=deadline
+        )
+        self.storage.connect()
         tokens = TokenManager(
             TokenClient(self.vendor, "id", "secret"), self.store, clock=self.clock
         )
-        return Collector(
+        self.collector = Collector(
             self.vendor,
             tokens,
-            storage,
+            self.storage,
             self.state,
             connect=connect or self._connect,
             clock=self.clock,
         )
+        return self.collector
 
     def _connect(self, credentials: BrokerCredentials, mowers: Sequence[str]) -> FakeBroker:
-        self.brokers.append(FakeBroker(credentials, mowers))
+        self.brokers.append(FakeBroker(credentials, mowers, self.collector.written))
         return self.broker
 
     @property
@@ -387,7 +408,12 @@ def test_a_crash_while_recording_a_gap_does_not_lose_the_outage(live: Live) -> N
 
     asyncio.run(scenario())
 
-    assert gaps(live.db.dsn) == [("DEVICE_1", at(NOW + 100), at(NOW + 3600), "restart")]
+    # The gap was in the buffer file before its start was forgotten: the next start writes
+    # it, and the time from there to itself as a gap of its own.
+    assert gaps(live.db.dsn) == [
+        ("DEVICE_1", at(NOW + 100), at(NOW + 340), "reconnect"),
+        ("DEVICE_1", at(NOW + 340), at(NOW + 3600), "restart"),
+    ]
 
 
 def test_a_restart_writes_a_gap_from_when_the_stream_last_flowed(live: Live) -> None:
@@ -846,10 +872,88 @@ def test_points_survive_a_database_outage_while_live(live: Live) -> None:
         live.db.down = False
         live.clock.now = NOW + RETRY_SECONDS
         await collector.tick()  # no message needed: the database is retried on a timer
+        await collector.written()
 
     asyncio.run(scenario())
 
     assert [row[1] for row in live.trail()] == [at(NOW + 1), at(NOW + 3), at(NOW + 5)]
+
+
+async def until(happened: Callable[[], object]) -> None:
+    """Let the loop run until something has happened, which it must within a few seconds."""
+    async with asyncio.timeout(5):
+        while not happened():
+            await asyncio.sleep(0.01)
+
+
+def test_a_database_that_stops_answering_holds_up_neither_collection_nor_a_stop(
+    live: Live, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A backend suspended mid-statement keeps its connection open and says nothing: neither
+    # the statement timeout nor TCP ends the wait for it.
+    monkeypatch.setattr(postgres, "STATEMENT_TIMEOUT_MS", 0)
+    monkeypatch.setattr(live_module, "STOP_SECONDS", 0.05)
+    location = LOCATION.format("DEVICE_1")
+    ticks = 0
+
+    async def wait(stop: asyncio.Event, seconds: float) -> None:
+        nonlocal ticks
+        ticks += 1
+        await asyncio.sleep(0.01)
+
+    async def scenario() -> Snapshot:
+        stop = asyncio.Event()
+        collector = live.start()
+        collecting = asyncio.create_task(collector.collect(stop, wait))
+        await until(lambda: live.brokers)
+        await live.broker.accept()
+        with live.db.suspended():
+            await live.broker.deliver(location, pose(at(NOW + 1)), written=False)
+            await until(live.db.held)
+            await live.broker.deliver(location, pose(at(NOW + 3)), written=False)
+            live.clock.now = NOW + 3400  # the token falls due for its refresh
+            await until(lambda: live.vendor.count("oauth/getAccessToken"))
+            ticked = ticks
+            await until(lambda: ticks > ticked + 1)
+            snapshot = collector.snapshot()
+            stop.set()
+            async with asyncio.timeout(2):
+                await collecting
+            live.storage.close()  # as the command does once collection has ended
+        return snapshot
+
+    snapshot = asyncio.run(scenario())
+
+    assert (snapshot.buffered_rows, status_code(snapshot)) == (2, 200)
+    assert not live.broker.connecting
+    asyncio.run(live.connected())  # the next start finds both points waiting on disk
+    assert [row[1] for row in live.trail()] == [at(NOW + 1), at(NOW + 3)]
+
+
+def test_a_write_the_database_never_answers_is_given_up_on_and_made_again(
+    live: Live, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(postgres, "STATEMENT_TIMEOUT_MS", 0)
+
+    async def scenario() -> list[Snapshot]:
+        collector = live.start(deadline=0.2)
+        await collector.tick()
+        await live.broker.accept()
+        with live.db.suspended():
+            async with asyncio.timeout(5):  # the collector's own clock ends the wait
+                await live.broker.deliver(LOCATION.format("DEVICE_1"), pose(at(NOW + 1)))
+            seen = [collector.snapshot()]
+        live.clock.now = NOW + RETRY_SECONDS
+        await collector.tick()
+        await collector.written()
+        return [*seen, collector.snapshot()]
+
+    given_up, recovered = asyncio.run(scenario())
+
+    assert (given_up.database_reachable, given_up.buffered_rows) == (False, 1)
+    assert "no answer within 0.2 seconds" in caplog.text
+    assert (recovered.database_reachable, recovered.buffered_rows) == (True, 0)
+    assert [row[1] for row in live.trail()] == [at(NOW + 1)]
 
 
 def test_health_reports_each_mowers_last_message_age(database: str, tmp_path: Path) -> None:
@@ -881,6 +985,7 @@ def test_health_reports_the_broker_the_database_and_the_buffer(live: Live) -> No
         live.db.down = False
         live.clock.now = NOW + RETRY_SECONDS
         await collector.tick()
+        await collector.written()
         seen.append(collector.snapshot())
         return seen
 
@@ -1026,13 +1131,14 @@ def test_a_backlog_is_drained_promptly_without_holding_the_loop(live: Live) -> N
 
     async def wait(stop: asyncio.Event, seconds: float) -> None:
         pauses.append(seconds)
-        if seconds == TICK_SECONDS:
-            stop.set()
+        await live.collector.written()
+        stop.set()
 
     asyncio.run(live.start().collect(asyncio.Event(), wait))
 
-    # One slice a tick, the next tick at once while rows remain, then the usual pace.
-    assert pauses == [DRAIN_SECONDS, DRAIN_SECONDS, TICK_SECONDS]
+    # One tick sets the writing off; it carries on a slice at a time, off the loop, with
+    # no further tick to wait for.
+    assert pauses == [TICK_SECONDS]
     assert len(live.trail()) == backlog
 
 

@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import shutil
-from collections.abc import Callable, Iterator, Sequence
+import threading
+from collections.abc import Callable, Coroutine, Iterator, Sequence
+from concurrent.futures import Future, InvalidStateError
 from contextlib import suppress
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from itertools import islice
 from pathlib import Path
 from time import monotonic
-from typing import Any, BinaryIO, get_args
+from typing import Any, BinaryIO, TypeVar, cast, get_args
 
 from ..records import Gap, GapReason, Job, Mower, MowerState, Progress, Row, TrailPoint
 from .base import RejectedError, Storage, StorageError, write_rows
@@ -23,18 +26,77 @@ RETRY_SECONDS = 10
 MEMORY_ROWS = 1000
 # Roughly ten days of continuous mowing, so a full disk is never the collector's doing.
 DISK_BYTES = 64 * 1024 * 1024
-# How many waiting rows one call writes; live collection calls from its event loop.
+# How many waiting rows one attempt writes, so that a backlog is never one long statement.
 REPLAY_ROWS = 200
+# How long live collection waits for the database to answer one attempt before giving up on
+# the connection. Its own clock decides, not the server: well past what a server that is
+# answering takes to refuse (the connection and statement timeouts of `postgres`).
+WRITE_SECONDS = 30
+# How many attempts given up on may be left unanswered before no new connection is opened.
+# One fresh connection gets past a backend suspended under the old one; more would only
+# crowd a database that is answering nobody.
+UNANSWERED_ATTEMPTS = 2
 _ROWS: dict[str, type[Row]] = {kind.__name__: kind for kind in get_args(Row)}
 _LOGGER = logging.getLogger(__name__)
+_T = TypeVar("_T")
+
+
+@dataclass(frozen=True)
+class _Attempt:
+    """What one attempt to write rows came to."""
+
+    storage: Storage | None  # the connection it leaves open
+    written: int = 0
+    refused: Sequence[tuple[Row, RejectedError]] = ()
+    outage: StorageError | None = None  # why the database could not be reached, if so
+
+
+def _attempt(
+    storage: Storage | None, opener: Callable[[], Storage], rows: Sequence[Row]
+) -> _Attempt:
+    """Write rows over the connection given, or a new one. Nothing of the buffer is touched,
+    so this may run on a thread of its own."""
+    refused: list[tuple[Row, RejectedError]] = []
+    try:
+        if storage is None:
+            storage = opener()
+        return _Attempt(storage, _store(storage, rows, refused), refused)
+    except StorageError as error:
+        if storage is not None:
+            storage.close()
+        return _Attempt(None, refused=refused, outage=error)
+
+
+def _store(storage: Storage, rows: Sequence[Row], refused: list[tuple[Row, RejectedError]]) -> int:
+    try:
+        return sum(write_rows(storage, rows).values())
+    except RejectedError as error:
+        # Retrying cannot help a row the database refuses for what it holds, and it would
+        # keep every row behind it waiting: find it, drop it, keep the rest.
+        if len(rows) > 1:
+            return sum(_store(storage, [row], refused) for row in rows)
+        refused.append((rows[0], error))
+        return 0
+
+
+def _now(steps: Coroutine[Any, Any, _T]) -> _T:
+    """Run to its end a coroutine with nothing to wait for: the buffer's steps are written
+    once, for a caller who waits on the database itself and for one with a loop to keep free."""
+    try:
+        steps.send(None)
+    except StopIteration as done:
+        return cast(_T, done.value)
+    steps.close()
+    raise RuntimeError("the database is waited on elsewhere; use drain()")
 
 
 class BufferedStorage:
-    """The writer live collection uses: rows the database cannot take now are kept for later.
+    """A writer for which rows the database cannot take now are kept for later.
 
-    Rows wait in memory, spill to a file once memory holds `memory_rows`, and are written
-    when the database returns. Every insert is idempotent and every row carries its own
-    time, so neither a repeated row nor the order of a flush can corrupt a Trail.
+    This one waits on the database itself; live collection uses `BackgroundStorage`, which
+    does not. Rows wait in memory, spill to a file once memory holds `memory_rows`, and are
+    written when the database returns. Every insert is idempotent and every row carries its
+    own time, so neither a repeated row nor the order of a flush can corrupt a Trail.
 
     Nothing here stops collection: a database that is away is waited for, a row it rejects
     is dropped, and a buffer file that misbehaves costs rows, never the process.
@@ -56,6 +118,7 @@ class BufferedStorage:
         self._clock = clock
         self._storage: Storage | None = None
         self._memory: list[Row] = []
+        self._flying: Sequence[Row] = ()  # rows out of memory which the database has now
         # What a previous process left. A file that is there but cannot be read owes rows
         # all the same: it stands for one until the first read can count them.
         waiting = _count_lines(spill)
@@ -83,7 +146,7 @@ class BufferedStorage:
     @property
     def buffered(self) -> int:
         """How many rows are waiting for the database."""
-        return len(self._memory) + self._spilled
+        return len(self._memory) + len(self._flying) + self._spilled
 
     @property
     def draining(self) -> bool:
@@ -146,15 +209,17 @@ class BufferedStorage:
         At most REPLAY_ROWS rows a call, oldest first: the backlog of a long outage written
         in one go would hold the caller for minutes. `draining` says whether to call again.
         """
+        _now(self._flush())
+
+    async def _flush(self) -> None:
         if not self.draining:
             return
         room = REPLAY_ROWS
         try:
             if self._file_is_due():
-                room -= self._replay_spill(room)
+                room -= await self._replay_spill(room)
             if not self._file_is_due() and self._memory and room > 0:
-                self._send(self._memory[:room])
-                del self._memory[:room]
+                await self._send_memory(room)
         except StorageError as error:
             self._outage(error)
             return
@@ -165,6 +230,9 @@ class BufferedStorage:
         """Write one last slice, then leave what is still waiting on disk for the next start."""
         self._retry_at = 0.0
         self.flush()
+        self._save()
+
+    def _save(self) -> None:
         if self._memory:
             self._spill_memory()
         if self._memory:
@@ -180,41 +248,53 @@ class BufferedStorage:
         self.flush()
         if not self.buffered:
             try:
-                return self._send(rows)
+                return _now(self._send(rows))
             except StorageError as error:
                 self._outage(error)
+        self._admit(rows)
+        return 0
+
+    def _admit(self, rows: Sequence[Row]) -> None:
+        """Keep rows for a later flush: in memory, and beyond what it may hold in the file."""
         self._memory.extend(rows)
         # A gap goes to disk at once: its writer forgets when it started as soon as it has
         # handed it over, so it must not be lost with this process.
         if len(self._memory) > self._memory_rows or any(isinstance(row, Gap) for row in rows):
             self._spill_memory()
-        return 0
 
-    def _send(self, rows: Sequence[Row]) -> int:
-        """Write rows now, raising StorageError only when the database cannot be reached."""
-        written = self._attempt(rows)
-        self.written += written
-        self._refused.difference_update(rows)  # done with: these will not be tried again
-        return written
-
-    def _attempt(self, rows: Sequence[Row]) -> int:
-        if self._storage is None:
-            self._storage = self._open()
-            if self._away:
-                _LOGGER.info("Database reachable again; writing what was buffered")
-                self._away = False
+    async def _send_memory(self, room: int) -> None:
+        """Send the oldest rows in memory. They are set apart while the database has them:
+        rows admitted meanwhile may move what memory holds to the file."""
+        self._flying, self._memory = self._memory[:room], self._memory[room:]
         try:
-            return sum(write_rows(self._storage, rows).values())
-        except RejectedError as error:
-            # Retrying cannot help a row the database refuses for what it holds, and it
-            # would keep every row behind it waiting: find it, drop it, keep the rest.
-            if len(rows) > 1:
-                return sum(self._attempt([row]) for row in rows)
-            if rows[0] not in self._refused:
-                self._refused.add(rows[0])
+            await self._send(self._flying)
+        except BaseException:  # an outage, or a send given up on: they wait again, in front
+            self._memory[:0] = self._flying
+            raise
+        finally:
+            self._flying = ()
+
+    async def _send(self, rows: Sequence[Row]) -> int:
+        """Write rows now, raising StorageError only when the database cannot be reached."""
+        attempt = await self._ask_database(rows)
+        self._storage = attempt.storage
+        for row, error in attempt.refused:
+            if row not in self._refused:
+                self._refused.add(row)
                 self.rejected += 1
-                _LOGGER.error("Dropping a row the database rejected (%s): %r", error, rows[0])
-            return 0
+                _LOGGER.error("Dropping a row the database rejected (%s): %r", error, row)
+        if attempt.outage is not None:
+            raise attempt.outage
+        if self._away:
+            _LOGGER.info("Database reachable again; writing what was buffered")
+            self._away = False
+        self.written += attempt.written
+        self._refused.difference_update(rows)  # done with: these will not be tried again
+        return attempt.written
+
+    async def _ask_database(self, rows: Sequence[Row]) -> _Attempt:
+        """Have the database take rows, the caller waiting for as long as that takes."""
+        return _attempt(self._storage, self._open, rows)
 
     def _outage(self, error: StorageError) -> None:
         if self._storage is not None:
@@ -277,7 +357,7 @@ class BufferedStorage:
             others = others[: max(self._memory_rows - len(gaps), 0)]
             self._memory = [*others, *gaps][: self._memory_rows]
 
-    def _replay_spill(self, limit: int) -> int:
+    async def _replay_spill(self, limit: int) -> int:
         """Send up to `limit` lines of the buffer file, from where the last call stopped,
         and remove the file once all of it is sent; return how many lines were taken.
 
@@ -293,12 +373,13 @@ class BufferedStorage:
                 spill.seek(self._replayed)
                 lines = list(islice(spill, limit))
                 self._unreadable_until = None
-                # A line cut short by a crash is skipped rather than blocking the rest.
-                self._send([row for row in map(_decode, lines) if row is not None])
-                self._replayed, self._replayed_file = spill.tell(), _identity(spill)
-                if spill.read(1):
-                    self._spilled = max(self._spilled - len(lines), 1)  # more for a later call
-                    return len(lines)
+                end, read_from = spill.tell(), _identity(spill)
+            # A line cut short by a crash is skipped rather than blocking the rest.
+            await self._send([row for row in map(_decode, lines) if row is not None])
+            self._replayed, self._replayed_file = end, read_from
+            if self._more_in_file():
+                self._spilled = max(self._spilled - len(lines), 1)  # more for a later call
+                return len(lines)
         except (FileNotFoundError, NotADirectoryError):
             # A file never read was never counted: its loss is said, not given a number.
             lost = "an unknown number of" if self._uncounted else self._spilled
@@ -319,6 +400,18 @@ class BufferedStorage:
         except OSError as error:
             _LOGGER.error("Buffer file %s is sent but cannot be removed: %s", self._spill, error)
         return len(lines)
+
+    def _more_in_file(self) -> bool:
+        """Whether the buffer file holds rows past those sent. It is looked at afresh: while
+        they were being sent, rows may have been added to it, or the file emptied or replaced."""
+        try:
+            with self._spill.open("rb") as spill:
+                self._forget_position_in_another_file(spill)
+                return _size(spill) > self._replayed
+        except (FileNotFoundError, NotADirectoryError):
+            return False
+        except OSError:
+            return True  # whatever it holds is owed until it can be read
 
     def _trim_spill(self) -> None:
         """On a clean stop, cut the rows already sent off the front of the buffer file: the
@@ -348,6 +441,83 @@ class BufferedStorage:
         the file that was sent: how far that one was sent says nothing about this one."""
         if _identity(spill) != self._replayed_file or _size(spill) < self._replayed:
             self._replayed = 0
+
+
+class BackgroundStorage(BufferedStorage):
+    """The buffer for a writer with an event loop to keep free: the database is only ever
+    waited on by a thread, one attempt at a time.
+
+    Writing a row only admits it to the buffer, bounded as ever by memory and then the file.
+    `drain` writes what waits, and gives up on an attempt the database has not answered
+    within `deadline` seconds: a backend suspended under an open connection is cut short by
+    neither a statement timeout nor TCP.
+    """
+
+    def __init__(
+        self,
+        opener: Callable[[], Storage],
+        spill: Path,
+        *,
+        deadline: float = WRITE_SECONDS,
+        memory_rows: int = MEMORY_ROWS,
+        disk_bytes: int = DISK_BYTES,
+        clock: Callable[[], float] = monotonic,
+    ) -> None:
+        super().__init__(opener, spill, memory_rows=memory_rows, disk_bytes=disk_bytes, clock=clock)
+        self._deadline = deadline
+        self._unanswered: list[threading.Thread] = []  # attempts given up on, still waiting
+
+    async def drain(self) -> None:
+        """Write what is waiting, a slice at a time, until none is or the database is away."""
+        while self.draining:
+            await self._flush()
+
+    def close(self) -> None:
+        """Leave what is waiting on disk for the next start, without a word to the database:
+        a stop must not wait on one that has stopped answering."""
+        self._save()
+
+    def _write(self, rows: Sequence[Row]) -> int:
+        self._admit(rows)
+        return 0
+
+    async def _ask_database(self, rows: Sequence[Row]) -> _Attempt:
+        """Have the database take rows on a thread of its own, waiting no longer than the
+        deadline for its answer."""
+        storage, done = self._storage, Future[_Attempt]()
+        self._unanswered = [thread for thread in self._unanswered if thread.is_alive()]
+        if storage is None and len(self._unanswered) >= UNANSWERED_ATTEMPTS:
+            return _Attempt(None, outage=StorageError("earlier attempts are still unanswered"))
+
+        def work() -> None:
+            try:
+                attempt = _attempt(storage, self._open, rows)
+            except BaseException as error:  # raised where the answer is awaited
+                with suppress(InvalidStateError):
+                    done.set_exception(error)
+                return
+            try:
+                done.set_result(attempt)
+            except InvalidStateError:  # given up on: nobody is left to take the connection
+                if attempt.storage is not None:
+                    attempt.storage.close()
+
+        thread = threading.Thread(target=work, name="database", daemon=True)
+        thread.start()
+        answer = asyncio.wrap_future(done)
+        try:
+            await asyncio.wait([answer], timeout=self._deadline)
+        finally:
+            if done.cancel():
+                # Given up on, by the deadline or by a stop. The thread cannot be woken: it
+                # is left with the connection, to close it should the database ever let go.
+                self._storage = None
+                self._unanswered.append(thread)
+        if done.cancelled():
+            return _Attempt(
+                None, outage=StorageError(f"no answer within {self._deadline:g} seconds")
+            )
+        return await answer
 
 
 def _version(job: Job) -> tuple[datetime, datetime]:

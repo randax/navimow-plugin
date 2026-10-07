@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import errno
 import os
 import socket
 import threading
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -26,7 +28,12 @@ from navimow_collector.records import (
     TrailPoint,
 )
 from navimow_collector.storage import Storage, StorageError, open_storage, postgres
-from navimow_collector.storage.buffered import REPLAY_ROWS, RETRY_SECONDS, BufferedStorage
+from navimow_collector.storage.buffered import (
+    REPLAY_ROWS,
+    RETRY_SECONDS,
+    BackgroundStorage,
+    BufferedStorage,
+)
 
 from .conftest import Clock, gaps
 
@@ -59,6 +66,24 @@ class Database:
                 "SELECT pg_terminate_backend(pid) FROM pg_stat_activity"
                 " WHERE datname = current_database() AND pid <> pg_backend_pid()"
             )
+
+    @contextmanager
+    def suspended(self) -> Iterator[None]:
+        """Stop answering for the Trail: a write of points sent meanwhile hangs mid-statement,
+        its connection open, until this ends. With the statement timeout off this is, on any
+        server, what a backend suspended under its client looks like from the collector."""
+        with psycopg.connect(self.dsn) as maintenance:
+            maintenance.execute("LOCK TABLE trail_point IN ACCESS EXCLUSIVE MODE")
+            yield
+
+    def held(self) -> bool:
+        """Whether a statement is under way that the suspended database is not answering."""
+        with psycopg.connect(self.dsn) as conn:
+            waiting = conn.execute(
+                "SELECT count(*) FROM pg_stat_activity"
+                " WHERE datname = current_database() AND wait_event_type = 'Lock'"
+            ).fetchone()
+        return waiting is not None and waiting[0] > 0
 
     def trail(self) -> list[int]:
         """The stored points, as the seconds after START they were recorded at."""
@@ -196,6 +221,62 @@ def test_a_database_host_that_never_answers_is_given_up_on(
         assert finishes(connect, within=8)
 
     assert "timeout" in str(errors[0])
+
+
+def test_rows_admitted_while_a_write_is_unanswered_are_bounded_by_memory_then_the_file(
+    database: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(postgres, "STATEMENT_TIMEOUT_MS", 0)
+    db, spill = Database(database), tmp_path / "buffer.jsonl"
+    storage = BackgroundStorage(db.open, spill, clock=Clock(), memory_rows=3)
+    storage.connect()
+
+    async def scenario() -> int:
+        storage.write_trail(points(0))
+        with db.suspended():
+            writing = asyncio.ensure_future(storage.drain())
+            while not db.held():
+                await asyncio.sleep(0.01)
+            for second in range(1, 11):
+                storage.write_trail(points(second))
+            on_disk = spill.read_bytes().count(b"\n")
+        await writing
+        return on_disk
+
+    on_disk = asyncio.run(scenario())
+
+    # One row is with the database and memory never holds more than three: the rest wait
+    # in the file, moved there four at a time as the fourth arrives.
+    assert on_disk == 8
+    assert db.trail() == list(range(11))
+    assert (storage.buffered, storage.written, spill.exists()) == (0, 11, False)
+
+
+def test_a_database_that_keeps_not_answering_is_not_given_ever_more_connections(
+    database: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Each attempt given up on leaves its connection with the database until it answers.
+    monkeypatch.setattr(postgres, "STATEMENT_TIMEOUT_MS", 0)
+    db, clock = Database(database), Clock()
+    storage = BackgroundStorage(db.open, tmp_path / "buffer.jsonl", clock=clock, deadline=0.1)
+    storage.connect()
+
+    async def scenario() -> int:
+        storage.write_trail(points(1))
+        with db.suspended():
+            for _ in range(5):
+                await storage.drain()
+                clock.now += RETRY_SECONDS
+            connections = db.attempts
+        async with asyncio.timeout(5):
+            while storage.buffered:
+                await asyncio.sleep(0.01)  # the attempts given up on are answered at last
+                clock.now += RETRY_SECONDS
+                await storage.drain()
+        return connections
+
+    assert asyncio.run(scenario()) == 2  # the one it had, and one more to try afresh
+    assert db.trail() == [1]
 
 
 def test_rows_written_during_an_outage_arrive_when_the_database_returns(

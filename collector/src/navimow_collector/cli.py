@@ -34,7 +34,7 @@ from .ingest import Ingestor, read_capture
 from .live import Collector
 from .logs import JsonFormatter
 from .storage import StorageError, open_storage
-from .storage.buffered import BufferedStorage
+from .storage.buffered import BackgroundStorage
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -138,7 +138,7 @@ def _collect(config: Config, session_factory: Callable[[], HTTPSession], login_c
             pass
     except OSError as error:
         raise ConfigError(f"collector.state_dir {state_dir} cannot be written: {error}") from error
-    storage = BufferedStorage(lambda: open_storage(config.storage), state_dir / "buffer.jsonl")
+    storage = BackgroundStorage(lambda: open_storage(config.storage), state_dir / "buffer.jsonl")
     storage.connect()
     try:
         asyncio.run(_until_signalled(config, session_factory(), storage, state_dir, login_command))
@@ -150,7 +150,7 @@ def _collect(config: Config, session_factory: Callable[[], HTTPSession], login_c
 async def _until_signalled(
     config: Config,
     session: HTTPSession,
-    storage: BufferedStorage,
+    storage: BackgroundStorage,
     state_dir: Path,
     login_command: str,
 ) -> None:
