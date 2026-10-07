@@ -365,6 +365,7 @@ class BufferedStorage:
         interval; one that cannot be removed (a filesystem gone read-only) is remembered
         as sent up to where it ends.
         """
+        sent = 0  # lines of this call which the database has taken
         try:
             with self._spill.open("rb") as spill:
                 self._forget_position_in_another_file(spill)
@@ -375,22 +376,23 @@ class BufferedStorage:
                 self._unreadable_until = None
                 # A line cut short by a crash is skipped rather than blocking the rest.
                 await self._send([row for row in map(_decode, lines) if row is not None])
-                self._spilled = max(self._spilled - len(lines), 0)
+                sent = len(lines)
                 # Still open, so that no file begun meanwhile can pass for this one.
                 more = self._more_in_file_after(spill, start, b"".join(lines))
+            self._spilled = max(self._spilled - sent, 0)
             if more:
                 self._spilled = max(self._spilled, 1)  # more for a later call
-                return len(lines)
+                return sent
         except (FileNotFoundError, NotADirectoryError):
             # A file never read was never counted: its loss is said, not given a number.
             # One removed while the last of it was being sent took nothing with it.
-            lost = "an unknown number of" if self._uncounted else self._spilled
-            if lost:
+            unsent = max(self._spilled - sent, 0)
+            if lost := "an unknown number of" if self._uncounted else unsent:
                 _LOGGER.error(
                     "Buffer file %s is gone, and %s unsent rows with it", self._spill, lost
                 )
             if not self._uncounted:
-                self.dropped += self._spilled
+                self.dropped += unsent
             self._spilled, self._replayed, self._uncounted = 0, 0, False
             return 0
         except OSError as error:
@@ -404,7 +406,7 @@ class BufferedStorage:
             self._replayed = 0
         except OSError as error:
             _LOGGER.error("Buffer file %s is sent but cannot be removed: %s", self._spill, error)
-        return len(lines)
+        return sent
 
     def _more_in_file_after(self, read: BinaryIO, start: int, sent: bytes) -> bool:
         """Note that the lines `read` from `start` are sent; return whether the file holds
@@ -413,20 +415,16 @@ class BufferedStorage:
         The file is looked at afresh: while they were being sent, rows may have been added
         to it, or it may have been emptied or replaced. Only lines still where they were
         read, in the file they were read from, move the position past them; otherwise all
-        the file holds now is unsent. A file that is gone is for the caller to account for.
+        the file holds now is unsent. A file that is gone, or cannot be read, is for the
+        caller to account for: nothing is noted of it.
         """
-        try:
-            with self._spill.open("rb") as spill:
-                spill.seek(start)
-                if _identity(spill) != _identity(read) or spill.read(len(sent)) != sent:
-                    self._replayed = 0
-                elif sent:
-                    self._replayed, self._replayed_file = spill.tell(), _identity(spill)
-                return _size(spill) > self._replayed
-        except (FileNotFoundError, NotADirectoryError):
-            raise
-        except OSError:
-            return True  # whatever it holds is owed until it can be read
+        with self._spill.open("rb") as spill:
+            spill.seek(start)
+            if _identity(spill) != _identity(read) or spill.read(len(sent)) != sent:
+                self._replayed = 0
+            elif sent:
+                self._replayed, self._replayed_file = spill.tell(), _identity(spill)
+            return _size(spill) > self._replayed
 
     def _trim_spill(self) -> None:
         """On a clean stop, cut the rows already sent off the front of the buffer file: the

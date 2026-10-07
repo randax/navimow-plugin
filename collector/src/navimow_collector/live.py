@@ -173,7 +173,8 @@ class Collector:
                 self._vendor_work.cancel()
             self.stop()
             with suppress(TimeoutError):
-                await asyncio.wait_for(self.written(), STOP_SECONDS)
+                async with asyncio.timeout(STOP_SECONDS):
+                    await self.written()
 
     async def tick(self) -> None:
         """Do whatever is due; called every few seconds for the life of the process."""

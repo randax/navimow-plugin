@@ -362,6 +362,32 @@ def test_a_buffer_file_begun_again_while_its_rows_are_being_written_is_sent_from
     assert storage.buffered == 0
 
 
+def test_a_buffer_file_unreadable_once_its_rows_are_written_owes_them_still(
+    database: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # How far the file was sent could not be noted, so the rows are sent again: until
+    # then they are waiting like the rest, not written and not lost.
+    monkeypatch.setattr(postgres, "STATEMENT_TIMEOUT_MS", 0)
+    monkeypatch.setattr("navimow_collector.storage.buffered.REPLAY_ROWS", 2)
+    db, clock, spill = Database(database), Clock(), tmp_path / "buffer.jsonl"
+    storage = BackgroundStorage(db.open, spill, clock=clock, memory_rows=0)
+    storage.connect()
+
+    async def scenario() -> int:
+        storage.write_trail(points(*range(5)))
+        async with unanswered(db, storage) as writing:
+            restore = unreadable(spill)
+        await writing
+        waiting = storage.buffered
+        restore()
+        clock.now += RETRY_SECONDS
+        await storage.drain()
+        return waiting
+
+    assert asyncio.run(scenario()) == 5
+    assert (db.trail(), storage.buffered) == (list(range(5)), 0)
+
+
 def test_a_write_given_up_on_keeps_its_rows_ahead_of_those_admitted_since(
     database: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
