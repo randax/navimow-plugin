@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import operator
 import os
 import shutil
 import threading
@@ -268,7 +269,9 @@ class BufferedStorage:
         these rows, so whatever is left of them stays to be sent again after it, in order."""
         rows = self._memory[:room]
         await self._send(rows)
-        if self._memory[: len(rows)] == rows:
+        front = self._memory[: len(rows)]
+        # The very rows, not their like: one admitted meanwhile may equal one that was sent.
+        if len(front) == len(rows) and all(map(operator.is_, front, rows)):
             del self._memory[: len(rows)]
 
     async def _send(self, rows: Sequence[Row]) -> int:
