@@ -335,6 +335,33 @@ def test_a_buffer_file_deleted_while_its_rows_are_being_written_counts_the_rest_
     assert any("2 unsent rows" in message for message in messages(caplog))
 
 
+def test_a_buffer_file_begun_again_while_its_rows_are_being_written_is_sent_from_its_start(
+    database: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The new file is not the old one further on, even where it happens to hold, in the
+    # very place, the rows that were being written from the old one.
+    monkeypatch.setattr(postgres, "STATEMENT_TIMEOUT_MS", 0)
+    monkeypatch.setattr("navimow_collector.storage.buffered.REPLAY_ROWS", 1)
+    db, clock, spill = Database(database), Clock(), tmp_path / "buffer.jsonl"
+    storage = BackgroundStorage(db.open, spill, clock=clock, memory_rows=0)
+    storage.connect()
+    db.drop_at_write = 2
+
+    async def scenario() -> None:
+        storage.write_trail(points(0, 1))
+        await storage.drain()  # the first row is written; the connection is lost at the second
+        clock.now += RETRY_SECONDS
+        async with unanswered(db, storage) as writing:
+            spill.unlink()  # an operator making room
+            storage.write_trail(points(2, 1))
+        await writing
+
+    asyncio.run(scenario())
+
+    assert db.trail() == [0, 1, 2]
+    assert storage.buffered == 0
+
+
 def test_a_write_given_up_on_keeps_its_rows_ahead_of_those_admitted_since(
     database: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -342,7 +369,7 @@ def test_a_write_given_up_on_keeps_its_rows_ahead_of_those_admitted_since(
     # given last, so the order they were admitted in is the order they must be written in.
     monkeypatch.setattr(postgres, "STATEMENT_TIMEOUT_MS", 0)
     db, clock = Database(database), Clock()
-    storage = BackgroundStorage(db.open, tmp_path / "buffer.jsonl", clock=clock, deadline=0.1)
+    storage = BackgroundStorage(db.open, tmp_path / "buffer.jsonl", clock=clock, deadline=1)
     storage.connect()
     job = Job("DEVICE_1", "2026-09-30T12:00:00Z", start_time=START, updated_time=START)
     gap = Gap("DEVICE_1", START, START + timedelta(seconds=1), GapReason.RECONNECT)

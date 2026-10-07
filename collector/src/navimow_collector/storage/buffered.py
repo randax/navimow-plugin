@@ -369,10 +369,12 @@ class BufferedStorage:
                 start = spill.seek(self._replayed)
                 lines = list(islice(spill, limit))
                 self._unreadable_until = None
-            # A line cut short by a crash is skipped rather than blocking the rest.
-            await self._send([row for row in map(_decode, lines) if row is not None])
-            self._spilled = max(self._spilled - len(lines), 0)
-            if self._more_in_file_after(start, b"".join(lines)):
+                # A line cut short by a crash is skipped rather than blocking the rest.
+                await self._send([row for row in map(_decode, lines) if row is not None])
+                self._spilled = max(self._spilled - len(lines), 0)
+                # Still open, so that no file begun meanwhile can pass for this one.
+                more = self._more_in_file_after(spill, start, b"".join(lines))
+            if more:
                 self._spilled = max(self._spilled, 1)  # more for a later call
                 return len(lines)
         except (FileNotFoundError, NotADirectoryError):
@@ -400,18 +402,19 @@ class BufferedStorage:
             _LOGGER.error("Buffer file %s is sent but cannot be removed: %s", self._spill, error)
         return len(lines)
 
-    def _more_in_file_after(self, start: int, sent: bytes) -> bool:
-        """Note that the lines read from `start` are sent; return whether the file holds more.
+    def _more_in_file_after(self, read: BinaryIO, start: int, sent: bytes) -> bool:
+        """Note that the lines `read` from `start` are sent; return whether the file holds
+        more.
 
         The file is looked at afresh: while they were being sent, rows may have been added
         to it, or it may have been emptied or replaced. Only lines still where they were
-        read move the position past them; otherwise all the file holds now is unsent.
-        A file that is gone is for the caller to account for.
+        read, in the file they were read from, move the position past them; otherwise all
+        the file holds now is unsent. A file that is gone is for the caller to account for.
         """
         try:
             with self._spill.open("rb") as spill:
                 spill.seek(start)
-                if spill.read(len(sent)) != sent:
+                if _identity(spill) != _identity(read) or spill.read(len(sent)) != sent:
                     self._replayed = 0
                 elif sent:
                     self._replayed, self._replayed_file = spill.tell(), _identity(spill)
