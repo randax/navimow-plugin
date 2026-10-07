@@ -755,6 +755,13 @@ test('hovering a Trail tells its time, Job and Zone, and hovering a Zone its nam
   await expect(tooltip).toContainText(/Progress\s*64%/);
   await expect(tooltip).not.toContainText('Job');
 
+  // A click on a Zone selects nothing and moves nothing, so the details stay where the pointer is.
+  await page.mouse.down();
+  await page.mouse.up();
+  // Two frames, for a click that did put them away to have done so.
+  await page.evaluate(() => new Promise((drawn) => requestAnimationFrame(() => requestAnimationFrame(drawn))));
+  await expect(tooltip).toContainText('Front lawn (1)');
+
   // Outside the Boundary there is nothing to tell.
   await pointAt(panel, 30, 30);
   await expect(tooltip).toHaveCount(0);
@@ -818,13 +825,12 @@ test('the controls zoom, turn north up and fit the view to the Trail again', asy
   await control(panel, 'Zoom out').click();
   await cameraAtRest(panel, (camera) => Math.abs(camera.zoom - (framed.zoom - 1)) < 0.01);
 
-  // Dragging with the right button turns the map; the compass turns it back. Dragged to the left,
-  // away from the controls: in a narrow panel a drag to the right ends on one of them.
+  // Dragging with the right button turns the map; the compass turns it back.
   const box = (await panel.getByTestId('navimow-map').boundingBox())!;
   const [x, y] = [box.x + box.width / 2, box.y + box.height / 2];
   await page.mouse.move(x, y);
   await page.mouse.down({ button: 'right' });
-  await page.mouse.move(x - 120, y, { steps: 10 });
+  await page.mouse.move(x + 120, y, { steps: 10 });
   await page.mouse.up({ button: 'right' });
   await cameraAtRest(panel, (camera) => Math.abs(camera.bearing) > 5);
   await control(panel, 'Turn north up').click();
@@ -840,6 +846,32 @@ test('the controls zoom, turn north up and fit the view to the Trail again', asy
   await control(panel, 'Fit to Trail').click();
   await cameraAtRest(panel, (camera) => Math.abs(camera.zoom - framed.zoom) < 0.001);
   expectSamePlace(await cameraOf(panel), framed);
+});
+
+test('a drag let go over a control leaves the map at rest', async ({ openInteraction, page }) => {
+  const panel = await openInteraction('Two Jobs');
+  await expectDrawn(panel);
+  const framed = await cameraOf(panel);
+  const middleOf = async (of: Locator) => {
+    const box = (await of.boundingBox())!;
+    return [box.x + box.width / 2, box.y + box.height / 2] as const;
+  };
+  const dragOntoControl = async (from: Locator, button: 'left' | 'right') => {
+    await page.mouse.move(...(await middleOf(from)));
+    await page.mouse.down({ button });
+    await page.mouse.move(...(await middleOf(control(panel, 'Zoom in'))), { steps: 10 });
+    await page.mouse.up({ button });
+  };
+
+  // Panned, and the control was only where the drag ended, not pressed. Pressed on the mower, which
+  // is the map to a pointer as anything else drawn on it is.
+  await dragOntoControl(panel.getByRole('img', { name: /^Mower/ }), 'left');
+  const panned = await cameraAtRest(panel, (camera) => Math.abs(camera.center[1] - framed.center[1]) > 0.0001);
+  expect(panned.zoom).toBeCloseTo(framed.zoom, 3);
+
+  // And turned.
+  await dragOntoControl(panel.getByTestId('navimow-map'), 'right');
+  await cameraAtRest(panel, (camera) => Math.abs(camera.bearing) > 5);
 });
 
 test('the view is the owner’s until following is switched on, which puts the mower in the middle', async ({
