@@ -103,9 +103,9 @@ const test = base.extend<{
     use(await readProvisionedDashboard({ fileName: 'navimow-coverage.json' })),
   openCoverage: async ({ gotoDashboardPage, coverageDashboard }, use) =>
     use(async (title) => (await gotoDashboardPage(coverageDashboard)).getPanelByTitle(title).locator),
-  // A made-up lawn again, in a row that can be collapsed: three Jobs side by side, each running from
-  // 15 m south of the dock to 15 m north of it. Job a is 10 m west of the dock, Job b runs through it
-  // and Job c is 10 m east, where it ends with a turn 10 m further east.
+  // A made-up lawn again, in a row that can be collapsed: three Jobs side by side, each along a line
+  // from 15 m south of the dock to 15 m north of it. Job a is 10 m west of the dock, Job b runs
+  // through it and Job c is 10 m east, where it ends in the north with a turn 10 m further east.
   lifecycleDashboard: async ({ readProvisionedDashboard }, use) =>
     use(await readProvisionedDashboard({ fileName: 'navimow-map-lifecycle.json' })),
   openLifecycle: async ({ gotoDashboardPage, lifecycleDashboard }, use) =>
@@ -206,13 +206,18 @@ const pointAt = async (panel: Locator, east: number, north: number) => {
   await map.hover({ position: { x, y } });
 };
 
+type Rgb = [number, number, number];
+const FIXTURE_GREEN: Rgb = [122, 184, 107];
+/** How far apart two colours are: 0 for the same colour, some 440 from black to white. */
+const apart = ([r, g, b]: Rgb, [r2, g2, b2]: Rgb) => Math.hypot(r - r2, g - g2, b - b2);
+
 /**
  * The colour drawn at a place on the map of a made-up lawn: of the pixels within a few of it, the
  * one least like the fixture Base map's green, as a line two pixels wide is easily missed by one.
  */
-const colourAt = async (page: Page, panel: Locator, east: number, north: number) => {
+const colourAt = async (page: Page, panel: Locator, east: number, north: number): Promise<Rgb> => {
   const screenshot = await panel.getByTestId('navimow-map').screenshot();
-  return page.evaluate(
+  const around = await page.evaluate(
     async ({ png, x, y }) => {
       const image = new Image();
       image.src = `data:image/png;base64,${png}`;
@@ -221,12 +226,15 @@ const colourAt = async (page: Page, panel: Locator, east: number, north: number)
       const context = canvas.getContext('2d')!;
       context.drawImage(image, 0, 0);
       const { data } = context.getImageData(Math.round(x) - 4, Math.round(y) - 4, 9, 9);
-      const pixels = Array.from({ length: data.length / 4 }, (_, i) => [...data.slice(4 * i, 4 * i + 3)]);
-      const fromGreen = ([r, g, b]: number[]) => Math.hypot(r - 122, g - 184, b - 107);
-      return pixels.reduce((a, b) => (fromGreen(b) > fromGreen(a) ? b : a));
+      return Array.from({ length: 81 }, (_, i): [number, number, number] => [
+        data[4 * i],
+        data[4 * i + 1],
+        data[4 * i + 2],
+      ]);
     },
     { png: screenshot.toString('base64'), ...(await metresFromDock(panel, east, north)) }
   );
+  return around.reduce((a, b) => (apart(b, FIXTURE_GREEN) > apart(a, FIXTURE_GREEN) ? b : a));
 };
 
 /** The map's control with this name. */
@@ -468,13 +476,14 @@ test('a Base map switch redraws every Trail, on the map that was there', async (
 test('Trails that arrive in the middle of a Base map switch are drawn on the new Base map', async ({
   gotoPanelEditPage,
   lifecycleDashboard,
+  selectors,
   page,
 }) => {
   // The panel opens on Job a alone, the others cut from what the query asks for until a refresh.
   let jobs = /job-a/;
   await page.route(/\/api\/ds\/query/, (route) => {
-    const body = route.request().postDataJSON();
-    const [header, ...rows]: string[] = body.queries[0].csvContent.split('\n');
+    const body: { queries: Array<{ csvContent: string }> } = route.request().postDataJSON();
+    const [header, ...rows] = body.queries[0].csvContent.split('\n');
     body.queries[0].csvContent = [header, ...rows.filter((row) => jobs.test(row))].join('\n');
     return route.fallback({ postData: body });
   });
@@ -495,12 +504,15 @@ test('Trails that arrive in the middle of a Base map switch are drawn on the new
   await expect(map).toHaveAttribute('data-trails-drawn', '1');
   const mower = panel.getByRole('img', { name: /^Mower/ });
   const afterJobA = (await mower.boundingBox())!;
+  const framed = await cameraOf(panel);
 
   await panelEditPage.getCustomOptions('Base map').getSelect('Base map').selectOption('OpenStreetMap');
   // The switch is under way, and stays so for as long as the new Base map has no tiles.
   await expect(map).not.toHaveAttribute('data-map-idle');
   jobs = /job-[abc]/;
-  await panelEditPage.refreshPanel();
+  // Not refreshPanel(), which gives the button two seconds: a map being restyled under software
+  // rendering can keep the page busy for longer.
+  await panelEditPage.getByGrafanaSelector(selectors.components.RefreshPicker.runButtonV2).click();
   // The panel has the new Trails once the mower is where they end, 30 m east of where Job a did.
   await expect.poll(async () => (await mower.boundingBox())!.x).toBeGreaterThan(afterJobA.x + 50);
   await expect(map).not.toHaveAttribute('data-map-idle');
@@ -511,6 +523,8 @@ test('Trails that arrive in the middle of a Base map switch are drawn on the new
   await expect(map).toHaveAttribute('data-trails-drawn', '3');
   // The mower moved there: it was not put on the map a second time.
   await expect(mower).toHaveCount(1);
+  // Jobs b and c ran within what the view was framed on for Job a, so the view has stayed where it was.
+  expectSamePlace(await cameraOf(panel), framed);
 });
 
 test('the panel opens with the whole Trail in view, and little else', async ({ openLifecycle }) => {
@@ -538,18 +552,18 @@ test('each Job is drawn as a Trail in a colour of its own', async ({ openLifecyc
 
   // Each Job where it passes 5 m south of the dock: 10 m west of it, through it, and 10 m east.
   await expect(async () => {
-    const colours = [
-      await colourAt(page, panel, -10, -5),
-      await colourAt(page, panel, 0, -5),
-      await colourAt(page, panel, 10, -5),
-    ];
-    const apart = ([r, g, b]: number[], [r2, g2, b2]: number[]) => Math.hypot(r - r2, g - g2, b - b2);
-    const FIXTURE_GREEN = [122, 184, 107];
-    for (const [i, colour] of colours.entries()) {
-      expect(apart(colour, FIXTURE_GREEN), `a Trail is drawn where Job ${'abc'[i]} ran`).toBeGreaterThan(60);
-      for (const other of colours.slice(i + 1)) {
-        expect(apart(colour, other), `${colour} and ${other} are told apart`).toBeGreaterThan(60);
+    const colours: Rgb[] = [];
+    for (const [job, east] of [
+      ['a', -10],
+      ['b', 0],
+      ['c', 10],
+    ] as const) {
+      const colour = await colourAt(page, panel, east, -5);
+      expect(apart(colour, FIXTURE_GREEN), `a Trail is drawn where Job ${job} ran`).toBeGreaterThan(60);
+      for (const other of colours) {
+        expect(apart(colour, other), `Job ${job} has a colour of its own`).toBeGreaterThan(60);
       }
+      colours.push(colour);
     }
   }).toPass({ timeout: 20_000 });
 });
