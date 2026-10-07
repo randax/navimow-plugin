@@ -14,10 +14,11 @@ from ..config import StorageConfig
 from ..records import Gap, Job, Mower, MowerState, Progress, Row, TrailPoint
 from .base import RejectedError, SchemaError, StorageError
 
-# Live collection writes from its event loop, so a database call should not wait for long:
-# by default a connection attempt, a statement held up by a lock and a server that vanished
-# from the network each fail within seconds, which the live buffer treats as an outage.
-# These are defaults: whatever the operator set for the same thing is left alone.
+# A database call should not wait for long: by default a connection attempt, a statement
+# held up by a lock and a server that vanished from the network each fail within seconds,
+# which the live buffer treats as an outage. These are defaults: whatever the operator set
+# for the same thing is left alone. A server that stays connected and says nothing is
+# beyond them all; live collection keeps its own deadline for that.
 CONNECT_TIMEOUT_SECONDS = 5
 STATEMENT_TIMEOUT_MS = 5000
 _DEAD_PEER = {

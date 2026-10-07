@@ -201,18 +201,18 @@ to `buffer.jsonl` in the state directory (up to 64 MiB of rows waiting), and
 written when the database returns, by this process or the next. Once the file
 is full, or if it cannot be written, memory keeps what it can hold and beyond
 that the newest rows are dropped, gaps last, with an error logged. A clean stop moves what is in memory to
-the file; a crash while the database is away loses what was still in memory, at
-most 1,000 rows. Gap rows go to the file at once, and the note of when a gap
+the file; a crash loses what was still in memory: the rows not yet written, a
+moment's worth while the database answers and at most 1,000 while it is away.
+Gap rows go to the file at once, and the note of when a gap
 started is kept until its row has been handed over, so a crash at any point
 records the gap again rather than losing it. Only when the file cannot take it
 does a gap wait in memory with the other rows, exposed to a crash like them.
 
-A backlog is written back 200 rows at a time, a slice every tenth of a second,
-so collection, token refresh and shutdown carry on while it drains; a stop in
-the middle leaves only the unwritten rest in the file for the next start, while
-after a crash the next start writes the file again from its beginning, which
-costs time and nothing else. Rows already written stay in the file until all of
-it is, so while it drains the file can reach twice its limit.
+A backlog is written back 200 rows at a time; a stop in the middle leaves the
+unwritten rest in the file for the next start, while after a crash the next
+start writes the file again from its beginning, which costs time and nothing
+else. Rows already written stay in the file until all of it is, so while it
+drains the file can reach twice its limit.
 
 A row the database refuses for what it holds is logged and dropped, never
 retried, so it cannot hold up the rows behind it. Trouble with the buffer file
@@ -232,10 +232,22 @@ keep-alive setting in the DSN is used instead, and so is a `statement_timeout`
 set anywhere at all (the DSN's `options`, the role, the database or the server
 configuration).
 
-Database work still happens on the collector's own event loop, so while one
-call waits, up to those limits, nothing else is done. The limits do not cover a
-server that keeps its connection open but stops answering, such as a suspended
-backend: that holds collection up until it answers.
+The collector never waits on the database to do anything else. Rows are written
+one batch at a time on a thread of their own, so collection, token refresh,
+the health endpoint and a stop carry on whatever the database is doing; rows
+arriving while a batch is being written wait in the same buffer, memory first
+and then the file. A stop allows the writing 5 more seconds and leaves the rest
+in the file.
+
+The limits above all need the server, or the network in its place, to say
+something. A server that keeps its connection open but stops answering, such as
+a suspended backend, says nothing. So the collector keeps a limit of its own: a
+batch the database has not answered within 30 seconds counts as an outage, and
+the next attempt is made over a new connection. This one is not a default: a
+`statement_timeout` set longer than 30 seconds is cut short by it. A connection
+given up on is left until the database answers or drops it, and once two are
+waiting like that no more are opened, so a database that answers nobody is not
+crowded with connections.
 
 ```toml
 [collector]

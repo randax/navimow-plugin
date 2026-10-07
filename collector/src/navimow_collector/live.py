@@ -22,7 +22,7 @@ from .auth import RETRY_DELAYS, TokenManager, redact, replace_file
 from .health import Snapshot
 from .ingest import Ingestor
 from .records import CHANNEL_TOPIC, STORED_CHANNELS, GapReason
-from .storage.buffered import BufferedStorage
+from .storage.buffered import BackgroundStorage
 
 API_URL = "https://navimow-fra.ninebot.com"
 # The SDK's default of 40 minutes lets the broker drop an idle connection after about ten,
@@ -31,8 +31,9 @@ KEEPALIVE_SECONDS = 60
 # How often a live connection is noted on disk; a restart's gap starts at the last note.
 HEARTBEAT_SECONDS = 60
 TICK_SECONDS = 10
-# The pause between ticks while buffered rows are being written out a slice per tick.
-DRAIN_SECONDS = 0.1
+# How long a stop waits for the write under way to land. What has not landed by then is
+# left in the buffer file, for the next start.
+STOP_SECONDS = 5
 # How long a tick waits on the vendor (token refresh, mower discovery, broker credentials)
 # before carrying on. The SDK's 30 s timeout applies to each socket operation, not to a
 # request, and a tick can make four requests in a row: unbounded, a hung vendor would stop
@@ -120,7 +121,7 @@ class Collector:
         self,
         session: HTTPSession,
         tokens: TokenManager,
-        storage: BufferedStorage,
+        storage: BackgroundStorage,
         state_dir: Path,
         *,
         connect: Callable[[BrokerCredentials, Sequence[str]], Broker] = connect_broker,
@@ -155,6 +156,7 @@ class Collector:
         self._heard: dict[str, float] = {}
         self._unstored: dict[tuple[str, str], int] = {}
         self._vendor_work: asyncio.Future[None] | None = None
+        self._writing: asyncio.Future[None] | None = None
 
     async def collect(
         self,
@@ -165,28 +167,38 @@ class Collector:
         try:
             while not stop.is_set():
                 await self.tick()
-                # Each tick writes one slice of a backlog, leaving the loop free in between;
-                # while rows remain the next tick follows at once.
-                await wait(stop, DRAIN_SECONDS if self._storage.draining else TICK_SECONDS)
+                await wait(stop, TICK_SECONDS)
         finally:
             if self._vendor_work is not None:
                 self._vendor_work.cancel()
             self.stop()
+            with suppress(TimeoutError):
+                async with asyncio.timeout(STOP_SECONDS):
+                    await self.written()
 
     async def tick(self) -> None:
         """Do whatever is due; called every few seconds for the life of the process."""
         work = self._vendor_work
-        if work is None or work.done():
-            if work is not None:
-                work.result()  # what went wrong in the background is raised here, as inline
+        if work is None or _over(work):
             work = self._vendor_work = asyncio.ensure_future(self._keep_access())
         with suppress(TimeoutError):
             await asyncio.wait_for(asyncio.shield(work), VENDOR_WAIT_SECONDS)
         now = self._clock()
         if self.connected and now - (self._flowed_until or 0) >= HEARTBEAT_SECONDS:
             self._remember_flow(now)
-        self._storage.flush()
+        self._write_out()  # no message needed: an absent database is retried on this timer
         self._ticked_at = self._clock()
+
+    def _write_out(self) -> None:
+        """Have what waits in the buffer written, off this loop and one write at a time."""
+        if (self._writing is None or _over(self._writing)) and self._storage.draining:
+            self._writing = asyncio.ensure_future(self._storage.drain())
+
+    async def written(self) -> None:
+        """Wait until nothing more is being written: every row fed so far is in the database,
+        or waits in the buffer for it to return."""
+        if self._writing is not None:
+            await self._writing
 
     async def _keep_access(self) -> None:
         """Keep the access token fresh and the broker supplied with credentials for it."""
@@ -399,7 +411,8 @@ class Collector:
     def _feed(self, record: dict[str, object]) -> None:
         """Hand the core a record in the capture format, exactly as replay does."""
         self._ingestor.feed({"recv_ms": round(self._clock() * 1000), **record})
-        self._ingestor.flush()
+        self._ingestor.flush()  # into the buffer, which never waits on the database
+        self._write_out()
 
     async def _discover(self, token: str) -> tuple[str, ...]:
         answer = await self._call("GET", "/openapi/smarthome/authList", token)
@@ -448,6 +461,14 @@ class Collector:
             desc = answer.get("desc") if isinstance(answer, dict) else None
             raise RestError(_loggable(str(desc or text), token))
         return answer
+
+
+def _over(work: asyncio.Future[None]) -> bool:
+    """Whether background work has ended. What went wrong in it is raised here, as if it
+    had been done inline; work that was called off went wrong in nothing."""
+    if work.done() and not work.cancelled():
+        work.result()
+    return work.done()
 
 
 def _loggable(text: str, token: str) -> str:

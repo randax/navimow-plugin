@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import errno
 import os
 import socket
 import threading
-from collections.abc import Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Iterator, Sequence
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -26,11 +28,19 @@ from navimow_collector.records import (
     TrailPoint,
 )
 from navimow_collector.storage import Storage, StorageError, open_storage, postgres
-from navimow_collector.storage.buffered import REPLAY_ROWS, RETRY_SECONDS, BufferedStorage
+from navimow_collector.storage.buffered import (
+    REPLAY_ROWS,
+    RETRY_SECONDS,
+    BackgroundStorage,
+    BufferedStorage,
+)
 
 from .conftest import Clock, gaps
 
 START = datetime(2026, 9, 30, 12, tzinfo=UTC)
+# The longest the database is ever kept suspended: the server ends it then by itself, so a
+# write that waits on the event loop after all fails its test rather than hanging it.
+SUSPENDED_SECONDS = 30
 
 
 class Database:
@@ -59,6 +69,25 @@ class Database:
                 "SELECT pg_terminate_backend(pid) FROM pg_stat_activity"
                 " WHERE datname = current_database() AND pid <> pg_backend_pid()"
             )
+
+    @contextmanager
+    def suspended(self) -> Iterator[None]:
+        """Stop answering for the Trail: a write of points sent meanwhile hangs mid-statement,
+        its connection open, until this ends. With the statement timeout off this is, on any
+        server, what a backend suspended under its client looks like from the collector."""
+        with psycopg.connect(self.dsn) as maintenance:
+            maintenance.execute(f"SET idle_in_transaction_session_timeout = '{SUSPENDED_SECONDS}s'")
+            maintenance.execute("LOCK TABLE trail_point IN ACCESS EXCLUSIVE MODE")
+            yield
+
+    def held(self) -> bool:
+        """Whether a statement is under way that the suspended database is not answering."""
+        with psycopg.connect(self.dsn) as conn:
+            waiting = conn.execute(
+                "SELECT count(*) FROM pg_stat_activity"
+                " WHERE datname = current_database() AND wait_event_type = 'Lock'"
+            ).fetchone()
+        return waiting is not None and waiting[0] > 0
 
     def trail(self) -> list[int]:
         """The stored points, as the seconds after START they were recorded at."""
@@ -131,6 +160,20 @@ def buffered(db: Database, tmp_path: Path, clock: Clock, **limits: int) -> Buffe
     return BufferedStorage(db.open, tmp_path / "buffer.jsonl", clock=clock, **limits)
 
 
+@asynccontextmanager
+async def unanswered(
+    db: Database, storage: BackgroundStorage
+) -> AsyncIterator[asyncio.Future[None]]:
+    """What waits being written out, the first write of it held by the database until this
+    ends. Needs the statement timeout off, and a Trail point among the first rows."""
+    with db.suspended():
+        writing = asyncio.ensure_future(storage.drain())
+        async with asyncio.timeout(5):
+            while not db.held():
+                await asyncio.sleep(0.01)
+        yield writing
+
+
 def finishes(work: Callable[[], object], within: float) -> bool:
     """Whether `work` returns in time; work that stalls is left behind on its thread."""
     thread = threading.Thread(target=work, daemon=True)
@@ -147,8 +190,7 @@ def test_a_locked_table_delays_rows_rather_than_stalling_the_collector(
     storage = buffered(db, tmp_path, clock)
     storage.write_trail(points(1))
 
-    with psycopg.connect(database) as maintenance:
-        maintenance.execute("LOCK TABLE trail_point IN ACCESS EXCLUSIVE MODE")
+    with db.suspended():
         assert finishes(lambda: storage.write_trail(points(2)), within=5)
         assert storage.buffered == 1
 
@@ -166,8 +208,7 @@ def test_a_statement_timeout_the_operator_set_is_not_shortened(
     storage.write_trail(points(1))
     slow = threading.Thread(target=lambda: storage.write_trail(points(2)), daemon=True)
 
-    with psycopg.connect(database) as maintenance:
-        maintenance.execute("LOCK TABLE trail_point IN ACCESS EXCLUSIVE MODE")
+    with db.suspended():
         slow.start()
         slow.join(1)  # five times the collector's own limit
         assert slow.is_alive()
@@ -196,6 +237,226 @@ def test_a_database_host_that_never_answers_is_given_up_on(
         assert finishes(connect, within=8)
 
     assert "timeout" in str(errors[0])
+
+
+def test_rows_admitted_while_a_write_is_unanswered_are_bounded_by_memory_then_the_file(
+    database: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(postgres, "STATEMENT_TIMEOUT_MS", 0)
+    db, spill = Database(database), tmp_path / "buffer.jsonl"
+    storage = BackgroundStorage(db.open, spill, clock=Clock(), memory_rows=3)
+    storage.connect()
+
+    async def scenario() -> int:
+        storage.write_trail(points(0, 1, 2))
+        only_in_memory = 0
+        async with unanswered(db, storage) as writing:
+            for second in range(3, 11):
+                storage.write_trail(points(second))
+                on_disk = spill.read_bytes().count(b"\n")
+                only_in_memory = max(only_in_memory, storage.buffered - on_disk)
+        await writing
+        return only_in_memory
+
+    # The rows the database has not answered for are memory's still: with them it never
+    # holds more than three, and the rest wait in the file.
+    assert asyncio.run(scenario()) == 3
+    assert db.trail() == list(range(11))
+    assert (storage.buffered, storage.written, spill.exists()) == (0, 11, False)
+
+
+def test_a_database_that_keeps_not_answering_is_not_given_ever_more_connections(
+    database: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Each attempt given up on leaves its connection with the database until it answers.
+    monkeypatch.setattr(postgres, "STATEMENT_TIMEOUT_MS", 0)
+    db, clock = Database(database), Clock()
+    storage = BackgroundStorage(db.open, tmp_path / "buffer.jsonl", clock=clock, deadline=0.1)
+    storage.connect()
+
+    async def scenario() -> int:
+        storage.write_trail(points(1))
+        with db.suspended():
+            for _ in range(5):
+                await storage.drain()
+                clock.now += RETRY_SECONDS
+            connections = db.attempts
+        async with asyncio.timeout(5):
+            while storage.buffered:
+                await asyncio.sleep(0.01)  # the attempts given up on are answered at last
+                clock.now += RETRY_SECONDS
+                await storage.drain()
+        return connections
+
+    assert asyncio.run(scenario()) == 2  # the one it had, and one more to try afresh
+    assert db.trail() == [1]
+
+
+def test_a_buffer_file_emptied_while_its_rows_are_being_written_loses_none_added_since(
+    database: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(postgres, "STATEMENT_TIMEOUT_MS", 0)
+    db, spill = Database(database), tmp_path / "buffer.jsonl"
+    storage = BackgroundStorage(db.open, spill, clock=Clock(), memory_rows=0)
+    storage.connect()
+
+    async def scenario() -> None:
+        storage.write_trail(points(0))
+        async with unanswered(db, storage) as writing:
+            spill.write_bytes(b"")  # an operator making room
+            storage.write_trail(points(1))
+            storage.write_trail(points(2))  # the file is now longer than what was sent of it
+        await writing
+
+    asyncio.run(scenario())
+
+    assert db.trail() == [0, 1, 2]
+    assert storage.buffered == 0
+
+
+def test_a_buffer_file_deleted_while_its_rows_are_being_written_counts_the_rest_as_lost(
+    database: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(postgres, "STATEMENT_TIMEOUT_MS", 0)
+    db, spill = Database(database), tmp_path / "buffer.jsonl"
+    storage = BackgroundStorage(db.open, spill, clock=Clock(), memory_rows=0)
+    storage.connect()
+
+    async def scenario() -> None:
+        storage.write_trail(points(*range(REPLAY_ROWS + 2)))  # one slice, and two rows more
+        async with unanswered(db, storage) as writing:
+            spill.unlink()
+        await writing
+
+    asyncio.run(scenario())
+
+    assert db.trail() == list(range(REPLAY_ROWS))
+    assert (storage.buffered, storage.dropped) == (0, 2)
+    assert any("2 unsent rows" in message for message in messages(caplog))
+
+
+def test_a_buffer_file_begun_again_while_its_rows_are_being_written_is_sent_from_its_start(
+    database: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The new file is not the old one further on, even where it happens to hold, in the
+    # very place, the rows that were being written from the old one.
+    monkeypatch.setattr(postgres, "STATEMENT_TIMEOUT_MS", 0)
+    monkeypatch.setattr("navimow_collector.storage.buffered.REPLAY_ROWS", 1)
+    db, clock, spill = Database(database), Clock(), tmp_path / "buffer.jsonl"
+    storage = BackgroundStorage(db.open, spill, clock=clock, memory_rows=0)
+    storage.connect()
+    db.drop_at_write = 2
+
+    async def scenario() -> None:
+        storage.write_trail(points(0, 1))
+        await storage.drain()  # the first row is written; the connection is lost at the second
+        clock.now += RETRY_SECONDS
+        async with unanswered(db, storage) as writing:
+            spill.unlink()  # an operator making room
+            storage.write_trail(points(2, 1))
+        await writing
+
+    asyncio.run(scenario())
+
+    assert db.trail() == [0, 1, 2]
+    assert storage.buffered == 0
+
+
+def test_a_buffer_file_unreadable_once_its_rows_are_written_owes_them_still(
+    database: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # How far the file was sent could not be noted, so the rows are sent again: until
+    # then they are waiting like the rest, not written and not lost.
+    monkeypatch.setattr(postgres, "STATEMENT_TIMEOUT_MS", 0)
+    monkeypatch.setattr("navimow_collector.storage.buffered.REPLAY_ROWS", 2)
+    db, clock, spill = Database(database), Clock(), tmp_path / "buffer.jsonl"
+    storage = BackgroundStorage(db.open, spill, clock=clock, memory_rows=0)
+    storage.connect()
+
+    async def scenario() -> int:
+        storage.write_trail(points(*range(5)))
+        async with unanswered(db, storage) as writing:
+            restore = unreadable(spill)
+        await writing
+        waiting = storage.buffered
+        restore()
+        clock.now += RETRY_SECONDS
+        await storage.drain()
+        return waiting
+
+    assert asyncio.run(scenario()) == 5
+    assert (db.trail(), storage.buffered) == (list(range(5)), 0)
+
+
+def test_a_write_given_up_on_keeps_its_rows_ahead_of_those_admitted_since(
+    database: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Of two descriptions of a Job as of the same moment the database keeps the one it is
+    # given last, so the order they were admitted in is the order they must be written in.
+    monkeypatch.setattr(postgres, "STATEMENT_TIMEOUT_MS", 0)
+    db, clock = Database(database), Clock()
+    storage = BackgroundStorage(db.open, tmp_path / "buffer.jsonl", clock=clock, deadline=1)
+    storage.connect()
+    job = Job("DEVICE_1", "2026-09-30T12:00:00Z", start_time=START, updated_time=START)
+    gap = Gap("DEVICE_1", START, START + timedelta(seconds=1), GapReason.RECONNECT)
+
+    async def scenario() -> None:
+        storage.write_jobs([job])
+        storage.write_trail(points(0))
+        async with unanswered(db, storage) as writing:
+            storage.write_jobs([replace(job, mowing_percentage=40)])
+            storage.write_gaps([gap])  # to the file at once, and with it what memory holds
+            assert not writing.done()
+            await writing  # given up on
+        clock.now += RETRY_SECONDS
+        await storage.drain()
+
+    asyncio.run(scenario())
+
+    with psycopg.connect(database) as conn:
+        assert conn.execute("SELECT mowing_percentage FROM job").fetchall() == [(40,)]
+    assert storage.buffered == 0
+
+
+def test_rows_the_file_took_only_some_of_while_they_were_written_keep_their_order(
+    database: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The file sends again the rows it took, so the rest of what was written with them is
+    # sent again after them: the later description of the Job must be the last one written.
+    monkeypatch.setattr(postgres, "STATEMENT_TIMEOUT_MS", 0)
+    db, spill = Database(database), tmp_path / "buffer.jsonl"
+    storage = BackgroundStorage(db.open, spill, clock=Clock(), disk_bytes=450)  # one Job
+    storage.connect()
+    job = Job("DEVICE_1", "2026-09-30T12:00:00Z", start_time=START, updated_time=START)
+    gap = Gap("DEVICE_1", START, START + timedelta(seconds=1), GapReason.RECONNECT)
+
+    async def scenario() -> None:
+        storage.write_jobs([job, replace(job, mowing_percentage=40)])
+        storage.write_trail(points(0))
+        async with unanswered(db, storage) as writing:
+            storage.write_gaps([gap])  # memory goes to the file, which has room for one row
+            assert spill.read_bytes().count(b"\n") == 1
+        await writing
+
+    asyncio.run(scenario())
+
+    with psycopg.connect(database) as conn:
+        assert conn.execute("SELECT mowing_percentage FROM job").fetchall() == [(40,)]
+    assert (storage.buffered, len(gaps(database))) == (0, 1)
+
+
+def test_a_buffer_written_out_by_a_thread_is_not_flushed_by_waiting_on_the_database(
+    database: str, tmp_path: Path
+) -> None:
+    db = Database(database)
+    storage = BackgroundStorage(db.open, tmp_path / "buffer.jsonl", clock=Clock())
+    storage.connect()
+    storage.write_trail(points(1))
+
+    with pytest.raises(RuntimeError, match="drain"):
+        storage.flush()
+
+    assert (storage.buffered, db.writes) == (1, 0)
 
 
 def test_rows_written_during_an_outage_arrive_when_the_database_returns(

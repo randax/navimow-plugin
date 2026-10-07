@@ -20,8 +20,9 @@ from .auth import AuthState
 
 # How long the collection loop may go without completing a tick before it counts as stuck.
 # A tick completes every ten seconds or less. A hung vendor call cannot hold one past
-# `live.VENDOR_WAIT_SECONDS`, because that work carries on in the background, and each
-# database wait is capped at 5 s. So only a loop that has stopped stays silent this long.
+# `live.VENDOR_WAIT_SECONDS`, because that work carries on in the background, and the
+# database is waited on by a thread of its own. So only a loop that has stopped stays
+# silent this long.
 STALL_SECONDS = 120
 PROMETHEUS_TYPE = "text/plain; version=0.0.4; charset=utf-8"
 _PREFIX = "navimow_collector_"

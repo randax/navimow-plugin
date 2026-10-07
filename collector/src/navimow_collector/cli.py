@@ -34,7 +34,7 @@ from .ingest import Ingestor, read_capture
 from .live import Collector
 from .logs import JsonFormatter
 from .storage import StorageError, open_storage
-from .storage.buffered import BufferedStorage
+from .storage.buffered import BackgroundStorage
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -138,32 +138,29 @@ def _collect(config: Config, session_factory: Callable[[], HTTPSession], login_c
             pass
     except OSError as error:
         raise ConfigError(f"collector.state_dir {state_dir} cannot be written: {error}") from error
-    storage = BufferedStorage(lambda: open_storage(config.storage), state_dir / "buffer.jsonl")
+    storage = BackgroundStorage(lambda: open_storage(config.storage), state_dir / "buffer.jsonl")
     storage.connect()
     try:
-        asyncio.run(_until_signalled(config, session_factory(), storage, state_dir, login_command))
+        session = session_factory()
+        tokens = TokenManager(
+            TokenClient(session, config.auth.client_id, config.auth.client_secret.reveal()),
+            TokenStore(config.auth.state_file),
+            login_command=login_command,
+        )
+        # Made before the loop runs: it reads each mower's latest Job, the one time the
+        # database is waited on here, and a loop held by that would not hear a stop.
+        collector = Collector(session, tokens, storage, state_dir)
+        asyncio.run(_until_signalled(config.health, collector))
     finally:
         storage.close()
     return 0
 
 
-async def _until_signalled(
-    config: Config,
-    session: HTTPSession,
-    storage: BufferedStorage,
-    state_dir: Path,
-    login_command: str,
-) -> None:
-    tokens = TokenManager(
-        TokenClient(session, config.auth.client_id, config.auth.client_secret.reveal()),
-        TokenStore(config.auth.state_file),
-        login_command=login_command,
-    )
+async def _until_signalled(config: HealthConfig, collector: Collector) -> None:
     stop = asyncio.Event()
     for signum in (signal.SIGINT, signal.SIGTERM):
         asyncio.get_running_loop().add_signal_handler(signum, stop.set)
-    collector = Collector(session, tokens, storage, state_dir)
-    with _serving_health(config.health, collector.snapshot):
+    with _serving_health(config, collector.snapshot):
         await collector.collect(stop)
 
 
