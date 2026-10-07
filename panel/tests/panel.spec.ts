@@ -755,6 +755,12 @@ test('hovering a Trail tells its time, Job and Zone, and hovering a Zone its nam
   await expect(tooltip).toContainText(/Progress\s*64%/);
   await expect(tooltip).not.toContainText('Job');
 
+  // A click on the grass selects nothing and moves nothing, so the details stay where the pointer is.
+  await page.mouse.down();
+  await page.mouse.up();
+  await page.evaluate(() => new Promise(requestAnimationFrame));
+  await expect(tooltip).toContainText('Front lawn (1)');
+
   // Outside the Boundary there is nothing to tell.
   await pointAt(panel, 30, 30);
   await expect(tooltip).toHaveCount(0);
