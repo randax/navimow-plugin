@@ -1197,6 +1197,7 @@ def test_the_sdk_connection_drives_the_collector_as_the_fake_broker_does(live: L
         await settled()
         assert not collector.connected
         collector.stop()
+        await collector.written()
 
     asyncio.run(scenario())
 
@@ -1250,6 +1251,7 @@ def test_a_connection_that_came_and_went_unseen_still_starts_the_next_gap(live: 
         paho.is_connected = lambda: True
         paho.on_connect(paho, None, {}, 0, None)
         await settled()
+        await collector.written()
         return collector
 
     collector = asyncio.run(scenario())

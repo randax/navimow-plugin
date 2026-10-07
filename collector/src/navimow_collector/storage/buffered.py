@@ -118,7 +118,6 @@ class BufferedStorage:
         self._clock = clock
         self._storage: Storage | None = None
         self._memory: list[Row] = []
-        self._flying: Sequence[Row] = ()  # rows out of memory which the database has now
         # What a previous process left. A file that is there but cannot be read owes rows
         # all the same: it stands for one until the first read can count them.
         waiting = _count_lines(spill)
@@ -146,7 +145,7 @@ class BufferedStorage:
     @property
     def buffered(self) -> int:
         """How many rows are waiting for the database."""
-        return len(self._memory) + len(self._flying) + self._spilled
+        return len(self._memory) + self._spilled
 
     @property
     def draining(self) -> bool:
@@ -263,16 +262,13 @@ class BufferedStorage:
             self._spill_memory()
 
     async def _send_memory(self, room: int) -> None:
-        """Send the oldest rows in memory. They are set apart while the database has them:
-        rows admitted meanwhile may move what memory holds to the file."""
-        self._flying, self._memory = self._memory[:room], self._memory[room:]
-        try:
-            await self._send(self._flying)
-        except BaseException:  # an outage, or a send given up on: they wait again, in front
-            self._memory[:0] = self._flying
-            raise
-        finally:
-            self._flying = ()
+        """Send the oldest rows in memory. They stay there until the database has taken
+        them, ahead of rows admitted meanwhile and counted with them. Those may move what
+        memory holds to the file: rows it took are sent again from there, in their place."""
+        rows = self._memory[:room]
+        await self._send(rows)
+        sent = {id(row) for row in rows}
+        self._memory = [row for row in self._memory if id(row) not in sent]
 
     async def _send(self, rows: Sequence[Row]) -> int:
         """Write rows now, raising StorageError only when the database cannot be reached."""
@@ -375,13 +371,18 @@ class BufferedStorage:
                 self._unreadable_until = None
             # A line cut short by a crash is skipped rather than blocking the rest.
             await self._send([row for row in map(_decode, lines) if row is not None])
+            self._spilled = max(self._spilled - len(lines), 0)
             if self._more_in_file_after(start, b"".join(lines)):
-                self._spilled = max(self._spilled - len(lines), 1)  # more for a later call
+                self._spilled = max(self._spilled, 1)  # more for a later call
                 return len(lines)
         except (FileNotFoundError, NotADirectoryError):
             # A file never read was never counted: its loss is said, not given a number.
+            # One removed while the last of it was being sent took nothing with it.
             lost = "an unknown number of" if self._uncounted else self._spilled
-            _LOGGER.error("Buffer file %s is gone, and %s unsent rows with it", self._spill, lost)
+            if lost:
+                _LOGGER.error(
+                    "Buffer file %s is gone, and %s unsent rows with it", self._spill, lost
+                )
             if not self._uncounted:
                 self.dropped += self._spilled
             self._spilled, self._replayed, self._uncounted = 0, 0, False
@@ -405,6 +406,7 @@ class BufferedStorage:
         The file is looked at afresh: while they were being sent, rows may have been added
         to it, or it may have been emptied or replaced. Only lines still where they were
         read move the position past them; otherwise all the file holds now is unsent.
+        A file that is gone is for the caller to account for.
         """
         try:
             with self._spill.open("rb") as spill:
@@ -415,7 +417,7 @@ class BufferedStorage:
                     self._replayed, self._replayed_file = spill.tell(), _identity(spill)
                 return _size(spill) > self._replayed
         except (FileNotFoundError, NotADirectoryError):
-            return False
+            raise
         except OSError:
             return True  # whatever it holds is owed until it can be read
 
@@ -457,6 +459,10 @@ class BackgroundStorage(BufferedStorage):
     `drain` writes what waits, and gives up on an attempt the database has not answered
     within `deadline` seconds: a backend suspended under an open connection is cut short by
     neither a statement timeout nor TCP.
+
+    An attempt given up on may still land, after rows admitted since. Rows carry their own
+    time, so that is harmless, with one exception: of a Job described twice as of the same
+    moment, the database would then keep the older description.
     """
 
     def __init__(
@@ -478,6 +484,9 @@ class BackgroundStorage(BufferedStorage):
         One drain at a time, which is the caller's to see to."""
         while self.draining:
             await self._flush()
+
+    def flush(self) -> None:
+        raise RuntimeError("the database is waited on by a thread; use drain()")
 
     def close(self) -> None:
         """Leave what is waiting on disk for the next start, without a word to the database:

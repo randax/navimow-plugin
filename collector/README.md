@@ -201,8 +201,9 @@ to `buffer.jsonl` in the state directory (up to 64 MiB of rows waiting), and
 written when the database returns, by this process or the next. Once the file
 is full, or if it cannot be written, memory keeps what it can hold and beyond
 that the newest rows are dropped, gaps last, with an error logged. A clean stop moves what is in memory to
-the file; a crash while the database is away loses what was still in memory, at
-most 1,000 rows. Gap rows go to the file at once, and the note of when a gap
+the file; a crash loses what was still in memory: the rows not yet written, a
+moment's worth while the database answers and at most 1,000 while it is away.
+Gap rows go to the file at once, and the note of when a gap
 started is kept until its row has been handed over, so a crash at any point
 records the gap again rather than losing it. Only when the file cannot take it
 does a gap wait in memory with the other rows, exposed to a crash like them.

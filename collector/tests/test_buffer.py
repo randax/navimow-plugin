@@ -7,8 +7,8 @@ import errno
 import os
 import socket
 import threading
-from collections.abc import Callable, Iterator, Sequence
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Callable, Iterator, Sequence
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -156,6 +156,19 @@ def buffered(db: Database, tmp_path: Path, clock: Clock, **limits: int) -> Buffe
     return BufferedStorage(db.open, tmp_path / "buffer.jsonl", clock=clock, **limits)
 
 
+@asynccontextmanager
+async def unanswered(
+    db: Database, storage: BackgroundStorage
+) -> AsyncIterator[asyncio.Future[None]]:
+    """What waits being written out, the first write of it held by the database until this
+    ends. Needs the statement timeout off, and a Trail point among the first rows."""
+    with db.suspended():
+        writing = asyncio.ensure_future(storage.drain())
+        while not db.held():
+            await asyncio.sleep(0.01)
+        yield writing
+
+
 def finishes(work: Callable[[], object], within: float) -> bool:
     """Whether `work` returns in time; work that stalls is left behind on its thread."""
     thread = threading.Thread(target=work, daemon=True)
@@ -230,22 +243,19 @@ def test_rows_admitted_while_a_write_is_unanswered_are_bounded_by_memory_then_th
     storage.connect()
 
     async def scenario() -> int:
-        storage.write_trail(points(0))
-        with db.suspended():
-            writing = asyncio.ensure_future(storage.drain())
-            while not db.held():
-                await asyncio.sleep(0.01)
-            for second in range(1, 11):
+        storage.write_trail(points(0, 1, 2))
+        only_in_memory = 0
+        async with unanswered(db, storage) as writing:
+            for second in range(3, 11):
                 storage.write_trail(points(second))
-            on_disk = spill.read_bytes().count(b"\n")
+                on_disk = spill.read_bytes().count(b"\n")
+                only_in_memory = max(only_in_memory, storage.buffered - on_disk)
         await writing
-        return on_disk
+        return only_in_memory
 
-    on_disk = asyncio.run(scenario())
-
-    # One row is with the database and memory never holds more than three: the rest wait
-    # in the file, moved there four at a time as the fourth arrives.
-    assert on_disk == 8
+    # The rows the database has not answered for are memory's still: with them it never
+    # holds more than three, and the rest wait in the file.
+    assert asyncio.run(scenario()) == 3
     assert db.trail() == list(range(11))
     assert (storage.buffered, storage.written, spill.exists()) == (0, 11, False)
 
@@ -287,10 +297,7 @@ def test_a_buffer_file_emptied_while_its_rows_are_being_written_loses_none_added
 
     async def scenario() -> None:
         storage.write_trail(points(0))
-        with db.suspended():
-            writing = asyncio.ensure_future(storage.drain())
-            while not db.held():
-                await asyncio.sleep(0.01)
+        async with unanswered(db, storage) as writing:
             spill.write_bytes(b"")  # an operator making room
             storage.write_trail(points(1))
             storage.write_trail(points(2))  # the file is now longer than what was sent of it
@@ -300,6 +307,70 @@ def test_a_buffer_file_emptied_while_its_rows_are_being_written_loses_none_added
 
     assert db.trail() == [0, 1, 2]
     assert storage.buffered == 0
+
+
+def test_a_buffer_file_deleted_while_its_rows_are_being_written_counts_the_rest_as_lost(
+    database: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(postgres, "STATEMENT_TIMEOUT_MS", 0)
+    db, spill = Database(database), tmp_path / "buffer.jsonl"
+    storage = BackgroundStorage(db.open, spill, clock=Clock(), memory_rows=0)
+    storage.connect()
+
+    async def scenario() -> None:
+        storage.write_trail(points(*range(REPLAY_ROWS + 2)))  # one slice, and two rows more
+        async with unanswered(db, storage) as writing:
+            spill.unlink()
+        await writing
+
+    asyncio.run(scenario())
+
+    assert db.trail() == list(range(REPLAY_ROWS))
+    assert (storage.buffered, storage.dropped) == (0, 2)
+    assert any("2 unsent rows" in message for message in messages(caplog))
+
+
+def test_a_write_given_up_on_keeps_its_rows_ahead_of_those_admitted_since(
+    database: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Of two descriptions of a Job as of the same moment the database keeps the one it is
+    # given last, so the order they were admitted in is the order they must be written in.
+    monkeypatch.setattr(postgres, "STATEMENT_TIMEOUT_MS", 0)
+    db, clock = Database(database), Clock()
+    storage = BackgroundStorage(db.open, tmp_path / "buffer.jsonl", clock=clock, deadline=0.1)
+    storage.connect()
+    job = Job("DEVICE_1", "2026-09-30T12:00:00Z", start_time=START, updated_time=START)
+    gap = Gap("DEVICE_1", START, START + timedelta(seconds=1), GapReason.RECONNECT)
+
+    async def scenario() -> None:
+        storage.write_jobs([job])
+        storage.write_trail(points(0))
+        async with unanswered(db, storage) as writing:
+            storage.write_jobs([replace(job, mowing_percentage=40)])
+            storage.write_gaps([gap])  # to the file at once, and with it what memory holds
+            await writing  # given up on
+        clock.now += RETRY_SECONDS
+        await storage.drain()
+
+    asyncio.run(scenario())
+
+    with psycopg.connect(database) as conn:
+        assert conn.execute("SELECT mowing_percentage FROM job").fetchall() == [(40,)]
+    assert storage.buffered == 0
+
+
+def test_a_buffer_written_out_by_a_thread_is_not_flushed_by_waiting_on_the_database(
+    database: str, tmp_path: Path
+) -> None:
+    db = Database(database)
+    storage = BackgroundStorage(db.open, tmp_path / "buffer.jsonl", clock=Clock())
+    storage.connect()
+    storage.write_trail(points(1))
+
+    with pytest.raises(RuntimeError, match="drain"):
+        storage.flush()
+
+    assert (storage.buffered, db.writes) == (1, 0)
 
 
 def test_rows_written_during_an_outage_arrive_when_the_database_returns(
