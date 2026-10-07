@@ -38,6 +38,9 @@ from navimow_collector.storage.buffered import (
 from .conftest import Clock, gaps
 
 START = datetime(2026, 9, 30, 12, tzinfo=UTC)
+# The longest the database is ever kept suspended: the server ends it then by itself, so a
+# write that waits on the event loop after all fails its test rather than hanging it.
+SUSPENDED_SECONDS = 30
 
 
 class Database:
@@ -73,6 +76,7 @@ class Database:
         its connection open, until this ends. With the statement timeout off this is, on any
         server, what a backend suspended under its client looks like from the collector."""
         with psycopg.connect(self.dsn) as maintenance:
+            maintenance.execute(f"SET idle_in_transaction_session_timeout = '{SUSPENDED_SECONDS}s'")
             maintenance.execute("LOCK TABLE trail_point IN ACCESS EXCLUSIVE MODE")
             yield
 
@@ -164,8 +168,9 @@ async def unanswered(
     ends. Needs the statement timeout off, and a Trail point among the first rows."""
     with db.suspended():
         writing = asyncio.ensure_future(storage.drain())
-        while not db.held():
-            await asyncio.sleep(0.01)
+        async with asyncio.timeout(5):
+            while not db.held():
+                await asyncio.sleep(0.01)
         yield writing
 
 
@@ -348,6 +353,7 @@ def test_a_write_given_up_on_keeps_its_rows_ahead_of_those_admitted_since(
         async with unanswered(db, storage) as writing:
             storage.write_jobs([replace(job, mowing_percentage=40)])
             storage.write_gaps([gap])  # to the file at once, and with it what memory holds
+            assert not writing.done()
             await writing  # given up on
         clock.now += RETRY_SECONDS
         await storage.drain()

@@ -452,8 +452,8 @@ class BufferedStorage:
 
 
 class BackgroundStorage(BufferedStorage):
-    """The buffer for a writer with an event loop to keep free: the database is only ever
-    waited on by a thread, one attempt at a time.
+    """The buffer for a writer with an event loop to keep free: once opened, the database
+    is only ever waited on by a thread, one attempt at a time.
 
     Writing a row only admits it to the buffer, bounded as ever by memory and then the file.
     `drain` writes what waits, and gives up on an attempt the database has not answered
