@@ -48,9 +48,12 @@ const cameraOf = (map: Map): Camera => ({
   pitch: map.getPitch(),
 });
 
+// The mower is drawn on the map and is the map to a pointer: what presses or points at it reaches
+// the canvas under it, as it does anywhere else.
 const mowerStyles = {
-  icon: css({ width: 28, height: 28, svg: { display: 'block' } }),
+  icon: css({ width: 28, height: 28, pointerEvents: 'none', svg: { display: 'block' } }),
   lastSeen: css({
+    pointerEvents: 'none',
     padding: '1px 6px',
     borderRadius: 8,
     background: 'rgba(255, 255, 255, 0.9)',
@@ -321,16 +324,13 @@ const MapCanvas: React.FC<Props & { coverageLayer?: CoverageScene['layer'] }> = 
       attributionControl: { compact: false },
     });
     reportErrors(created);
-    // MapLibre ends a drag only when the button is let go over its canvas container. Let go anywhere
-    // else, over a control for one, the drag would hang until the pointer next moved; capturing the
-    // pointer keeps the whole drag the map's. What was pressed captures it, the canvas or a marker:
-    // captured by the container, the pointer would count as having left the canvas, and the details
-    // it points at would be put away by a click.
-    created.getCanvasContainer().addEventListener('pointerdown', ({ target, pointerId }) => {
-      if (target instanceof Element) {
-        target.setPointerCapture(pointerId);
-      }
-    });
+    // MapLibre ends a pan or a turn only when the mouse button is let go inside its canvas container.
+    // Let go anywhere else, over a control for one, the drag would hang until the pointer next moved;
+    // capturing the pointer keeps the whole drag the map's. The canvas captures it and not that
+    // container: to the container, the pointer would count as having left the canvas, and a click
+    // would put away the details it points at.
+    const canvas = created.getCanvas();
+    canvas.addEventListener('pointerdown', ({ pointerId }) => canvas.setPointerCapture(pointerId));
     // Only for data that arrived while the style was loading. MapLibre fires this after every restyle
     // in place too, where the Trail is already there and sending it again would re-tile it for nothing.
     topUp.current = false;
