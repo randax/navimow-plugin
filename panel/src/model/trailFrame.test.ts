@@ -250,31 +250,70 @@ describe('readTrails', () => {
   });
 
   test("a series without a column is not given another series' field for it", () => {
-    const [a, b, c] = ['a', 'b', 'c'].map((job_id) => ({ job_id }));
+    // Three mowers at one moment, so that every series has the row.
+    const [a, b, c] = ['a', 'b', 'c'].map((device_id) => ({ device_id }));
+    const headings = (...thetas: Array<ReturnType<typeof numbers>>) =>
+      trails([
+        createDataFrame({
+          fields: [
+            { name: 'Time', type: FieldType.time, values: at(0) },
+            ...[a, b, c].flatMap((labels) => [numbers('x', [1], labels), numbers('y', [2], labels)]),
+            ...thetas,
+          ],
+        }),
+      ]).map((t) => t.segments[0][0].heading);
+    // Whether the column is another series' alone, or two others'.
+    expect(headings(numbers('theta', [0.5], a))).toEqual([0.5, undefined, undefined]);
+    expect(headings(numbers('theta', [0.5], a), numbers('theta', [1.5], b))).toEqual([0.5, 1.5, undefined]);
+  });
+
+  test('a series with an x and no y of its own has no positions, and borrows none', () => {
     const series = createDataFrame({
       fields: [
-        { name: 'Time', type: FieldType.time, values: at(0, SEC, 2 * SEC) },
-        ...[a, b, c].flatMap((labels, i) => [
-          numbers(
-            'x',
-            [0, 1, 2].map((row) => (row === i ? row : null)),
-            labels
-          ),
-          numbers(
-            'y',
-            [0, 1, 2].map((row) => (row === i ? 0 : null)),
-            labels
-          ),
-        ]),
-        numbers('theta', [0.5, null, 0.7], a),
-        numbers('theta', [null, 1.5, 1.7], b),
+        { name: 'Time', type: FieldType.time, values: at(0) },
+        numbers('x', [1], { job_id: 'a' }),
+        numbers('x', [2], { job_id: 'b' }),
+        numbers('y', [3], { job_id: 'a' }),
       ],
     });
-    expect(trails([series]).map((t) => [t.job, t.segments[0][0].heading])).toEqual([
-      ['a', 0.5],
-      ['b', 1.5],
-      ['c', undefined],
+    expect(trails([series])).toEqual([{ job: 'a', segments: [[{ time: T, x: 1, y: 3 }]] }]);
+  });
+
+  test('of two columns of one name in a Table, as a join gives, the first is read, and each row once', () => {
+    const joined = createDataFrame({
+      fields: [
+        { name: 'time', type: FieldType.time, values: at(0, SEC) },
+        { name: 'time', type: FieldType.time, values: at(MIN, 2 * MIN) },
+        numbers('x', [1, 2]),
+        numbers('y', [0, 0]),
+        numbers('x', [8, 9]),
+        { name: 'job_id', type: FieldType.string, values: ['a', 'a'] },
+        { name: 'job_id', type: FieldType.string, values: [null, null] },
+      ],
+    });
+    expect(trails([joined])).toEqual([
+      {
+        job: 'a',
+        segments: [
+          [
+            { time: T, x: 1, y: 0 },
+            { time: T + SEC, x: 2, y: 0 },
+          ],
+        ],
+      },
     ]);
+  });
+
+  test('a column by the name of the time column is read before one named Time', () => {
+    const both = createDataFrame({
+      fields: [
+        { name: 'Time', type: FieldType.time, values: at(MIN) },
+        { name: 'time', type: FieldType.time, values: at(0) },
+        numbers('x', [1]),
+        numbers('y', [2]),
+      ],
+    });
+    expect(trails([both])[0].segments[0][0].time).toBe(T);
   });
 
   test('a label on either position field is read', () => {
@@ -367,6 +406,38 @@ describe('readTrails', () => {
       ]);
     });
 
+    test('two mowers without a Job are a Trail each, neither breaking the other', () => {
+      const mowers = {
+        time: at(0, SEC, 2 * SEC, 3 * SEC),
+        x: [0, 10, 1, 11],
+        y: [0, 0, 0, 0],
+        device_id: ['m1', 'm2', 'm1', 'm2'],
+      };
+      const expected = [
+        [undefined, [[0, 1]]],
+        [undefined, [[10, 11]]],
+      ];
+      expect(xs(trails([frame(mowers)]))).toEqual(expected);
+      expect(xs(trails([wide(mowers, ['device_id'])]))).toEqual(expected);
+      expect(xs(trails(perSeries(mowers, ['device_id'])))).toEqual(expected);
+    });
+
+    test("a row with half a position is its own mower's, and breaks no line but that mower's", () => {
+      const halved = {
+        time: at(0, SEC, 2 * SEC, 3 * SEC, 4 * SEC),
+        x: [0, 10, null, 11, 2],
+        y: [0, 0, 5, 0, 0],
+        job_id: ['a', 'b', 'a', 'b', 'a'],
+        device_id: ['m1', 'm2', 'm1', 'm2', 'm1'],
+      };
+      const expected = [
+        ['a', [[0], [2]]],
+        ['b', [[10, 11]]],
+      ];
+      expect(xs(trails([frame(halved)]))).toEqual(expected);
+      expect(xs(trails([wide(halved, ['job_id', 'device_id'])]))).toEqual(expected);
+    });
+
     test('without a Job, a query split into frames by its other text columns is still one Trail', () => {
       const { job_id, device_id, ...jobless } = table;
       const split = perSeries(jobless, ['zone', 'status']);
@@ -428,6 +499,17 @@ describe('readTrails', () => {
     expect(xs(result)).toEqual([
       [undefined, [[1]]],
       [undefined, [[3]]],
+    ]);
+  });
+
+  test('a query named as a number is not taken for the frame of that number', () => {
+    const result = trails([
+      { ...frame({ time: at(0), x: [1], y: [0] }), refId: '1' },
+      frame({ time: at(SEC), x: [9], y: [0] }),
+    ]);
+    expect(xs(result)).toEqual([
+      [undefined, [[1]]],
+      [undefined, [[9]]],
     ]);
   });
 
