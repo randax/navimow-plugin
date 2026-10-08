@@ -399,13 +399,12 @@ describe('readTrails', () => {
     ]);
   });
 
-  test('a label on either position field is read', () => {
+  test.each([
+    ['x', { job_id: 'job-1' }, undefined],
+    ['y', undefined, { job_id: 'job-1' }],
+  ])('a label on the %s field alone is read', (_, onX, onY) => {
     const series = createDataFrame({
-      fields: [
-        { name: 'time', type: FieldType.time, values: at(0) },
-        { name: 'x', type: FieldType.number, values: [1] },
-        { name: 'y', type: FieldType.number, values: [2], labels: { job_id: 'job-1' } },
-      ],
+      fields: [{ name: 'time', type: FieldType.time, values: at(0) }, numbers('x', [1], onX), numbers('y', [2], onY)],
     });
     expect(trails([series])).toEqual([{ job: 'job-1', segments: [[{ time: T, x: 1, y: 2 }]] }]);
   });
