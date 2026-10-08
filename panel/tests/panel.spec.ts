@@ -103,9 +103,10 @@ const test = base.extend<{
     use(await readProvisionedDashboard({ fileName: 'navimow-coverage.json' })),
   openCoverage: async ({ gotoDashboardPage, coverageDashboard }, use) =>
     use(async (title) => (await gotoDashboardPage(coverageDashboard)).getPanelByTitle(title).locator),
-  // A made-up lawn again, in a row that can be collapsed: three Jobs side by side, each along a line
-  // from 15 m south of the dock. Job a, 10 m west of the dock, and Job b, through it, reach 15 m north
-  // of it. Job c, 10 m east of it, goes on to 55 m north, and ends there with a turn 10 m further east.
+  // A made-up lawn again, in a row that can be collapsed: three Jobs on lines side by side. Job a,
+  // 10 m west of the dock, runs from 15 m south of it to 15 m north. Job b comes back through the
+  // dock, north to south. Job c, 10 m east of it, runs north again and on to 55 m north of the dock,
+  // where it ends with a turn 10 m further east.
   lifecycleDashboard: async ({ readProvisionedDashboard }, use) =>
     use(await readProvisionedDashboard({ fileName: 'navimow-map-lifecycle.json' })),
   openLifecycle: async ({ gotoDashboardPage, lifecycleDashboard }, use) =>
@@ -294,6 +295,23 @@ const holdFrames = async (page: Page) => {
   });
   return () => page.evaluate(() => window.dispatchEvent(new Event('frames')));
 };
+
+/**
+ * Where the mower's arrow points on screen, as a compass bearing with the top of the screen for
+ * north. Its outline weighs most at its notched tail, so its tip is to the other side of its middle.
+ */
+const pointing = (mower: Locator) =>
+  mower.locator('path').evaluate((arrow: SVGPathElement) => {
+    const onScreen = arrow.getScreenCTM()!;
+    const length = arrow.getTotalLength();
+    const outline = Array.from({ length: 200 }, (_, i) =>
+      arrow.getPointAtLength((i / 200) * length).matrixTransform(onScreen)
+    );
+    const mean = (of: 'x' | 'y') => outline.reduce((sum, point) => sum + point[of], 0) / outline.length;
+    const box = arrow.getBoundingClientRect();
+    const [east, north] = [box.x + box.width / 2 - mean('x'), mean('y') - (box.y + box.height / 2)];
+    return (Math.atan2(east, north) * 180) / Math.PI;
+  });
 
 /** The map's control with this name. */
 const control = (panel: Locator, name: string) =>
@@ -633,12 +651,15 @@ test('a Trail that grows out of the view is framed again', async ({ gotoDashboar
   await expect(map).toHaveAttribute('data-trails-drawn', '2');
   // Framed on Jobs a and b, the view ends short of where Job c will, 55 m north of the dock.
   expect(await inView(panel, ...NORTH_EAST)).toBe(false);
+  const framed = await cameraOf(panel);
 
   queryJobs(/job-[abc]/);
   await dashboardPage.refreshDashboard();
   await expect(map).toHaveAttribute('data-trails-drawn', '3');
   expect(await inView(panel, ...SOUTH_WEST)).toBe(true);
   expect(await inView(panel, ...NORTH_EAST)).toBe(true);
+  // From further off as well, to leave room around a Trail that has grown from 30 m to 70.
+  expect((await cameraOf(panel)).zoom).toBeLessThan(framed.zoom - 0.2);
 });
 
 test('each Job is drawn as a Trail in a colour of its own', async ({ openLifecycle, page }) => {
@@ -680,21 +701,20 @@ test('the mower is an arrow pointing where it was last heading, and fades once t
   await expect(mower).toHaveCSS('opacity', '1');
   await expect(panel.getByText(/^Last seen/)).toHaveCount(0);
 
-  // An arrow, where a mower of unknown heading is a dot. Job c ended on its way east, which is
-  // where the arrow points on screen: its outline weighs most at its notched tail, so its tip is to
-  // the other side of its middle.
-  const pointing = await mower.locator('path').evaluate((arrow: SVGPathElement) => {
-    const onScreen = arrow.getScreenCTM()!;
-    const length = arrow.getTotalLength();
-    const outline = Array.from({ length: 200 }, (_, i) =>
-      arrow.getPointAtLength((i / 200) * length).matrixTransform(onScreen)
-    );
-    const mean = (of: 'x' | 'y') => outline.reduce((sum, point) => sum + point[of], 0) / outline.length;
-    const box = arrow.getBoundingClientRect();
-    const [east, north] = [box.x + box.width / 2 - mean('x'), mean('y') - (box.y + box.height / 2)];
-    return (Math.atan2(east, north) * 180) / Math.PI;
-  });
-  expect(pointing).toBeCloseTo(90, 0);
+  // An arrow, where a mower of unknown heading is a dot. Job c ended on its way east.
+  expect(await pointing(mower)).toBeCloseTo(90, 0);
+  // East on the ground, not on the screen: the arrow turns with the map.
+  const box = (await panel.getByTestId('navimow-map').boundingBox())!;
+  const [x, y] = [box.x + box.width / 2, box.y + box.height / 2];
+  await page.mouse.move(x, y);
+  await page.mouse.down({ button: 'right' });
+  await page.mouse.move(x + 120, y, { steps: 10 });
+  await page.mouse.up({ button: 'right' });
+  await expect(async () => {
+    const { bearing } = await cameraOf(panel);
+    expect(Math.abs(bearing)).toBeGreaterThan(5);
+    expect(await pointing(mower)).toBeCloseTo(90 - bearing, 0);
+  }).toPass({ timeout: 20_000 });
 
   // With no refresh, the panel's own clock ages the position: 20 minutes on, it is 24 minutes old.
   await page.clock.fastForward('20:00');
