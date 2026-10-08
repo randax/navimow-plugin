@@ -282,9 +282,10 @@ const holdFrames = async (page: Page) => {
   await page.evaluate(() => {
     const { requestAnimationFrame: request, cancelAnimationFrame: cancel } = window;
     const held = new Map<number, FrameRequestCallback>();
-    let id = 0;
+    // Far from the browser's own ids, and from the -1 or 0 that code keeps for no frame and may cancel.
+    let id = 2 ** 30;
     window.requestAnimationFrame = (frame) => {
-      held.set(--id, frame);
+      held.set(++id, frame);
       return id;
     };
     window.cancelAnimationFrame = (frame) => void (held.delete(frame) || cancel.call(window, frame));
@@ -315,6 +316,17 @@ const pointing = (mower: Locator) =>
     const box = arrow.getBoundingClientRect();
     const [east, north] = [box.x + box.width / 2 - mean('x'), mean('y') - (box.y + box.height / 2)];
     return (Math.atan2(east, north) * 180) / Math.PI;
+  });
+
+/**
+ * Whether the mower is in the lower half of its map: south of the middle of the view, where north is
+ * up. Measured within the map and in one go, as a panel can move about the page while its row opens.
+ */
+const mowerSouthOfMiddle = (panel: Locator) =>
+  panel.getByTestId('navimow-map').evaluate((map) => {
+    const mower = map.querySelector('[aria-label^="Mower"]')?.getBoundingClientRect();
+    const view = map.getBoundingClientRect();
+    return mower !== undefined && mower.top + mower.height / 2 > view.top + view.height / 2 + 5;
   });
 
 /** How far one compass bearing is from another, from -180 to 180, so that 350 is 20 from 10. */
@@ -580,7 +592,10 @@ test('a Trail that arrives while a new Base map is still loading its tiles is dr
   await expectDrawn(panel);
   await expect(map).toHaveAttribute('data-trails-drawn', '1');
   const mower = panel.getByRole('img', { name: /^Mower/ });
-  const afterJobA = (await mower.boundingBox())!;
+  // Job a ended in the north, on its way north. The view is framed on it, from 15 m south of the
+  // dock to 15 m north.
+  expect(await mowerSouthOfMiddle(panel)).toBe(false);
+  expect(turnFrom(0, await pointing(mower))).toBeCloseTo(0, 0);
   const framed = await cameraOf(panel);
 
   await panelEditPage.getCustomOptions('Base map').getSelect('Base map').selectOption('OpenStreetMap');
@@ -590,17 +605,19 @@ test('a Trail that arrives while a new Base map is still loading its tiles is dr
   // Not refreshPanel(), which gives the button two seconds: a map being restyled under software
   // rendering can keep the page busy for longer.
   await panelEditPage.getByGrafanaSelector(selectors.components.RefreshPicker.runButtonV2).click();
-  // The panel has Job b once the mower is where that ended, 30 m south of where Job a did.
-  await expect.poll(async () => (await mower.boundingBox())?.y ?? 0).toBeGreaterThan(afterJobA.y + 50);
+  // The panel has Job b once the mower is where that ended, in the south.
+  await expect.poll(() => mowerSouthOfMiddle(panel)).toBe(true);
   await expect(map).not.toHaveAttribute('data-map-idle');
 
   serveTiles();
   await expectDrawn(panel);
   await expect(panel.locator('.maplibregl-ctrl-attrib')).toContainText('© OpenStreetMap contributors');
   await expect(map).toHaveAttribute('data-trails-drawn', '2');
-  // The mower moved there: neither it nor its age was put on the map a second time.
+  // The mower moved there, and turned south as Job b ran: neither it nor its age was put on the
+  // map a second time.
   await expect(mower).toHaveCount(1);
   await expect(panel.getByText(/^Last seen/)).toHaveCount(1);
+  expect(turnFrom(180, await pointing(mower))).toBeCloseTo(0, 0);
   // Job b ran within what the view was framed on for Job a, so the view has stayed where it was.
   expectSamePlace(await cameraOf(panel), framed);
 });
@@ -626,12 +643,15 @@ test('a Trail that arrives before a new map has loaded its style is drawn once i
   await expect(map).toHaveCount(0);
   const releaseFrames = await holdFrames(page);
   await row.click();
-  const afterJobA = (await mower.boundingBox())!;
+  // Job a ended in the north of the view framed on it.
+  await expect(mower).toBeVisible();
+  expect(await mowerSouthOfMiddle(panel)).toBe(false);
   queryAgain('10:35');
   await dashboardPage.refreshDashboard();
-  // The panel has Job b once the mower is where that ended, 30 m south of where Job a did.
-  await expect.poll(async () => (await mower.boundingBox())?.y ?? 0).toBeGreaterThan(afterJobA.y + 50);
-  // And the new map has still to be drawn for the first time, as it is without a style.
+  // The panel has Job b once the mower is where that ended, in the south.
+  await expect.poll(() => mowerSouthOfMiddle(panel)).toBe(true);
+  // And the new map has still to be drawn for the first time: held, the frame that its style loads
+  // in has not come.
   await expect(map).not.toHaveAttribute('data-camera');
 
   await releaseFrames();
@@ -669,6 +689,9 @@ test('a Trail that grows out of the view is framed again', async ({ gotoDashboar
   expect(await inView(panel, ...SOUTH_WEST)).toBe(true);
   // From further off as well, to leave room around Trails that have grown from 30 m to 70.
   expect((await cameraOf(panel)).zoom).toBeLessThan(framed.zoom - 0.2);
+  // And the new length of Job c is drawn: 40 m north of the dock, there is a Trail to point at.
+  await pointAt(panel, 10, 40);
+  await expect(page.getByTestId('navimow-map-tooltip')).toContainText(/Job\s*job-c/);
 });
 
 test('each Job is drawn as a Trail in a colour of its own', async ({ openLifecycle, page }) => {
