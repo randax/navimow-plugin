@@ -462,7 +462,7 @@ describe('readTrails', () => {
     });
 
     test('a row without a position, empty for every set of labels, still breaks the line', () => {
-      // The row is of the Job whose labels come last, so that it is not the first series alone that has it.
+      // The row is of the Job whose labels come last, so that the line to break is not the first series' own.
       const gapped = {
         time: at(0, SEC, 2 * SEC, 3 * SEC),
         x: [0, null, 2, 3],
