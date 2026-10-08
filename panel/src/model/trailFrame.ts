@@ -48,6 +48,9 @@ export interface Trail {
 }
 
 const REQUIRED = ['time', 'x', 'y'] as const;
+const OTHER_THAN_X = ['time', 'y', 'heading', 'job', 'zone', 'status', 'mower'] as const;
+// What Grafana's Time series format names the time field.
+const TIME_SERIES_TIME = 'Time';
 
 // Longer than a docked mower's 5-minute heartbeat, so a charging break inside a Job stays one line,
 // and the same span after which a position counts as stale.
@@ -95,10 +98,10 @@ export function readTrails(
   const names = columnNames(DEFAULT_TRAIL_COLUMNS, overrides);
   const fields = (frame: DataFrame, column: keyof TrailColumns): Field[] => {
     const named = frame.fields.filter((f) => f.name === names[column]);
-    // The Time series format names the time field "Time", whatever the query called it. Two time
-    // fields are not guessed between.
-    const timed = frame.fields.filter((f) => f.type === FieldType.time);
-    return named.length === 0 && column === 'time' && timed.length === 1 ? timed : named;
+    // The Time series format names the time field "Time", whatever the query called it.
+    return named.length === 0 && column === 'time'
+      ? frame.fields.filter((f) => f.name === TIME_SERIES_TIME && f.type === FieldType.time)
+      : named;
   };
 
   const missingFrom = (frame: DataFrame) => REQUIRED.filter((c) => fields(frame, c).length === 0).map((c) => names[c]);
@@ -121,39 +124,61 @@ export function readTrails(
    * same labels, and a label is a column with one value.
    */
   const seriesOf = (frame: DataFrame, index: number): Series[] => {
+    // Of the fields by a column's name, the one with the labels of a series: or the only one, as
+    // the time is, which has no labels whichever series a row is of.
+    const fieldOf = (column: keyof TrailColumns) => {
+      const named = fields(frame, column);
+      const byLabels = new Map(named.map((f) => [labelKey(f), f]));
+      return (labels: string) => byLabels.get(labels) ?? (named.length === 1 ? named[0] : undefined);
+    };
+    const [time, y, heading, job, zone, status, mower] = OTHER_THAN_X.map(fieldOf);
     const positions = fields(frame, 'x');
     const xy = [...positions, ...fields(frame, 'y')];
     const all = Array.from({ length: frame.length }, (_, row) => row);
     // An empty cell in a frame of several series is another series' row, unless the row is empty
     // for all of them: then it is a row without a position, and nothing says whose.
     const empty = positions.length > 1 ? all.map((row) => xy.every((f) => f.values[row] == null)) : undefined;
-    const keys = new Map(frame.fields.map((f) => [f, labelKey(f)]));
     return positions.flatMap((x) => {
-      // Of the fields by a column's name, the one with the labels of this series: or the only one,
-      // as the time is, which has no labels whichever series a row is of.
-      const field = (c: keyof TrailColumns) => {
-        const named = fields(frame, c);
-        return named.find((f) => keys.get(f) === keys.get(x)) ?? (named.length === 1 ? named[0] : undefined);
-      };
-      const labels = { ...field('y')?.labels, ...x.labels };
-      const column = (c: keyof TrailColumns): Column | undefined => {
-        const values = field(c)?.values;
-        const label: string | undefined = labels[names[c]];
-        return values ? (row) => values[row] : label === undefined ? undefined : () => label;
-      };
-      const [time, y, heading, job, zone, status, mower] = (
-        ['time', 'y', 'heading', 'job', 'zone', 'status', 'mower'] as const
-      ).map(column);
-      if (!time || !y) {
+      const of = labelKey(x);
+      const [timeField, yField] = [time(of), y(of)];
+      if (!timeField || !yField) {
         return [];
       }
-      const ownRows = empty ? all.filter((row) => empty[row] || x.values[row] != null || y(row) != null) : all;
-      // The frames of one query are one result, however Grafana split it.
-      const query = frame.refId ?? index;
-      return [{ time, x: (row) => x.values[row], y, heading, job, zone, status, mower, ownRows, query }];
+      const labels = new Map(Object.entries({ ...yField.labels, ...x.labels }));
+      // A label is a column with one value, read when no field has the column's name.
+      const column = (field: Field | undefined, name: string): Column | undefined => {
+        const [values, label] = [field?.values, labels.get(name)];
+        return values ? (row) => values[row] : label === undefined ? undefined : () => label;
+      };
+      const ownRows = empty
+        ? all.filter((row) => empty[row] || x.values[row] != null || yField.values[row] != null)
+        : all;
+      return [
+        {
+          time: (row) => timeField.values[row],
+          x: (row) => x.values[row],
+          y: (row) => yField.values[row],
+          heading: column(heading(of), names.heading),
+          job: column(job(of), names.job),
+          zone: column(zone(of), names.zone),
+          status: column(status(of), names.status),
+          mower: column(mower(of), names.mower),
+          ownRows,
+          // The frames of one query are one result, however Grafana split it.
+          query: frame.refId ?? index,
+        },
+      ];
     });
   };
   const series = usable.flatMap(seriesOf);
+  // Columns that are there, but as fields of different series, are a mistake and not an empty range.
+  if (series.length === 0 && usable.some((f) => f.length > 0)) {
+    return {
+      problem:
+        `No series has all of the ${quoted([names.time, names.x, names.y])} columns: they are fields with ` +
+        'different labels. Check which columns are set under Trail columns in the panel options.',
+    };
+  }
 
   // Every timed row of every series. Rows without a position stay in: they mark where a line must break.
   const rows = series.flatMap(({ time, x, y, heading, job, zone, status, mower, ownRows, query }) =>

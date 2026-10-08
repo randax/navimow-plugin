@@ -6,8 +6,12 @@ Draws a Navimow robotic mower's Trail on a real map of the lawn.
 
 The panel reads one query with a row per mower position. With a SQL data source, the query may be set
 to **Format as** Table or Time series. The Time series format turns text columns such as `job_id`
-into labels and names the time column `Time`: the panel reads a column that is not there from the
-label of its name, and the time from the one time column there is when none has the name.
+into labels and names the time column `Time`: the panel then reads the Job, Zone, status and mower
+from the label of the column's name, and the time from `Time`.
+
+The Time series format does not say which mower a row without a position is from, nor which of two
+rows at the same time came first. A query with several mowers, or with rows of one mower that share
+a time, is drawn most faithfully from a Table.
 
 | Column  | Default name | Required | Meaning                                                                        |
 | ------- | ------------ | -------- | ------------------------------------------------------------------------------ |
@@ -61,7 +65,8 @@ as it was.
 
 Set other column names under **Zone progress columns**. The panel tells the two queries apart by
 their columns, so their order does not matter: any query result with a Zone and a progress column is
-read as Zone progress.
+read as Zone progress. With a SQL data source, set this query to **Format as: Table**: its Zone is
+not read from a label.
 
 ## Coverage
 

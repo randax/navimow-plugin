@@ -25,48 +25,73 @@ const T = 1789986187389;
 const SEC = 1000;
 const MIN = 60 * SEC;
 const at = (...offsets: number[]) => offsets.map((o) => T + o);
-/** The label of each named column in a row; Grafana labels a row without a value with an empty text. */
-const labelsOf = (columns: Columns, labelled: string[], row: number): Record<string, string> =>
-  Object.fromEntries(labelled.map((name) => [name, String(columns[name][row] ?? '')]));
+/** A number field, of a series when it has labels. */
+const numbers = (name: string, values: unknown[], labels?: Record<string, string>) => ({
+  name,
+  type: FieldType.number,
+  values,
+  labels,
+});
+
+/** The names of the columns Grafana's Time series format keeps as fields: all but the time and the labels. */
+const numbered = (columns: Columns, labelled: string[]): string[] =>
+  Object.keys(columns).filter((name) => name !== 'time' && !labelled.includes(name));
 
 /**
- * The rows as Grafana's Time series format hands them to a panel: one frame, the time named Time,
- * the named columns as labels, and each set of labels with number fields of its own, empty wherever
- * a row is another set's.
+ * The rows of each set of labels, the sets in the order Grafana puts them. A row without a value for
+ * a label has it as an empty text.
+ */
+const labelSets = (columns: Columns, labelled: string[]) => {
+  const sets = new Map<string, { labels: Record<string, string>; rows: number[] }>();
+  columns.time.forEach((_, row) => {
+    const labels = Object.fromEntries(labelled.map((name) => [name, String(columns[name][row] ?? '')]));
+    const key = JSON.stringify(labels);
+    sets.set(key, { labels, rows: [...(sets.get(key)?.rows ?? []), row] });
+  });
+  return [...sets].sort(([a], [b]) => (a < b ? -1 : 1)).map(([, set]) => set);
+};
+
+/**
+ * The rows as Grafana's Time series format hands them to a panel: one frame with a row for each
+ * time, named Time, the named columns as labels, and each set of labels with number fields of its
+ * own, empty wherever a row is another set's.
  */
 const wide = (columns: Columns, labelled: string[]): DataFrame => {
-  const rows = columns.time.map((_, row) => labelsOf(columns, labelled, row));
-  const sets = new Map(rows.map((labels) => [JSON.stringify(labels), labels]));
-  const numbers = Object.keys(columns).filter((name) => name !== 'time' && !labelled.includes(name));
+  const times = [...new Set(columns.time)].sort((a, b) => Number(a) - Number(b));
   return createDataFrame({
     refId: 'A',
     fields: [
-      { name: 'Time', type: FieldType.time, values: columns.time },
-      ...numbers.flatMap((name) =>
-        [...sets].map(([set, labels]) => ({
-          name,
-          type: FieldType.number,
-          labels,
-          values: columns[name].map((value, row) => (JSON.stringify(rows[row]) === set ? value : null)),
-        }))
+      { name: 'Time', type: FieldType.time, values: times },
+      ...numbered(columns, labelled).flatMap((name) =>
+        labelSets(columns, labelled).map(({ labels, rows }) =>
+          numbers(
+            name,
+            times.map((time) => columns[name][rows.find((row) => columns.time[row] === time) ?? -1] ?? null),
+            labels
+          )
+        )
       ),
     ],
   });
 };
 
 /** The rows as a frame for each set of labels, which is how other versions and data sources hand a time series over. */
-const perSeries = (columns: Columns, labelled: string[]): DataFrame[] => {
-  const all = wide(columns, labelled);
-  const sets = [...new Set(all.fields.slice(1).map((f) => JSON.stringify(f.labels)))];
-  return sets.map((set) => {
-    const fields = all.fields.filter((f, i) => i === 0 || JSON.stringify(f.labels) === set);
-    const own = columns.time.flatMap((_, row) => (fields.slice(1).some((f) => f.values[row] !== null) ? [row] : []));
-    return createDataFrame({
-      refId: all.refId,
-      fields: fields.map((f) => ({ ...f, values: own.map((row) => f.values[row]) })),
-    });
-  });
-};
+const perSeries = (columns: Columns, labelled: string[]): DataFrame[] =>
+  labelSets(columns, labelled).map(({ labels, rows }) =>
+    createDataFrame({
+      refId: 'A',
+      fields: [
+        { name: 'Time', type: FieldType.time, values: rows.map((row) => columns.time[row]) },
+        ...numbered(columns, labelled).map((name) =>
+          numbers(
+            name,
+            rows.map((row) => columns[name][row]),
+            labels
+          )
+        ),
+      ],
+    })
+  );
 
 /** Each Trail's segments, as the x of each point. */
 const xs = (result: Trail[]) => result.map((t) => [t.job, t.segments.map((s) => s.map((p) => p.x))]);
@@ -173,16 +198,83 @@ describe('readTrails', () => {
     ]);
   });
 
-  test('two time fields, neither by the name of the time column, are not guessed between', () => {
+  test('a time field by another name than Time is not taken for the time', () => {
     const table = createDataFrame({
       fields: [
-        { name: 'received_time', type: FieldType.time, values: at(SEC) },
-        { name: 'device_time', type: FieldType.time, values: at(0) },
+        { name: 'received_time', type: FieldType.time, values: at(0) },
         { name: 'x', type: FieldType.number, values: [1] },
         { name: 'y', type: FieldType.number, values: [2] },
       ],
     });
-    expect(readTrails([table])).toEqual({ problem: expect.stringMatching(/^No "time" column for/) });
+    expect(readTrails([table], { time: 'device_time' })).toEqual({
+      problem: expect.stringMatching(/^No "device_time" column for/),
+    });
+  });
+
+  test('positions that are there, but in no series with the other columns, are a problem and not an empty range', () => {
+    const series = wide({ time: at(0, SEC), x: [1, 2], y: [0, 0], job_id: ['a', 'b'] }, ['job_id']);
+    expect(readTrails([series], { x: 'Time' })).toEqual({
+      problem:
+        'No series has all of the "time", "Time" and "y" columns: they are fields with different labels. ' +
+        'Check which columns are set under Trail columns in the panel options.',
+    });
+  });
+
+  test('a field is read before a label of its name', () => {
+    const labels = { job_id: 'job-1', zone: 'from the label' };
+    const series = createDataFrame({
+      fields: [
+        { name: 'time', type: FieldType.time, values: at(0) },
+        numbers('x', [1], labels),
+        numbers('y', [2], labels),
+        numbers('zone', [8], labels),
+      ],
+    });
+    expect(trails([series])[0].segments[0][0].zone).toBe('8');
+  });
+
+  test('fields are of one series by their labels, in whatever order the labels are written', () => {
+    const series = createDataFrame({
+      fields: [
+        { name: 'Time', type: FieldType.time, values: at(0, SEC) },
+        numbers('x', [1, null], { job_id: 'a', device_id: 'm1' }),
+        numbers('x', [null, 5], { job_id: 'b', device_id: 'm1' }),
+        numbers('y', [2, null], { device_id: 'm1', job_id: 'a' }),
+        numbers('y', [null, 6], { device_id: 'm1', job_id: 'b' }),
+      ],
+    });
+    expect(trails([series]).map((t) => [t.job, t.segments[0][0].x, t.segments[0][0].y])).toEqual([
+      ['a', 1, 2],
+      ['b', 5, 6],
+    ]);
+  });
+
+  test("a series without a column is not given another series' field for it", () => {
+    const [a, b, c] = ['a', 'b', 'c'].map((job_id) => ({ job_id }));
+    const series = createDataFrame({
+      fields: [
+        { name: 'Time', type: FieldType.time, values: at(0, SEC, 2 * SEC) },
+        ...[a, b, c].flatMap((labels, i) => [
+          numbers(
+            'x',
+            [0, 1, 2].map((row) => (row === i ? row : null)),
+            labels
+          ),
+          numbers(
+            'y',
+            [0, 1, 2].map((row) => (row === i ? 0 : null)),
+            labels
+          ),
+        ]),
+        numbers('theta', [0.5, null, 0.7], a),
+        numbers('theta', [null, 1.5, 1.7], b),
+      ],
+    });
+    expect(trails([series]).map((t) => [t.job, t.segments[0][0].heading])).toEqual([
+      ['a', 0.5],
+      ['b', 1.5],
+      ['c', undefined],
+    ]);
   });
 
   test('a label on either position field is read', () => {
@@ -329,6 +421,14 @@ describe('readTrails', () => {
       ['a', [[10, 11]]],
     ]);
     expect(result.map((t) => t.segments[0][0].mower)).toEqual(['m1', 'm2']);
+  });
+
+  test('frames that do not say which query they are of are each a Trail of their own', () => {
+    const result = trails([frame({ time: at(MIN), x: [3], y: [0] }), frame({ time: at(0), x: [1], y: [0] })]);
+    expect(xs(result)).toEqual([
+      [undefined, [[1]]],
+      [undefined, [[3]]],
+    ]);
   });
 
   test('without a Job column, each query is its own Trail', () => {
