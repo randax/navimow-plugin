@@ -7,7 +7,7 @@ Draws a Navimow robotic mower's Trail on a real map of the lawn.
 The panel reads one query with a row per mower position. With a SQL data source, the query may be set
 to **Format as** Table or Time series. The Time series format turns text columns such as `job_id`
 into labels and names the time column `Time`: the panel reads a column that is not there from the
-label of its name, and the time from the time column, whatever it is called.
+label of its name, and the time from the one time column there is when none has the name.
 
 | Column  | Default name | Required | Meaning                                                                        |
 | ------- | ------------ | -------- | ------------------------------------------------------------------------------ |

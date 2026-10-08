@@ -1503,8 +1503,11 @@ test('a Job picked from the bundled dashboard’s table is the one the dashboard
 
 // As the dashboard asks for it, and in the Time series format, which hands the Job and the mower over
 // as labels on a field for each of their values, and names the time Time.
-for (const format of ['table', 'time_series']) {
-  test(`once its Dock origin is set, the bundled dashboard draws the Trail of the Job, queried as ${format}`, async ({
+for (const [format, name] of [
+  ['table', 'a Table'],
+  ['time_series', 'a Time series'],
+]) {
+  test(`once its Dock origin is set, the bundled dashboard draws the Trail of the Job, queried as ${name}`, async ({
     gotoDashboardPage,
     page,
   }) => {
@@ -1517,7 +1520,7 @@ for (const format of ['table', 'time_series']) {
     const withLawn = {
       ...bundled,
       uid: `navimow-with-lawn-${format}`,
-      title: `Navimow, with a Lawn, queried as ${format}`,
+      title: `Navimow, with a Lawn, queried as ${name}`,
       panels: bundled.panels.map((panel: Panel) =>
         panel.title === 'Lawn'
           ? {

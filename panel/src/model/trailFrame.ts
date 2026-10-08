@@ -62,11 +62,21 @@ const MAX_METRES_FROM_DOCK = 10_000;
 const kilometres = (metres: number): string =>
   (metres < 100_000 ? Math.ceil(metres / 100) / 10 : Math.round(metres / 1000)).toLocaleString('en-US');
 
-type Column = ArrayLike<unknown>;
+/** What a column holds in a row. */
+type Column = (row: number) => unknown;
+
+/** The rows of a frame that are one series' own, and its columns to read them by. */
+interface Series extends Partial<Record<keyof TrailColumns, Column>> {
+  time: Column;
+  x: Column;
+  y: Column;
+  ownRows: number[];
+  /** The query the series is a result of, or its frame when nothing says. */
+  query: string | number;
+}
 
 // Fields are of one series when they carry the same labels, in whatever order.
-const labelSet = (field: Field): string => JSON.stringify(Object.entries(field.labels ?? {}).sort());
-const NO_LABELS = '[]';
+const labelKey = (field: Field): string => JSON.stringify(Object.entries(field.labels ?? {}).sort());
 
 const optionalNumber = (v: unknown): number | undefined => {
   const n = toNumber(v);
@@ -85,8 +95,10 @@ export function readTrails(
   const names = columnNames(DEFAULT_TRAIL_COLUMNS, overrides);
   const fields = (frame: DataFrame, column: keyof TrailColumns): Field[] => {
     const named = frame.fields.filter((f) => f.name === names[column]);
-    // The Time series format names the time field "Time", whatever the query called it.
-    return named.length > 0 || column !== 'time' ? named : frame.fields.filter((f) => f.type === FieldType.time);
+    // The Time series format names the time field "Time", whatever the query called it. Two time
+    // fields are not guessed between.
+    const timed = frame.fields.filter((f) => f.type === FieldType.time);
+    return named.length === 0 && column === 'time' && timed.length === 1 ? timed : named;
   };
 
   const missingFrom = (frame: DataFrame) => REQUIRED.filter((c) => fields(frame, c).length === 0).map((c) => names[c]);
@@ -108,67 +120,72 @@ export function readTrails(
    * one frame with empty cells wherever a row is another set's: there a series is the fields with the
    * same labels, and a label is a column with one value.
    */
-  const seriesOf = (frame: DataFrame, index: number) => {
+  const seriesOf = (frame: DataFrame, index: number): Series[] => {
     const positions = fields(frame, 'x');
-    const cells = [...positions, ...fields(frame, 'y')];
+    const xy = [...positions, ...fields(frame, 'y')];
+    const all = Array.from({ length: frame.length }, (_, row) => row);
+    // An empty cell in a frame of several series is another series' row, unless the row is empty
+    // for all of them: then it is a row without a position, and nothing says whose.
+    const empty = positions.length > 1 ? all.map((row) => xy.every((f) => f.values[row] == null)) : undefined;
+    const keys = new Map(frame.fields.map((f) => [f, labelKey(f)]));
     return positions.flatMap((x) => {
-      const column = (c: keyof TrailColumns): Column | undefined => {
+      // Of the fields by a column's name, the one with the labels of this series: or the only one,
+      // as the time is, which has no labels whichever series a row is of.
+      const field = (c: keyof TrailColumns) => {
         const named = fields(frame, c);
-        const label = x.labels?.[names[c]];
-        return (
-          // The time has no labels, whichever series a row is of.
-          (named.find((f) => labelSet(f) === labelSet(x)) ?? named.find((f) => labelSet(f) === NO_LABELS))?.values ??
-          (label === undefined ? undefined : Array<string>(frame.length).fill(label))
-        );
+        return named.find((f) => keys.get(f) === keys.get(x)) ?? (named.length === 1 ? named[0] : undefined);
+      };
+      const labels = { ...field('y')?.labels, ...x.labels };
+      const column = (c: keyof TrailColumns): Column | undefined => {
+        const values = field(c)?.values;
+        const label: string | undefined = labels[names[c]];
+        return values ? (row) => values[row] : label === undefined ? undefined : () => label;
       };
       const [time, y, heading, job, zone, status, mower] = (
         ['time', 'y', 'heading', 'job', 'zone', 'status', 'mower'] as const
       ).map(column);
-      // An empty cell in a frame of several series is another series' row, unless the row is empty
-      // for all of them: then it is a row without a position, and nothing says whose.
-      const has = (row: number) =>
-        positions.length === 1 ||
-        x.values[row] != null ||
-        y?.[row] != null ||
-        cells.every((f) => f.values[row] == null);
+      if (!time || !y) {
+        return [];
+      }
+      const ownRows = empty ? all.filter((row) => empty[row] || x.values[row] != null || y(row) != null) : all;
       // The frames of one query are one result, however Grafana split it.
       const query = frame.refId ?? index;
-      return time && y
-        ? [{ time, x: x.values, y, heading, job, zone, status, mower, query, has, length: frame.length }]
-        : [];
+      return [{ time, x: (row) => x.values[row], y, heading, job, zone, status, mower, ownRows, query }];
     });
   };
   const series = usable.flatMap(seriesOf);
 
   // Every timed row of every series. Rows without a position stay in: they mark where a line must break.
-  const rows = series.flatMap(({ time, x, y, heading, job, zone, status, mower, query, has, length }) => {
-    return Array.from({ length }, (_, row) => {
-      const [mowerId = '', jobId] = [toText(mower?.[row]), toText(job?.[row])];
-      const point: TrailPoint = {
-        time: toTime(time[row]),
-        x: toNumber(x[row]),
-        y: toNumber(y[row]),
-        heading: optionalNumber(heading?.[row]),
-        zone: toText(zone?.[row]),
-        status: toText(status?.[row]),
-        mower: toText(mower?.[row]),
-      };
-      const metres = Math.hypot(point.x, point.y);
-      return {
-        time: point.time,
-        // NaN is no distance at all, so an unreadable position fails this too.
-        point: metres <= MAX_METRES_FROM_DOCK ? point : undefined,
-        metres,
-        jobId,
-        outsideJob: job !== undefined && jobId === undefined,
-        // A Job column says which Trail a row belongs to, whichever frame or series it came in.
-        // Without one, a query is the only grouping on offer, and its rows are a mower's history of
-        // their own.
-        key: job ? `job:${mowerId}:${jobId ?? ''}` : `query:${query}:${mowerId}`,
-        history: job ? `job:${mowerId}` : `query:${query}:${mowerId}`,
-      };
-    }).filter((r, row) => Number.isFinite(r.time) && has(row));
-  });
+  const rows = series.flatMap(({ time, x, y, heading, job, zone, status, mower, ownRows, query }) =>
+    ownRows
+      .map((row) => {
+        const [mowerId = '', jobId] = [toText(mower?.(row)), toText(job?.(row))];
+        const point: TrailPoint = {
+          time: toTime(time(row)),
+          x: toNumber(x(row)),
+          y: toNumber(y(row)),
+          heading: optionalNumber(heading?.(row)),
+          zone: toText(zone?.(row)),
+          status: toText(status?.(row)),
+          mower: toText(mower?.(row)),
+        };
+        const metres = Math.hypot(point.x, point.y);
+        return {
+          time: point.time,
+          // NaN is no distance at all, so an unreadable position fails this too.
+          point: metres <= MAX_METRES_FROM_DOCK ? point : undefined,
+          metres,
+          jobId,
+          outsideJob: job !== undefined && jobId === undefined,
+          // A Job column says which Trail a row belongs to, whichever frame or series it came in.
+          // Without one, a query is the only grouping on offer, and its rows are a mower's history of
+          // their own.
+          key: job ? `job:${mowerId}:${jobId ?? ''}` : `query:${query}:${mowerId}`,
+          history: job ? `job:${mowerId}` : `query:${query}:${mowerId}`,
+        };
+      })
+      .filter((r) => Number.isFinite(r.time))
+  );
   // The mower delivers some positions seconds or hours late, so arrival order is not time order.
   rows.sort((a, b) => a.time - b.time);
 
@@ -196,7 +213,7 @@ export function readTrails(
   if (trails.size === 0) {
     for (const column of REQUIRED) {
       const read = column === 'time' ? toTime : toNumber;
-      const given = series.flatMap((s) => Array.from(s[column])).filter((v) => toText(v) !== undefined);
+      const given = series.flatMap((s) => s.ownRows.map(s[column])).filter((v) => toText(v) !== undefined);
       if (given.length > 0 && given.every((v) => !Number.isFinite(read(v)))) {
         return {
           problem:
