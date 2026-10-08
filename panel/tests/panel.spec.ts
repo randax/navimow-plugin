@@ -662,8 +662,8 @@ test('a Trail that arrives before a new map has loaded its style is drawn once i
   await dashboardPage.refreshDashboard();
   // The panel has Job b once the mower is where that ended, in the south.
   await expect.poll(() => mowerSouthOfMiddle(panel)).toBe(true);
-  // And the new map has no style yet, to tell it whose its Base map is: held, the frame that its
-  // style loads in has not come.
+  // And the new map has yet to be drawn, crediting no one for its Base map: held, the frame that
+  // its style loads in has not come. Nothing on the page tells a style apart from a first drawing.
   await expect(panel.locator('.maplibregl-ctrl-attrib')).not.toContainText('Kartverket');
 
   await releaseFrames();
