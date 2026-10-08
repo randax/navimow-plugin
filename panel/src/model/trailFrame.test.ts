@@ -337,13 +337,53 @@ describe('readTrails', () => {
     expect(trails([both])[0].segments[0][0].time).toBe(T);
   });
 
-  // What joining two metrics by time and renaming them gives: each with the labels of its own metric.
-  test('a frame with one x and one y is one series, whatever labels the two carry', () => {
+  // What joining metrics by time and renaming them gives: each field with the name of its own
+  // metric among its labels.
+  test('metrics joined by time are a series for each of their other labels', () => {
+    const metric = (name: string, values: unknown[], job_id: string) =>
+      numbers(name, values, { __name__: `mower_${name}`, job_id });
+    const joined = createDataFrame({
+      fields: [
+        { name: 'Time', type: FieldType.time, values: at(0, SEC, 2 * SEC, 3 * SEC) },
+        metric('x', [1, 2, null, null], 'a'),
+        metric('x', [null, null, 5, 6], 'b'),
+        metric('y', [3, 4, null, null], 'a'),
+        metric('y', [null, null, 7, 8], 'b'),
+        metric('theta', [0.1, 0.2, null, null], 'a'),
+        metric('theta', [null, null, 0.5, 0.6], 'b'),
+      ],
+    });
+    expect(
+      trails([joined]).map((t) => [t.job, t.segments.map((points) => points.map((p) => [p.x, p.y, p.heading]))])
+    ).toEqual([
+      [
+        'a',
+        [
+          [
+            [1, 3, 0.1],
+            [2, 4, 0.2],
+          ],
+        ],
+      ],
+      [
+        'b',
+        [
+          [
+            [5, 7, 0.5],
+            [6, 8, 0.6],
+          ],
+        ],
+      ],
+    ]);
+  });
+
+  test('a frame with one x is one series with the only field of each other name, whatever labels they carry', () => {
     const joined = createDataFrame({
       fields: [
         { name: 'Time', type: FieldType.time, values: at(0, SEC) },
-        numbers('x', [1, 2], { __name__: 'mower_x', job_id: 'a' }),
-        numbers('y', [3, 4], { __name__: 'mower_y', job_id: 'a' }),
+        numbers('x', [1, 2], { sensor: 'east', job_id: 'a' }),
+        numbers('y', [3, 4], { sensor: 'north', job_id: 'a' }),
+        numbers('theta', [0.1, 0.2], { sensor: 'compass' }),
       ],
     });
     expect(trails([joined])).toEqual([
@@ -351,8 +391,8 @@ describe('readTrails', () => {
         job: 'a',
         segments: [
           [
-            { time: T, x: 1, y: 3 },
-            { time: T + SEC, x: 2, y: 4 },
+            { time: T, x: 1, y: 3, heading: 0.1 },
+            { time: T + SEC, x: 2, y: 4, heading: 0.2 },
           ],
         ],
       },
@@ -423,15 +463,16 @@ describe('readTrails', () => {
     });
 
     test('a row without a position, empty for every set of labels, still breaks the line', () => {
+      // The row is of the Job whose labels come last, so that it is not the first series alone that has it.
       const gapped = {
         time: at(0, SEC, 2 * SEC, 3 * SEC),
         x: [0, null, 2, 3],
         y: [0, null, 0, 0],
-        job_id: ['a', 'a', 'a', 'b'],
+        job_id: ['b', 'b', 'b', 'a'],
       };
       const expected = [
-        ['a', [[0], [2]]],
-        ['b', [[3]]],
+        ['b', [[0], [2]]],
+        ['a', [[3]]],
       ];
       expect(xs(trails([frame(gapped)]))).toEqual(expected);
       expect(xs(trails([wide(gapped, ['job_id'])]))).toEqual(expected);
@@ -446,6 +487,24 @@ describe('readTrails', () => {
         ['8', '8', '9', '9'],
         ['8'],
         [undefined],
+      ]);
+    });
+
+    // What the Time series format cannot carry, as the README says: whose such a row is.
+    test("with several mowers, a row empty for every set of labels breaks every mower's line", () => {
+      const gapped = {
+        time: at(0, SEC, 2 * SEC, 3 * SEC, 4 * SEC),
+        x: [0, 10, null, 2, 11],
+        y: [0, 0, null, 0, 0],
+        device_id: ['m1', 'm2', 'm1', 'm1', 'm2'],
+      };
+      expect(xs(trails([frame(gapped)]))).toEqual([
+        [undefined, [[0], [2]]],
+        [undefined, [[10, 11]]],
+      ]);
+      expect(xs(trails([wide(gapped, ['device_id'])]))).toEqual([
+        [undefined, [[0], [2]]],
+        [undefined, [[10], [11]]],
       ]);
     });
 

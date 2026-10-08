@@ -51,6 +51,8 @@ const REQUIRED = ['time', 'x', 'y'] as const;
 const OTHER_THAN_X = ['time', 'y', 'heading', 'job', 'zone', 'status', 'mower'] as const;
 // What Grafana's Time series format names the time field.
 const TIME_SERIES_TIME = 'Time';
+// The label that holds a metric's own name.
+const METRIC_NAME = '__name__';
 
 // Longer than a docked mower's 5-minute heartbeat, so a charging break inside a Job stays one line,
 // and the same span after which a position counts as stale.
@@ -78,9 +80,14 @@ interface Series extends Partial<Record<keyof TrailColumns, Column>> {
   result: string;
 }
 
-// Fields are of one series when they carry the same labels, in whatever order.
+// Fields are of one series when they carry the same labels, in whatever order. Not so the name of
+// the metric a field was, which is what the x and y of joined metrics differ by.
 const labelKey = (field: Field): string =>
-  JSON.stringify(Object.entries(field.labels ?? {}).sort(([a], [b]) => (a < b ? -1 : 1)));
+  JSON.stringify(
+    Object.entries(field.labels ?? {})
+      .filter(([name]) => name !== METRIC_NAME)
+      .sort(([a], [b]) => (a < b ? -1 : 1))
+  );
 const NO_LABELS = JSON.stringify([]);
 
 // The fields of one name by their labels. Of two with the same, as a join gives a Table two columns
@@ -96,9 +103,9 @@ const firstByLabels = (named: Field[]): Map<string, Field> => {
   return first;
 };
 
-// What tells one Trail, or one mower's history, from another: names joined by a character none of
+// Between the names that tell one Trail, or one mower's history, from another: a character none of
 // them holds, so that no two sets of names read alike.
-const identity = (...names: string[]): string => names.join('\u0000');
+const BETWEEN = '\u0000';
 
 const optionalNumber = (v: unknown): number | undefined => {
   const n = toNumber(v);
@@ -222,8 +229,8 @@ export function readTrails(
           // A Job column says which Trail a row belongs to, whichever frame or series it came in.
           // Without one, a query is the only grouping on offer, and its rows are a mower's history of
           // their own.
-          key: job ? identity('job', mowerId, jobId ?? '') : identity(result, mowerId),
-          history: job ? identity('job', mowerId) : identity(result, mowerId),
+          key: job ? `job${BETWEEN}${mowerId}${BETWEEN}${jobId ?? ''}` : `${result}${BETWEEN}${mowerId}`,
+          history: job ? `job${BETWEEN}${mowerId}` : `${result}${BETWEEN}${mowerId}`,
         };
       })
       .filter((r) => Number.isFinite(r.time))
