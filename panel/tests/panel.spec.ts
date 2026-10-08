@@ -282,18 +282,26 @@ const holdFrames = async (page: Page) => {
   await page.evaluate(() => {
     const { requestAnimationFrame: request, cancelAnimationFrame: cancel } = window;
     const held = new Map<number, FrameRequestCallback>();
+    // The browser's ids for the frames let go, as whoever asked for one may yet cancel it by the id
+    // it was given here.
+    const letGo = new Map<number, number>();
     // Far from the browser's own ids, and from the -1 or 0 that code keeps for no frame and may cancel.
     let id = 2 ** 30;
     window.requestAnimationFrame = (frame) => {
       held.set(++id, frame);
       return id;
     };
-    window.cancelAnimationFrame = (frame) => void (held.delete(frame) || cancel.call(window, frame));
+    window.cancelAnimationFrame = (frame) => {
+      if (!held.delete(frame)) {
+        cancel.call(window, letGo.get(frame) ?? frame);
+      }
+    };
     window.addEventListener(
       'frames',
       () => {
-        Object.assign(window, { requestAnimationFrame: request, cancelAnimationFrame: cancel });
-        held.forEach((frame) => window.requestAnimationFrame(frame));
+        window.requestAnimationFrame = request;
+        held.forEach((frame, asked) => letGo.set(asked, window.requestAnimationFrame(frame)));
+        held.clear();
       },
       { once: true }
     );
@@ -579,9 +587,11 @@ test('a Trail that arrives while a new Base map is still loading its tiles is dr
   // The new Base map's tiles are kept back, until the test serves them.
   let serveTiles = () => {};
   const served = new Promise<void>((serve) => (serveTiles = serve));
+  let tilesAskedFor = 0;
   await page.route(
     (url) => url.host === 'tile.openstreetmap.org',
     async (route) => {
+      tilesAskedFor++;
       await served;
       await route.fallback();
     }
@@ -605,8 +615,10 @@ test('a Trail that arrives while a new Base map is still loading its tiles is dr
   // Not refreshPanel(), which gives the button two seconds: a map being restyled under software
   // rendering can keep the page busy for longer.
   await panelEditPage.getByGrafanaSelector(selectors.components.RefreshPicker.runButtonV2).click();
-  // The panel has Job b once the mower is where that ended, in the south.
+  // The panel has Job b once the mower is where that ended, in the south: with the new Base map
+  // asked for and not one tile of it in.
   await expect.poll(() => mowerSouthOfMiddle(panel)).toBe(true);
+  expect(tilesAskedFor).toBeGreaterThan(0);
   await expect(map).not.toHaveAttribute('data-map-idle');
 
   serveTiles();
@@ -650,9 +662,9 @@ test('a Trail that arrives before a new map has loaded its style is drawn once i
   await dashboardPage.refreshDashboard();
   // The panel has Job b once the mower is where that ended, in the south.
   await expect.poll(() => mowerSouthOfMiddle(panel)).toBe(true);
-  // And the new map has still to be drawn for the first time: held, the frame that its style loads
-  // in has not come.
-  await expect(map).not.toHaveAttribute('data-camera');
+  // And the new map has no style yet, to tell it whose its Base map is: held, the frame that its
+  // style loads in has not come.
+  await expect(panel.locator('.maplibregl-ctrl-attrib')).not.toContainText('Kartverket');
 
   await releaseFrames();
   await expectDrawn(panel);
@@ -687,6 +699,7 @@ test('a Trail that grows out of the view is framed again', async ({ gotoDashboar
   await dashboardPage.refreshDashboard();
   await expect.poll(() => inView(panel, ...NORTH_EAST)).toBe(true);
   expect(await inView(panel, ...SOUTH_WEST)).toBe(true);
+  await expect(panel.getByTestId('navimow-map')).toHaveAttribute('data-trails-drawn', '3');
   // From further off as well, to leave room around Trails that have grown from 30 m to 70.
   expect((await cameraOf(panel)).zoom).toBeLessThan(framed.zoom - 0.2);
   // And the new length of Job c is drawn: 40 m north of the dock, there is a Trail to point at.
