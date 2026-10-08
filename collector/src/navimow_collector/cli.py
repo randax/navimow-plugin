@@ -33,8 +33,9 @@ from .health import HealthServer, Probe
 from .ingest import Ingestor, read_capture
 from .live import Collector
 from .logs import JsonFormatter
-from .storage import StorageError, open_storage
+from .storage import Storage, StorageError, open_storage
 from .storage.buffered import BackgroundStorage
+from .storage.retention import Retention
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -97,7 +98,7 @@ def _format_config(config: Config) -> str:
 def _display(value: object) -> str:
     if isinstance(value, Secret):
         return f'"{value.display()}"'
-    if isinstance(value, bool):
+    if isinstance(value, bool | int):
         return str(value).lower()
     return "# unset" if value is None else f'"{value}"'
 
@@ -138,8 +139,13 @@ def _collect(config: Config, session_factory: Callable[[], HTTPSession], login_c
             pass
     except OSError as error:
         raise ConfigError(f"collector.state_dir {state_dir} cannot be written: {error}") from error
-    storage = BackgroundStorage(lambda: open_storage(config.storage), state_dir / "buffer.jsonl")
+
+    def opener() -> Storage:
+        return open_storage(config.storage)
+
+    storage = BackgroundStorage(opener, state_dir / "buffer.jsonl")
     storage.connect()
+    days = config.storage.retention_days
     try:
         session = session_factory()
         tokens = TokenManager(
@@ -149,7 +155,9 @@ def _collect(config: Config, session_factory: Callable[[], HTTPSession], login_c
         )
         # Made before the loop runs: it reads each mower's latest Job, the one time the
         # database is waited on here, and a loop held by that would not hear a stop.
-        collector = Collector(session, tokens, storage, state_dir)
+        collector = Collector(
+            session, tokens, storage, state_dir, retention=Retention(opener, days) if days else None
+        )
         asyncio.run(_until_signalled(config.health, collector))
     finally:
         storage.close()

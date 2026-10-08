@@ -41,6 +41,8 @@ class StorageConfig:
     backend: str = "postgres"
     dsn: Secret | None = None
     migrate: bool = True
+    # How many days of positions, progress, states and gaps to keep; unset keeps them all.
+    retention_days: int | None = None
 
 
 PUBLIC_CLIENT_ID = "homeassistant"
@@ -240,6 +242,14 @@ def _coerce(value: object, annotation: object, key: str) -> object:
             if coerced is not None:
                 return coerced
         raise ConfigError(f"{key} must be a boolean (true/false, 1/0, or yes/no)")
+    if annotation == int | None:
+        if value is None:
+            return None
+        if isinstance(value, str) and value.isascii() and value.isdigit():
+            value = int(value)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return value
+        raise ConfigError(f"{key} must be a positive whole number")
     raise ConfigError(f"unsupported configuration type for {key}")
 
 

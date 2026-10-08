@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import datetime
 from typing import Protocol, Self
 
 from ..records import Gap, Job, Mower, MowerState, Progress, Row, TrailPoint
@@ -81,6 +82,11 @@ class Storage(Writer, Protocol):
 
     def latest_jobs(self) -> Sequence[Job]:
         """Each mower's most recent Job, for a collector starting up to carry on from."""
+        ...
+
+    def remove_older_than(self, before: datetime, limit: int) -> int:
+        """Remove up to `limit` of the positions, progress reports, states and gaps from
+        before then, never a Job or a mower; return how many were removed."""
         ...
 
     def check_schema(self) -> None: ...

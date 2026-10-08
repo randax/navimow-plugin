@@ -23,6 +23,7 @@ from .health import Snapshot
 from .ingest import Ingestor
 from .records import CHANNEL_TOPIC, STORED_CHANNELS, GapReason
 from .storage.buffered import BackgroundStorage
+from .storage.retention import Retention
 
 API_URL = "https://navimow-fra.ninebot.com"
 # The SDK's default of 40 minutes lets the broker drop an idle connection after about ten,
@@ -124,12 +125,14 @@ class Collector:
         storage: BackgroundStorage,
         state_dir: Path,
         *,
+        retention: Retention | None = None,
         connect: Callable[[BrokerCredentials, Sequence[str]], Broker] = connect_broker,
         clock: Callable[[], float] = time,
     ) -> None:
         self._session = session
         self._tokens = tokens
         self._storage = storage
+        self._retention = retention
         self._ingestor = Ingestor(storage, jobs=storage.latest_jobs())
         self._connect = connect
         self._clock = clock
@@ -187,6 +190,8 @@ class Collector:
         if self.connected and now - (self._flowed_until or 0) >= HEARTBEAT_SECONDS:
             self._remember_flow(now)
         self._write_out()  # no message needed: an absent database is retried on this timer
+        if self._retention is not None:
+            self._retention.remove_if_due(now)
         self._ticked_at = self._clock()
 
     def _write_out(self) -> None:

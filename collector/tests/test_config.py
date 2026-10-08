@@ -163,3 +163,23 @@ def test_an_unusable_health_address_is_rejected_by_name(
     config = write(tmp_path, f'[health]\nlisten = "{listen}"\n')
     assert main(["--config", str(config), "config"]) == 2
     assert "health.listen" in capsys.readouterr().err
+
+
+def test_nothing_is_removed_unless_the_owner_says_how_long_to_keep_rows(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert load_config(write(tmp_path, "")).storage.retention_days is None
+    config = write(tmp_path, "[storage]\nretention_days = 365\n")
+    assert load_config(config).storage.retention_days == 365
+    assert "retention_days = 365\n" in show(capsys, "--config", str(config))
+    monkeypatch.setenv("NAVIMOW_STORAGE_RETENTION_DAYS", "30")
+    assert load_config(config).storage.retention_days == 30
+
+
+@pytest.mark.parametrize("days", ["0", "-7", "1.5", '"a year"', "true", '""'])
+def test_a_retention_that_is_not_a_positive_whole_number_of_days_is_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], days: str
+) -> None:
+    config = write(tmp_path, f"[storage]\nretention_days = {days}\n")
+    assert main(["--config", str(config), "config"]) == 2
+    assert "storage.retention_days must be a positive whole number" in capsys.readouterr().err
