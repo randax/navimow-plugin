@@ -1,4 +1,4 @@
-import type { DataFrame } from '@grafana/data';
+import { FieldType, type DataFrame, type Field } from '@grafana/data';
 import { columnNames, toNumber, toText, toTime } from './columns';
 import { STALE_AFTER_MS } from './recency';
 import { quoted } from './messages';
@@ -62,6 +62,12 @@ const MAX_METRES_FROM_DOCK = 10_000;
 const kilometres = (metres: number): string =>
   (metres < 100_000 ? Math.ceil(metres / 100) / 10 : Math.round(metres / 1000)).toLocaleString('en-US');
 
+type Column = ArrayLike<unknown>;
+
+// Fields are of one series when they carry the same labels, in whatever order.
+const labelSet = (field: Field): string => JSON.stringify(Object.entries(field.labels ?? {}).sort());
+const NO_LABELS = '[]';
+
 const optionalNumber = (v: unknown): number | undefined => {
   const n = toNumber(v);
   return Number.isFinite(n) ? n : undefined;
@@ -77,10 +83,13 @@ export function readTrails(
   overrides: Partial<TrailColumns> = {}
 ): { trails: Trail[] } | { problem: string } {
   const names = columnNames(DEFAULT_TRAIL_COLUMNS, overrides);
-  const values = (frame: DataFrame, column: keyof TrailColumns) =>
-    frame.fields.find((f) => f.name === names[column])?.values;
+  const fields = (frame: DataFrame, column: keyof TrailColumns): Field[] => {
+    const named = frame.fields.filter((f) => f.name === names[column]);
+    // The Time series format names the time field "Time", whatever the query called it.
+    return named.length > 0 || column !== 'time' ? named : frame.fields.filter((f) => f.type === FieldType.time);
+  };
 
-  const missingFrom = (frame: DataFrame) => REQUIRED.filter((c) => !values(frame, c)).map((c) => names[c]);
+  const missingFrom = (frame: DataFrame) => REQUIRED.filter((c) => fields(frame, c).length === 0).map((c) => names[c]);
   // A Trail query that returned no rows still has its columns: that is an empty range, not a mistake.
   const usable = frames.filter((f) => missingFrom(f).length === 0);
   if (usable.length === 0 && frames.some((f) => f.length > 0)) {
@@ -93,17 +102,52 @@ export function readTrails(
     };
   }
 
-  // Every timed row of every frame. Rows without a position stay in: they mark where a line must break.
-  const rows = usable.flatMap((frame, index) => {
-    const [time, x, y, heading, job, zone, status, mower] = (
-      ['time', 'x', 'y', 'heading', 'job', 'zone', 'status', 'mower'] as const
-    ).map((c) => values(frame, c));
-    return Array.from({ length: frame.length }, (_, row) => {
+  /**
+   * A frame as its series, each a set of columns. A Table frame is one series. Grafana's Time series
+   * format turns text columns into labels and gives each set of labels number fields of its own, in
+   * one frame with empty cells wherever a row is another set's: there a series is the fields with the
+   * same labels, and a label is a column with one value.
+   */
+  const seriesOf = (frame: DataFrame, index: number) => {
+    const positions = fields(frame, 'x');
+    const cells = [...positions, ...fields(frame, 'y')];
+    return positions.flatMap((x) => {
+      const column = (c: keyof TrailColumns): Column | undefined => {
+        const named = fields(frame, c);
+        const label = x.labels?.[names[c]];
+        return (
+          // The time has no labels, whichever series a row is of.
+          (named.find((f) => labelSet(f) === labelSet(x)) ?? named.find((f) => labelSet(f) === NO_LABELS))?.values ??
+          (label === undefined ? undefined : Array<string>(frame.length).fill(label))
+        );
+      };
+      const [time, y, heading, job, zone, status, mower] = (
+        ['time', 'y', 'heading', 'job', 'zone', 'status', 'mower'] as const
+      ).map(column);
+      // An empty cell in a frame of several series is another series' row, unless the row is empty
+      // for all of them: then it is a row without a position, and nothing says whose.
+      const has = (row: number) =>
+        positions.length === 1 ||
+        x.values[row] != null ||
+        y?.[row] != null ||
+        cells.every((f) => f.values[row] == null);
+      // The frames of one query are one result, however Grafana split it.
+      const query = frame.refId ?? index;
+      return time && y
+        ? [{ time, x: x.values, y, heading, job, zone, status, mower, query, has, length: frame.length }]
+        : [];
+    });
+  };
+  const series = usable.flatMap(seriesOf);
+
+  // Every timed row of every series. Rows without a position stay in: they mark where a line must break.
+  const rows = series.flatMap(({ time, x, y, heading, job, zone, status, mower, query, has, length }) => {
+    return Array.from({ length }, (_, row) => {
       const [mowerId = '', jobId] = [toText(mower?.[row]), toText(job?.[row])];
       const point: TrailPoint = {
-        time: toTime(time![row]),
-        x: toNumber(x![row]),
-        y: toNumber(y![row]),
+        time: toTime(time[row]),
+        x: toNumber(x[row]),
+        y: toNumber(y[row]),
         heading: optionalNumber(heading?.[row]),
         zone: toText(zone?.[row]),
         status: toText(status?.[row]),
@@ -117,13 +161,13 @@ export function readTrails(
         metres,
         jobId,
         outsideJob: job !== undefined && jobId === undefined,
-        // A Job column says which Trail a row belongs to, whichever frame it came in: Grafana splits
-        // one series into frames by any text column, such as status or Zone. Without one, a frame is
-        // the only grouping on offer, and its rows are a mower's history of their own.
-        key: job ? `job:${mowerId}:${jobId ?? ''}` : `frame:${index}:${mowerId}`,
-        history: job ? `job:${mowerId}` : `frame:${index}:${mowerId}`,
+        // A Job column says which Trail a row belongs to, whichever frame or series it came in.
+        // Without one, a query is the only grouping on offer, and its rows are a mower's history of
+        // their own.
+        key: job ? `job:${mowerId}:${jobId ?? ''}` : `query:${query}:${mowerId}`,
+        history: job ? `job:${mowerId}` : `query:${query}:${mowerId}`,
       };
-    }).filter((r) => Number.isFinite(r.time));
+    }).filter((r, row) => Number.isFinite(r.time) && has(row));
   });
   // The mower delivers some positions seconds or hours late, so arrival order is not time order.
   rows.sort((a, b) => a.time - b.time);
@@ -152,7 +196,7 @@ export function readTrails(
   if (trails.size === 0) {
     for (const column of REQUIRED) {
       const read = column === 'time' ? toTime : toNumber;
-      const given = usable.flatMap((f) => Array.from(values(f, column)!)).filter((v) => toText(v) !== undefined);
+      const given = series.flatMap((s) => Array.from(s[column])).filter((v) => toText(v) !== undefined);
       if (given.length > 0 && given.every((v) => !Number.isFinite(read(v)))) {
         return {
           problem:

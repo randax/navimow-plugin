@@ -1501,29 +1501,42 @@ test('a Job picked from the bundled dashboard’s table is the one the dashboard
   await expect(progress.getByText(/^\d{4}-.*Z$/)).toHaveCount(1);
 });
 
-test('once its Dock origin is set, the bundled dashboard draws the Trail of the Job', async ({
-  gotoDashboardPage,
-  page,
-}) => {
-  // The dashboard as an owner saves it with their Lawn: the same file, with a Dock origin in the
-  // map's options.
-  const file = path.join(__dirname, '..', '..', 'dashboards', 'navimow-postgresql.json');
-  const bundled = JSON.parse(readFileSync(file, 'utf8'));
-  const lawns = { '*': { dockOrigin: { lat: 59.964, lon: 10.672, rotation: 0 } } };
-  const withLawn = {
-    ...bundled,
-    uid: 'navimow-with-lawn',
-    title: 'Navimow, with a Lawn',
-    panels: bundled.panels.map((panel: { title: string; options?: object }) =>
-      panel.title === 'Lawn' ? { ...panel, options: { ...panel.options, lawns } } : panel
-    ),
-  };
-  const saved = await page.request.post('/api/dashboards/db', { data: { dashboard: withLawn, overwrite: true } });
-  expect(saved.ok(), await saved.text()).toBe(true);
+// As the dashboard asks for it, and in the Time series format, which hands the Job and the mower over
+// as labels on a field for each of their values, and names the time Time.
+for (const format of ['table', 'time_series']) {
+  test(`once its Dock origin is set, the bundled dashboard draws the Trail of the Job, queried as ${format}`, async ({
+    gotoDashboardPage,
+    page,
+  }) => {
+    // The dashboard as an owner saves it with their Lawn: the same file, with a Dock origin in the
+    // map's options.
+    const file = path.join(__dirname, '..', '..', 'dashboards', 'navimow-postgresql.json');
+    const bundled = JSON.parse(readFileSync(file, 'utf8'));
+    const lawns = { '*': { dockOrigin: { lat: 59.964, lon: 10.672, rotation: 0 } } };
+    type Panel = { title: string; options?: object; targets: Array<{ rawSql: string }> };
+    const withLawn = {
+      ...bundled,
+      uid: `navimow-with-lawn-${format}`,
+      title: `Navimow, with a Lawn, queried as ${format}`,
+      panels: bundled.panels.map((panel: Panel) =>
+        panel.title === 'Lawn'
+          ? {
+              ...panel,
+              options: { ...panel.options, lawns },
+              targets: panel.targets.map((target) =>
+                target.rawSql.includes('trail_point') ? { ...target, format } : target
+              ),
+            }
+          : panel
+      ),
+    };
+    const saved = await page.request.post('/api/dashboards/db', { data: { dashboard: withLawn, overwrite: true } });
+    expect(saved.ok(), await saved.text()).toBe(true);
 
-  const map = await bundledPanel(await gotoDashboardPage({ uid: withLawn.uid }), 'Lawn');
-  await expectDrawn(map);
-  // The Job, and the positions sent from the dock before and after it, which belong to none.
-  await expect(map.getByTestId('navimow-map')).toHaveAttribute('data-trails-drawn', '2');
-  await page.request.delete(`/api/dashboards/uid/${withLawn.uid}`);
-});
+    const map = await bundledPanel(await gotoDashboardPage({ uid: withLawn.uid }), 'Lawn');
+    await expectDrawn(map);
+    // The Job, and the positions sent from the dock before and after it, which belong to none.
+    await expect(map.getByTestId('navimow-map')).toHaveAttribute('data-trails-drawn', '2');
+    await page.request.delete(`/api/dashboards/uid/${withLawn.uid}`);
+  });
+}

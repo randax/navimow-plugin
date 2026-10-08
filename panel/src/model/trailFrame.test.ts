@@ -25,6 +25,48 @@ const T = 1789986187389;
 const SEC = 1000;
 const MIN = 60 * SEC;
 const at = (...offsets: number[]) => offsets.map((o) => T + o);
+/** The label of each named column in a row; Grafana labels a row without a value with an empty text. */
+const labelsOf = (columns: Columns, labelled: string[], row: number): Record<string, string> =>
+  Object.fromEntries(labelled.map((name) => [name, String(columns[name][row] ?? '')]));
+
+/**
+ * The rows as Grafana's Time series format hands them to a panel: one frame, the time named Time,
+ * the named columns as labels, and each set of labels with number fields of its own, empty wherever
+ * a row is another set's.
+ */
+const wide = (columns: Columns, labelled: string[]): DataFrame => {
+  const sets = columns.time.map((_, row) => JSON.stringify(labelsOf(columns, labelled, row)));
+  const numbers = Object.keys(columns).filter((name) => name !== 'time' && !labelled.includes(name));
+  return createDataFrame({
+    refId: 'A',
+    fields: [
+      { name: 'Time', type: FieldType.time, values: columns.time },
+      ...numbers.flatMap((name) =>
+        [...new Set(sets)].map((set) => ({
+          name,
+          type: FieldType.number,
+          labels: JSON.parse(set),
+          values: columns[name].map((value, row) => (sets[row] === set ? value : null)),
+        }))
+      ),
+    ],
+  });
+};
+
+/** The rows as a frame for each set of labels, which is how other versions and data sources hand a time series over. */
+const perSeries = (columns: Columns, labelled: string[]): DataFrame[] => {
+  const all = wide(columns, labelled);
+  const sets = [...new Set(all.fields.slice(1).map((f) => JSON.stringify(f.labels)))];
+  return sets.map((set) => {
+    const fields = all.fields.filter((f, i) => i === 0 || JSON.stringify(f.labels) === set);
+    const own = columns.time.flatMap((_, row) => (fields.slice(1).some((f) => f.values[row] !== null) ? [row] : []));
+    return createDataFrame({
+      refId: all.refId,
+      fields: fields.map((f) => ({ ...f, values: own.map((row) => f.values[row]) })),
+    });
+  });
+};
+
 /** Each Trail's segments, as the x of each point. */
 const xs = (result: Trail[]) => result.map((t) => [t.job, t.segments.map((s) => s.map((p) => p.x))]);
 
@@ -105,6 +147,124 @@ describe('readTrails', () => {
       frame({ time: at(SEC), x: [null], y: [null], job_id: ['a'] }),
     ]);
     expect(xs(result)).toEqual([['a', [[0], [2]]]]);
+  });
+
+  // Grafana's Time series format turns the text columns of a SQL query into labels on its number fields.
+  test('a column that is not a field is read from the label of that name on the position fields', () => {
+    const labels = { job_id: 'job-1', zone: 'front', status: 'isRunning', device_id: 'mower-1' };
+    const series = createDataFrame({
+      fields: [
+        { name: 'time', type: FieldType.time, values: at(0, SEC) },
+        { name: 'x', type: FieldType.number, values: [1, 2], labels },
+        { name: 'y', type: FieldType.number, values: [3, 4], labels },
+      ],
+    });
+    expect(trails([series])).toEqual([
+      {
+        job: 'job-1',
+        segments: [
+          [
+            { time: T, x: 1, y: 3, zone: 'front', status: 'isRunning', mower: 'mower-1' },
+            { time: T + SEC, x: 2, y: 4, zone: 'front', status: 'isRunning', mower: 'mower-1' },
+          ],
+        ],
+      },
+    ]);
+  });
+
+  test('without a column of the name, the time is the time field: the Time series format names it Time', () => {
+    const series = createDataFrame({
+      fields: [
+        { name: 'Time', type: FieldType.time, values: at(0, SEC) },
+        { name: 'x', type: FieldType.number, values: [1, 2] },
+        { name: 'y', type: FieldType.number, values: [3, 4] },
+      ],
+    });
+    expect(xs(trails([series]))).toEqual([[undefined, [[1, 2]]]]);
+  });
+
+  describe('the same rows in the Table and the Time series format', () => {
+    // Job a through two Zones with twenty minutes of silence in it, Job b, and a position after it
+    // that belongs to no Job.
+    const table = {
+      time: at(0, SEC, 2 * SEC, 22 * MIN, 23 * MIN, 24 * MIN),
+      x: [1, 2, 3, 4, 5, 0],
+      y: [0, 1, 2, 3, 4, 0],
+      theta: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
+      job_id: ['a', 'a', 'a', 'a', 'b', null],
+      zone: ['front', 'front', 'back', 'back', 'front', null],
+      status: ['isRunning', 'isRunning', 'isRunning', 'isRunning', 'isRunning', 'isDocked'],
+      device_id: ['m1', 'm1', 'm1', 'm1', 'm1', 'm1'],
+    };
+    const text = ['job_id', 'zone', 'status', 'device_id'];
+
+    test('as a Table, they are a Trail for each Job and one for outside any', () => {
+      const result = trails([frame(table)]);
+      expect(xs(result)).toEqual([
+        ['a', [[1, 2, 3], [4]]],
+        ['b', [[5]]],
+        [undefined, [[0]]],
+      ]);
+      expect(result[0].segments[0][2]).toEqual({
+        time: T + 2 * SEC,
+        x: 3,
+        y: 2,
+        heading: 0.3,
+        zone: 'back',
+        status: 'isRunning',
+        mower: 'm1',
+      });
+    });
+
+    test('as one frame with a field for each set of labels, they are the same Trails', () => {
+      expect(trails([wide(table, text)])).toEqual(trails([frame(table)]));
+    });
+
+    test('as a frame for each set of labels, they are the same Trails', () => {
+      expect(trails(perSeries(table, text))).toEqual(trails([frame(table)]));
+    });
+
+    test('a row without a position, empty for every set of labels, still breaks the line', () => {
+      const gapped = {
+        time: at(0, SEC, 2 * SEC, 3 * SEC),
+        x: [0, null, 2, 3],
+        y: [0, null, 0, 0],
+        job_id: ['a', 'a', 'a', 'b'],
+      };
+      const expected = [
+        ['a', [[0], [2]]],
+        ['b', [[3]]],
+      ];
+      expect(xs(trails([frame(gapped)]))).toEqual(expected);
+      expect(xs(trails([wide(gapped, ['job_id'])]))).toEqual(expected);
+    });
+
+    // A numbered Zone is no text, so it stays a field: one for each set of labels, like x and y.
+    test('a number column is read from the field of its own set of labels', () => {
+      const numbered = { ...table, zone: [8, 8, 9, 9, 8, null] };
+      const result = trails([wide(numbered, ['job_id', 'status', 'device_id'])]);
+      expect(result).toEqual(trails([frame(numbered)]));
+      expect(result.map((t) => t.segments.flat().map((p) => p.zone))).toEqual([
+        ['8', '8', '9', '9'],
+        ['8'],
+        [undefined],
+      ]);
+    });
+
+    test('without a Job, a query split into frames by its other text columns is still one Trail', () => {
+      const { job_id, device_id, ...jobless } = table;
+      const split = perSeries(jobless, ['zone', 'status']);
+      expect(split).toHaveLength(3);
+      expect(xs(trails(split))).toEqual([
+        [
+          undefined,
+          [
+            [1, 2, 3],
+            [4, 5, 0],
+          ],
+        ],
+      ]);
+    });
   });
 
   test('a silence longer than 15 minutes is a gap, not a straight line', () => {
