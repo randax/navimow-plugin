@@ -489,6 +489,24 @@ describe('readTrails', () => {
       ]);
     });
 
+    // A number is no text, so a numbered mower is a field of each set of labels, with a value in the
+    // very row that has no position.
+    test('a row without a position breaks the line of the mower a number column names', () => {
+      const numbered = {
+        time: at(0, SEC, 2 * SEC, 3 * SEC),
+        x: [0, null, 2, 3],
+        y: [0, null, 0, 0],
+        device_id: [7, 7, 7, 7],
+        job_id: ['b', 'b', 'b', 'a'],
+      };
+      const expected = [
+        ['b', [[0], [2]]],
+        ['a', [[3]]],
+      ];
+      expect(xs(trails([frame(numbered)]))).toEqual(expected);
+      expect(xs(trails([wide(numbered, ['job_id'])]))).toEqual(expected);
+    });
+
     // What the Time series format cannot carry, as the README says: whose such a row is.
     test("with several mowers, a row empty for every set of labels breaks every mower's line", () => {
       const gapped = {

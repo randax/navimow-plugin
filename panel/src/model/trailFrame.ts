@@ -161,7 +161,8 @@ export function readTrails(
     const xy = [...fields(frame, 'x'), ...fields(frame, 'y')];
     const all = Array.from({ length: frame.length }, (_, row) => row);
     // An empty cell in a frame of several series is another series' row, unless the row is empty
-    // for all of them: then it is a row without a position, and nothing says whose. Each mower has
+    // for all of them: then it is a row without a position. Where a series has its mower in a field,
+    // a value there says the row is its own. Otherwise nothing says whose it is, and each mower has
     // it once, in the first of its series, which is enough to break its line.
     const empty = positions.length > 1 ? all.map((row) => xy.every((f) => f.values[row] == null)) : undefined;
     const mowersWithEmptyRows = new Set<string | undefined>();
@@ -178,8 +179,13 @@ export function readTrails(
       };
       const takesEmptyRows = !mowersWithEmptyRows.has(labels.get(names.mower));
       mowersWithEmptyRows.add(labels.get(names.mower));
+      const mowerValues = mower(key)?.values;
       const ownRows = empty
-        ? all.filter((row) => (takesEmptyRows && empty[row]) || x.values[row] != null || yField.values[row] != null)
+        ? all.filter((row) =>
+            empty[row]
+              ? takesEmptyRows || mowerValues?.[row] != null
+              : x.values[row] != null || yField.values[row] != null
+          )
         : all;
       return [
         {
