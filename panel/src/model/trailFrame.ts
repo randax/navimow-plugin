@@ -79,7 +79,8 @@ interface Series extends Partial<Record<keyof TrailColumns, Column>> {
 }
 
 // Fields are of one series when they carry the same labels, in whatever order.
-const labelKey = (field: Field): string => JSON.stringify(Object.entries(field.labels ?? {}).sort());
+const labelKey = (field: Field): string =>
+  JSON.stringify(Object.entries(field.labels ?? {}).sort(([a], [b]) => (a < b ? -1 : 1)));
 const NO_LABELS = JSON.stringify([]);
 
 // The fields of one name by their labels. Of two with the same, as a join gives a Table two columns
@@ -94,6 +95,10 @@ const firstByLabels = (named: Field[]): Map<string, Field> => {
   }
   return first;
 };
+
+// What tells one Trail, or one mower's history, from another: names joined by a character none of
+// them holds, so that no two sets of names read alike.
+const identity = (...names: string[]): string => names.join('\u0000');
 
 const optionalNumber = (v: unknown): number | undefined => {
   const n = toNumber(v);
@@ -219,8 +224,8 @@ export function readTrails(
           // A Job column says which Trail a row belongs to, whichever frame or series it came in.
           // Without one, a query is the only grouping on offer, and its rows are a mower's history of
           // their own.
-          key: job ? `job:${mowerId}:${jobId ?? ''}` : `${result}:${mowerId}`,
-          history: job ? `job:${mowerId}` : `${result}:${mowerId}`,
+          key: job ? identity('job', mowerId, jobId ?? '') : identity(result, mowerId),
+          history: job ? identity('job', mowerId) : identity(result, mowerId),
         };
       })
       .filter((r) => Number.isFinite(r.time))

@@ -156,7 +156,7 @@ describe('readTrails', () => {
     expect(result.map((t) => t.outsideJob)).toEqual([true, undefined]);
   });
 
-  // Grafana splits a SQL time series into a frame per value of a text column, such as status or Zone.
+  // Some data sources and versions of Grafana split a time series into a frame per value of a text column.
   test('a Job split across frames is segmented as if it were one frame', () => {
     const columns = { time: at(0, SEC, 2 * SEC), x: [0, 1, 2], y: [0, 0, 0], job_id: ['a', 'a', 'a'] };
     const whole = trails([frame(columns)]);
@@ -247,6 +247,16 @@ describe('readTrails', () => {
       ['a', 1, 2],
       ['b', 5, 6],
     ]);
+    // Names and values that read alike once written out in a row.
+    const alike = createDataFrame({
+      fields: [
+        { name: 'Time', type: FieldType.time, values: at(0) },
+        numbers('x', [1], { a: 'b,c', 'a,b': 'c' }),
+        numbers('y', [2], { 'a,b': 'c', a: 'b,c' }),
+        numbers('y', [9], { a: 'other' }),
+      ],
+    });
+    expect(xs(trails([alike]))).toEqual([[undefined, [[1]]]]);
   });
 
   test("a series without a column is not given another series' field for it", () => {
@@ -424,15 +434,15 @@ describe('readTrails', () => {
 
     test("a row with half a position is its own mower's, and breaks no line but that mower's", () => {
       const halved = {
-        time: at(0, SEC, 2 * SEC, 3 * SEC, 4 * SEC),
-        x: [0, 10, null, 11, 2],
-        y: [0, 0, 5, 0, 0],
-        job_id: ['a', 'b', 'a', 'b', 'a'],
-        device_id: ['m1', 'm2', 'm1', 'm2', 'm1'],
+        time: at(0, SEC, 2 * SEC, 3 * SEC, 4 * SEC, 5 * SEC, 6 * SEC, 7 * SEC),
+        x: [0, 10, null, 11, 2, 5, 12, 3],
+        y: [0, 0, 5, 0, 0, null, 0, 0],
+        job_id: ['a', 'b', 'a', 'b', 'a', 'a', 'b', 'a'],
+        device_id: ['m1', 'm2', 'm1', 'm2', 'm1', 'm1', 'm2', 'm1'],
       };
       const expected = [
-        ['a', [[0], [2]]],
-        ['b', [[10, 11]]],
+        ['a', [[0], [2], [3]]],
+        ['b', [[10, 11, 12]]],
       ];
       expect(xs(trails([frame(halved)]))).toEqual(expected);
       expect(xs(trails([wide(halved, ['job_id', 'device_id'])]))).toEqual(expected);
@@ -499,6 +509,17 @@ describe('readTrails', () => {
     expect(xs(result)).toEqual([
       [undefined, [[1]]],
       [undefined, [[3]]],
+    ]);
+  });
+
+  test('queries and mowers are told apart whatever their names hold', () => {
+    const result = trails([
+      { ...frame({ time: at(0), x: [1], y: [0], device_id: ['b:c'] }), refId: 'A' },
+      { ...frame({ time: at(SEC), x: [9], y: [0], device_id: ['c'] }), refId: 'A:b' },
+    ]);
+    expect(xs(result)).toEqual([
+      [undefined, [[1]]],
+      [undefined, [[9]]],
     ]);
   });
 
