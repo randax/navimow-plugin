@@ -287,13 +287,12 @@ whole number of days.
 
 Old rows are removed when the collector starts and once a day after that, so a
 row can outlive the setting by a day. The removal has a thread and a database
-connection of its own and takes 5,000 rows a statement: collection does not
-wait for it. It reads through each of the four tables to find what is old, with
-the same 5 second limit on a statement as every other; one that fails, or finds
-the database away, is logged and left to the next day.
+connection of its own and takes 5,000 rows a statement, found by the tables'
+keys: collection does not wait for it. One that fails, or finds the database
+away, is logged and left to the next day.
 
-`replay` removes nothing, whatever the setting: a capture replayed is history
-put in on purpose.
+`replay` removes nothing, whatever the setting. What it stores that is older
+than the setting is removed by `collect`, the next time it removes old rows.
 
 ## Jobs and Zones
 

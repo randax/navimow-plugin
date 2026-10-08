@@ -145,7 +145,7 @@ def _collect(config: Config, session_factory: Callable[[], HTTPSession], login_c
 
     storage = BackgroundStorage(opener, state_dir / "buffer.jsonl")
     storage.connect()
-    days = config.storage.retention_days
+    keep_days = config.storage.retention_days
     try:
         session = session_factory()
         tokens = TokenManager(
@@ -156,7 +156,11 @@ def _collect(config: Config, session_factory: Callable[[], HTTPSession], login_c
         # Made before the loop runs: it reads each mower's latest Job, the one time the
         # database is waited on here, and a loop held by that would not hear a stop.
         collector = Collector(
-            session, tokens, storage, state_dir, retention=Retention(opener, days) if days else None
+            session,
+            tokens,
+            storage,
+            state_dir,
+            retention=Retention(opener, keep_days) if keep_days else None,
         )
         asyncio.run(_until_signalled(config.health, collector))
     finally:

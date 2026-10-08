@@ -126,14 +126,37 @@ MIGRATIONS = (
     """,
 )
 TABLES = ("trail_point", "collector_gap", "job", "job_progress", "mower_state", "mower")
-# The tables whose rows an owner may have removed once old, and the time that says how old a
-# row is: a gap is as old as its end. A Job and a mower are kept whatever their age.
+# The tables whose rows an owner may have removed once old: the time each is keyed by beside
+# its mower, and the time that says how old a row is. A gap is as old as its end. A Job and a
+# mower are kept whatever their age.
 EXPIRING = {
-    "trail_point": "device_time",
-    "job_progress": "device_time",
-    "mower_state": "device_time",
-    "collector_gap": "end_time",
+    "trail_point": ("device_time", "device_time"),
+    "job_progress": ("device_time", "device_time"),
+    "mower_state": ("device_time", "device_time"),
+    "collector_gap": ("start_time", "end_time"),
 }
+# Both statements of a removal go by the key, which begins with the mower, and neither reads
+# the table through: finding what is old among millions of positions, on the small machine
+# this shares with its database, would otherwise take longer than a statement is given.
+# The mowers a table has rows of, each found from the one before it.
+_MOWERS = """
+    WITH RECURSIVE mowers AS (
+        (SELECT mower_id FROM {table} ORDER BY mower_id LIMIT 1)
+        UNION ALL
+        SELECT (SELECT mower_id FROM {table} WHERE mower_id > mowers.mower_id
+                ORDER BY mower_id LIMIT 1)
+        FROM mowers WHERE mower_id IS NOT NULL
+    )
+    SELECT mower_id FROM mowers WHERE mower_id IS NOT NULL
+"""
+# One mower's oldest rows. A row older than `before` by its age is so by its key as well.
+_REMOVE = """
+    DELETE FROM {table} WHERE mower_id = %(mower)s AND {key} IN (
+        SELECT {key} FROM {table}
+        WHERE mower_id = %(mower)s AND {key} < %(before)s AND {age} < %(before)s
+        ORDER BY {key} LIMIT %(limit)s
+    )
+"""
 
 
 def _insert(row: type[Row], table: str) -> str:
@@ -267,14 +290,15 @@ class PostgresStorage:
 
     def remove_older_than(self, before: datetime, limit: int) -> int:
         removed = 0
-        for table, time in EXPIRING.items():
-            if removed < limit:
-                with _translated():
-                    removed += self._connection.execute(
-                        f"DELETE FROM {table} WHERE ctid IN"
-                        f" (SELECT ctid FROM {table} WHERE {time} < %s LIMIT %s)",
-                        (before, limit - removed),
-                    ).rowcount
+        with _translated():
+            for table, (key, age) in EXPIRING.items():
+                mowers = self._connection.execute(_MOWERS.format(table=table)).fetchall()
+                for (mower,) in mowers:
+                    if removed < limit:
+                        removed += self._connection.execute(
+                            _REMOVE.format(table=table, key=key, age=age),
+                            {"mower": mower, "before": before, "limit": limit - removed},
+                        ).rowcount
         return removed
 
     def _write(self, statement: str, rows: Sequence[tuple[object, ...]]) -> int:

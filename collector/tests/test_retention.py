@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -18,7 +19,8 @@ from .conftest import FIXTURE
 from .test_live import NOW, STATE, Live, at, stopped_at_its_first_request, until
 
 HOUR = 3600
-EXPIRING = {
+# The tables whose rows expire, and the column that says when each row is from.
+EXPIRING_TABLES = {
     "trail_point": "device_time",
     "job_progress": "device_time",
     "mower_state": "device_time",
@@ -31,21 +33,26 @@ def live(database: str, tmp_path: Path) -> Live:
     return Live(database, tmp_path)
 
 
-def rows_at(time: datetime) -> list[TrailPoint | Progress | MowerState | Gap]:
-    """One row of every kind that expires, as of `time`."""
-    received = time + timedelta(seconds=1)
+def rows_at(when: datetime) -> list[TrailPoint | Progress | MowerState | Gap]:
+    """One row of every kind that expires, as of then."""
+    received = when + timedelta(seconds=1)
     return [
-        TrailPoint("DEVICE_1", time, received, 1.0, 2.0, 0.5, 4),
-        Progress("DEVICE_1", time, received, 1, 50.0, 25, 12.0, 40.0),
-        MowerState("DEVICE_1", time, received, "isRunning", 80),
-        Gap("DEVICE_1", time, received, GapReason.RECONNECT),
+        TrailPoint("DEVICE_1", when, received, 1.0, 2.0, 0.5, 4),
+        Progress("DEVICE_1", when, received, 1, 50.0, 25, 12.0, 40.0),
+        MowerState("DEVICE_1", when, received, "isRunning", 80),
+        Gap("DEVICE_1", when, received, GapReason.RECONNECT),
     ]
 
 
-def stored(live: Live, table: str, time: str) -> list[datetime]:
+def stored(live: Live, table: str, column: str) -> list[datetime]:
     """When each row of a table is from, oldest first."""
     with psycopg.connect(live.db.dsn) as conn:
-        return [row[0] for row in conn.execute(f"SELECT {time} FROM {table} ORDER BY {time}")]
+        return [row[0] for row in conn.execute(f"SELECT {column} FROM {table} ORDER BY {column}")]
+
+
+def expiring(live: Live) -> dict[str, list[datetime]]:
+    """When the rows of each table that expires are from."""
+    return {table: stored(live, table, column) for table, column in EXPIRING_TABLES.items()}
 
 
 def days_ago(days: float) -> datetime:
@@ -78,9 +85,7 @@ def test_rows_older_than_the_owner_keeps_are_removed_and_the_history_of_jobs_is_
 
     removed_as_of(live, NOW)
 
-    assert {table: stored(live, table, time) for table, time in EXPIRING.items()} == dict.fromkeys(
-        EXPIRING, [kept]
-    )
+    assert expiring(live) == dict.fromkeys(EXPIRING_TABLES, [kept])
     assert stored(live, "job", "start_time") == [old]
     assert days_ago(400) in stored(live, "mower", "updated_time")
 
@@ -95,9 +100,7 @@ def test_old_rows_are_removed_a_few_at_a_time_until_none_is_left(
 
     removed_as_of(live, NOW)
 
-    assert {table: stored(live, table, time) for table, time in EXPIRING.items()} == dict.fromkeys(
-        EXPIRING, [kept]
-    )
+    assert expiring(live) == dict.fromkeys(EXPIRING_TABLES, [kept])
     assert sum(live.db.removed) == 8 and max(live.db.removed) <= 3
 
 
@@ -121,9 +124,7 @@ def test_everything_is_kept_unless_the_owner_says_otherwise(live: Live) -> None:
 
     removed_as_of(live, NOW, NOW + 24 * HOUR, retention_days=None)
 
-    assert {table: stored(live, table, time) for table, time in EXPIRING.items()} == dict.fromkeys(
-        EXPIRING, [ancient]
-    )
+    assert expiring(live) == dict.fromkeys(EXPIRING_TABLES, [ancient])
 
 
 def test_replay_removes_nothing_whatever_the_owner_keeps(
@@ -158,9 +159,7 @@ def test_the_collect_command_removes_what_is_older_than_the_owner_keeps(
     deadline = time.monotonic() + 5
     while len(stored(live, "trail_point", "device_time")) > 1 and time.monotonic() < deadline:
         time.sleep(0.01)
-    assert {table: stored(live, table, time) for table, time in EXPIRING.items()} == dict.fromkeys(
-        EXPIRING, [kept]
-    )
+    assert expiring(live) == dict.fromkeys(EXPIRING_TABLES, [kept])
 
 
 def test_a_removal_that_fails_is_left_to_the_next_day(
@@ -212,3 +211,40 @@ def test_a_removal_the_database_keeps_waiting_holds_up_no_collection(
     asyncio.run(scenario())
 
     assert stored(live, "trail_point", "device_time") == []
+
+
+def test_a_gap_is_as_old_as_its_end(live: Live) -> None:
+    # A winter with the collector off is one gap, written when it comes back: it is of
+    # that day, not of the autumn it began in.
+    began, ended = days_ago(200), days_ago(29)
+    with live.db.open() as storage:
+        write_rows(storage, [Gap("DEVICE_1", began, ended, GapReason.RESTART)])
+
+    removed_as_of(live, NOW)
+    assert stored(live, "collector_gap", "start_time") == [began]
+
+    removed_as_of(live, NOW + 2 * 24 * HOUR)
+    assert stored(live, "collector_gap", "start_time") == []
+
+
+def test_rows_kept_for_longer_than_dates_go_back_are_simply_kept(live: Live) -> None:
+    ancient = days_ago(3650)
+    with live.db.open() as storage:
+        write_rows(storage, rows_at(ancient))
+
+    removed_as_of(live, NOW, retention_days=10**9)
+
+    assert expiring(live) == dict.fromkeys(EXPIRING_TABLES, [ancient])
+
+
+def test_each_mowers_old_rows_are_removed(database: str, tmp_path: Path) -> None:
+    live = Live(database, tmp_path, "DEVICE_1", "DEVICE_2")
+    old, kept = days_ago(31), days_ago(29)
+    with live.db.open() as storage:
+        for mower in ("DEVICE_1", "DEVICE_2", "SOLD"):  # the last no longer on the account
+            write_rows(storage, [replace(row, mower_id=mower) for row in rows_at(old)])
+            write_rows(storage, [replace(row, mower_id=mower) for row in rows_at(kept)])
+
+    removed_as_of(live, NOW)
+
+    assert expiring(live) == dict.fromkeys(EXPIRING_TABLES, [kept] * 3)

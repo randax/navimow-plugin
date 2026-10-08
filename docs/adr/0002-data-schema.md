@@ -68,10 +68,10 @@ Nothing is stored for Coverage: the panel computes it from the Trail.
 Everything is kept unless the owner sets `storage.retention_days`. Rows older than that are
 then removed from `trail_point`, `job_progress`, `mower_state` and `collector_gap`. `job`
 and `mower` rows are never removed, so the history of Jobs outlives their Trails. On
-PostgreSQL the collector removes the rows itself, once a day; TimescaleDB and ClickHouse
-are to be given the rule to apply. InfluxDB keeps retention on the bucket, which the owner
-creates, so there the setting is to be refused. A reading is as old as its `device_time`
-and a gap as old as its `end_time`. The other backends are not built yet
+PostgreSQL the collector removes the rows itself, once a day, taking a reading to be as
+old as its `device_time` and a gap as old as its `end_time`. TimescaleDB and ClickHouse are
+to be given the rule to apply. InfluxDB keeps retention on the bucket, which the owner
+creates, so there the setting is to be refused. The other backends are not built yet
 ([#31](https://github.com/randax/navimow-plugin/issues/31)).
 
 ## The InfluxDB shape

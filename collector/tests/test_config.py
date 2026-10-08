@@ -183,3 +183,15 @@ def test_a_retention_that_is_not_a_positive_whole_number_of_days_is_refused(
     config = write(tmp_path, f"[storage]\nretention_days = {days}\n")
     assert main(["--config", str(config), "config"]) == 2
     assert "storage.retention_days must be a positive whole number" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("days", ["0", "-7", "1.5", "a year", ""])
+def test_a_retention_from_the_environment_is_held_to_the_same(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    days: str,
+) -> None:
+    monkeypatch.setenv("NAVIMOW_STORAGE_RETENTION_DAYS", days)
+    assert main(["--config", str(write(tmp_path, "")), "config"]) == 2
+    assert "storage.retention_days must be a positive whole number" in capsys.readouterr().err

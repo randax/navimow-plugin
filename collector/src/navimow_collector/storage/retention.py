@@ -9,8 +9,8 @@ from datetime import UTC, datetime, timedelta
 
 from .base import Storage, StorageError
 
-# How often rows are removed: a row outlives what the owner keeps by a day at most.
-EVERY_SECONDS = 24 * 60 * 60
+# How long between removals: a row outlives what the owner keeps by a day at most.
+INTERVAL_SECONDS = 24 * 60 * 60
 # How many rows one statement removes, so that none is long.
 BATCH_ROWS = 5000
 _LOGGER = logging.getLogger(__name__)
@@ -26,7 +26,7 @@ class Retention:
 
     def __init__(self, opener: Callable[[], Storage], days: int) -> None:
         self._open = opener
-        self._keep = timedelta(days=days)
+        self._days = days
         self._due = float("-inf")
         self._removing: threading.Thread | None = None
 
@@ -35,8 +35,11 @@ class Retention:
         or is still under way."""
         if now < self._due or (self._removing is not None and self._removing.is_alive()):
             return
-        self._due = now + EVERY_SECONDS
-        before = datetime.fromtimestamp(now, tz=UTC) - self._keep
+        self._due = now + INTERVAL_SECONDS
+        try:
+            before = datetime.fromtimestamp(now, tz=UTC) - timedelta(days=self._days)
+        except OverflowError:  # kept for longer than dates go back: nothing is that old
+            return
         self._removing = threading.Thread(
             target=self._remove, args=(before,), name="retention", daemon=True
         )
