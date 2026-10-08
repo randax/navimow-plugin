@@ -141,25 +141,23 @@ export function readTrails(
    * same labels, and a label is a column with one value.
    */
   const seriesOf = (frame: DataFrame, index: number): Series[] => {
+    const positions = [...firstByLabels(fields(frame, 'x'))];
     // Of the fields by a column's name, the one with the labels of a series. A field without labels
-    // is of every series, as the time is, and a series without labels has the only field there is.
+    // is of every series, as the time is, and a frame's only series has the only field there is.
     const fieldOf = (column: keyof TrailColumns) => {
       const named = fields(frame, column);
       const first = firstByLabels(named);
-      return (labels: string) =>
-        first.get(labels) ??
-        first.get(NO_LABELS) ??
-        (labels === NO_LABELS && named.length === 1 ? named[0] : undefined);
+      const only = positions.length === 1 && named.length === 1 ? named[0] : undefined;
+      return (labels: string) => first.get(labels) ?? first.get(NO_LABELS) ?? only;
     };
     const [time, y, heading, job, zone, status, mower] = OTHER_THAN_X.map(fieldOf);
-    const positions = [...firstByLabels(fields(frame, 'x'))];
     const xy = [...fields(frame, 'x'), ...fields(frame, 'y')];
     const all = Array.from({ length: frame.length }, (_, row) => row);
     // An empty cell in a frame of several series is another series' row, unless the row is empty
     // for all of them: then it is a row without a position, and nothing says whose.
     const empty = positions.length > 1 ? all.map((row) => xy.every((f) => f.values[row] == null)) : undefined;
-    return positions.flatMap(([of, x]) => {
-      const [timeField, yField] = [time(of), y(of)];
+    return positions.flatMap(([key, x]) => {
+      const [timeField, yField] = [time(key), y(key)];
       if (!timeField || !yField) {
         return [];
       }
@@ -177,11 +175,11 @@ export function readTrails(
           time: (row) => timeField.values[row],
           x: (row) => x.values[row],
           y: (row) => yField.values[row],
-          heading: column(heading(of), names.heading),
-          job: column(job(of), names.job),
-          zone: column(zone(of), names.zone),
-          status: column(status(of), names.status),
-          mower: column(mower(of), names.mower),
+          heading: column(heading(key), names.heading),
+          job: column(job(key), names.job),
+          zone: column(zone(key), names.zone),
+          status: column(status(key), names.status),
+          mower: column(mower(key), names.mower),
           ownRows,
           // The frames of one query are one result, however Grafana split it.
           result: frame.refId === undefined ? `frame:${index}` : `query:${frame.refId}`,

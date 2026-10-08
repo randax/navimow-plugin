@@ -257,6 +257,17 @@ describe('readTrails', () => {
       ],
     });
     expect(xs(trails([alike]))).toEqual([[undefined, [[1]]]]);
+    // And two sets of labels that are not the same, though they read alike.
+    const unlike = createDataFrame({
+      fields: [
+        { name: 'Time', type: FieldType.time, values: at(0) },
+        numbers('x', [1], { a: 'b', c: 'd' }),
+        numbers('x', [7], { z: '1' }),
+        numbers('y', [2], { a: 'b,c=d' }),
+        numbers('y', [8], { z: '1' }),
+      ],
+    });
+    expect(xs(trails([unlike]))).toEqual([[undefined, [[7]]]]);
   });
 
   test("a series without a column is not given another series' field for it", () => {
@@ -324,6 +335,28 @@ describe('readTrails', () => {
       ],
     });
     expect(trails([both])[0].segments[0][0].time).toBe(T);
+  });
+
+  // What joining two metrics by time and renaming them gives: each with the labels of its own metric.
+  test('a frame with one x and one y is one series, whatever labels the two carry', () => {
+    const joined = createDataFrame({
+      fields: [
+        { name: 'Time', type: FieldType.time, values: at(0, SEC) },
+        numbers('x', [1, 2], { __name__: 'mower_x', job_id: 'a' }),
+        numbers('y', [3, 4], { __name__: 'mower_y', job_id: 'a' }),
+      ],
+    });
+    expect(trails([joined])).toEqual([
+      {
+        job: 'a',
+        segments: [
+          [
+            { time: T, x: 1, y: 3 },
+            { time: T + SEC, x: 2, y: 4 },
+          ],
+        ],
+      },
+    ]);
   });
 
   test('a label on either position field is read', () => {
@@ -512,10 +545,13 @@ describe('readTrails', () => {
     ]);
   });
 
-  test('queries and mowers are told apart whatever their names hold', () => {
+  test.each([
+    ['A', 'b:c', 'A:b', 'c'],
+    ['A', 'bc', 'Ab', 'c'],
+  ])('query %s with mower %s is not taken for query %s with mower %s', (query, mower, other, its) => {
     const result = trails([
-      { ...frame({ time: at(0), x: [1], y: [0], device_id: ['b:c'] }), refId: 'A' },
-      { ...frame({ time: at(SEC), x: [9], y: [0], device_id: ['c'] }), refId: 'A:b' },
+      { ...frame({ time: at(0), x: [1], y: [0], device_id: [mower] }), refId: query },
+      { ...frame({ time: at(SEC), x: [9], y: [0], device_id: [its] }), refId: other },
     ]);
     expect(xs(result)).toEqual([
       [undefined, [[1]]],
