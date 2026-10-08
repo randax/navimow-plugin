@@ -104,8 +104,8 @@ const test = base.extend<{
   openCoverage: async ({ gotoDashboardPage, coverageDashboard }, use) =>
     use(async (title) => (await gotoDashboardPage(coverageDashboard)).getPanelByTitle(title).locator),
   // A made-up lawn again, in a row that can be collapsed: three Jobs side by side, each along a line
-  // from 15 m south of the dock to 15 m north of it. Job a is 10 m west of the dock, Job b runs
-  // through it and Job c is 10 m east, where it ends in the north with a turn 10 m further east.
+  // from 15 m south of the dock. Job a, 10 m west of the dock, and Job b, through it, reach 15 m north
+  // of it. Job c, 10 m east of it, goes on to 55 m north, and ends there with a turn 10 m further east.
   lifecycleDashboard: async ({ readProvisionedDashboard }, use) =>
     use(await readProvisionedDashboard({ fileName: 'navimow-map-lifecycle.json' })),
   openLifecycle: async ({ gotoDashboardPage, lifecycleDashboard }, use) =>
@@ -235,6 +235,64 @@ const colourAt = async (page: Page, panel: Locator, east: number, north: number)
     { png: screenshot.toString('base64'), ...(await metresFromDock(panel, east, north)) }
   );
   return around.reduce((a, b) => (apart(b, FIXTURE_GREEN) > apart(a, FIXTURE_GREEN) ? b : a));
+};
+
+// The corners of the lifecycle dashboard's Trail, in metres east and north of the dock: Job a starts
+// in the south-west, and Job c ends in the north-east.
+const SOUTH_WEST = [-10, -15] as const;
+const NORTH_EAST = [20, 55] as const;
+
+/** Whether a place on the map of a made-up lawn, in metres east and north of the dock, is in view. */
+const inView = async (panel: Locator, east: number, north: number) => {
+  const { width, height } = (await panel.getByTestId('navimow-map').boundingBox())!;
+  const { x, y } = await metresFromDock(panel, east, north);
+  return x > 0 && x < width && y > 0 && y < height;
+};
+
+/**
+ * Cuts every Job but the ones named from what the lifecycle dashboard's query asks for, so that a
+ * refresh can bring more of them: the function handed back names the Jobs from there on.
+ */
+const queryOnly = async (page: Page, jobs: RegExp) => {
+  await page.route(/\/api\/ds\/query/, (route) => {
+    const body: { queries?: Array<{ csvContent?: string }> } | null = route.request().postDataJSON();
+    for (const query of body?.queries ?? []) {
+      if (query.csvContent) {
+        const [header, ...rows] = query.csvContent.split('\n');
+        query.csvContent = [header, ...rows.filter((row) => jobs.test(row))].join('\n');
+      }
+    }
+    return route.fallback(body ? { postData: body } : {});
+  });
+  return (others: RegExp) => {
+    jobs = others;
+  };
+};
+
+/**
+ * Stops the page's animation frames, in one of which a new map loads its style, until the function
+ * handed back is called. Playwright keeps frames of its own, so it can still act on the page.
+ */
+const holdFrames = async (page: Page) => {
+  await page.evaluate(() => {
+    const { requestAnimationFrame: request, cancelAnimationFrame: cancel } = window;
+    const held = new Map<number, FrameRequestCallback>();
+    let id = 0;
+    window.requestAnimationFrame = (frame) => {
+      held.set(--id, frame);
+      return id;
+    };
+    window.cancelAnimationFrame = (frame) => void (held.delete(frame) || cancel.call(window, frame));
+    window.addEventListener(
+      'frames',
+      () => {
+        Object.assign(window, { requestAnimationFrame: request, cancelAnimationFrame: cancel });
+        held.forEach((frame) => window.requestAnimationFrame(frame));
+      },
+      { once: true }
+    );
+  });
+  return () => page.evaluate(() => window.dispatchEvent(new Event('frames')));
 };
 
 /** The map's control with this name. */
@@ -431,7 +489,8 @@ test('each panel releases its map when it unmounts', async ({
   page.on('console', (m) => m.text().includes('Too many active WebGL contexts') && warnings.push(m.text()));
   const dashboardPage = await gotoDashboardPage(lifecycleDashboard);
   const maps = page.locator('canvas.maplibregl-canvas');
-  // The Trail puts the mower on each map, to be taken off with it.
+  // Each map has the mower on it, so that an unmount has markers to take off as well. Nothing on
+  // the page tells whether it did, the map being gone: only an error from the plugin would.
   const mowers = page.getByRole('img', { name: /^Mower/ });
   const row = dashboardPage.getByGrafanaSelector(selectors.components.DashboardRow.title('Map row'));
   await expect(maps).toHaveCount(1);
@@ -442,7 +501,6 @@ test('each panel releases its map when it unmounts', async ({
   for (let round = 0; round < 20; round++) {
     await row.click();
     await expect(maps).toHaveCount(0);
-    await expect(mowers).toHaveCount(0);
     await row.click();
     await expect(maps).toHaveCount(1);
     await expect(mowers).toHaveCount(1);
@@ -473,21 +531,14 @@ test('a Base map switch redraws every Trail, on the map that was there', async (
   expect(await canvas?.evaluate((element) => element.isConnected)).toBe(true);
 });
 
-test('Trails that arrive in the middle of a Base map switch are drawn on the new Base map', async ({
+test('a Trail that arrives while a new Base map is still loading its tiles is drawn on it', async ({
   gotoPanelEditPage,
   lifecycleDashboard,
   selectors,
   page,
 }) => {
-  // The panel opens on Job a alone, the others cut from what the query asks for until a refresh.
-  let jobs = /job-a/;
-  await page.route(/\/api\/ds\/query/, (route) => {
-    const body: { queries: Array<{ csvContent: string }> } = route.request().postDataJSON();
-    const [header, ...rows] = body.queries[0].csvContent.split('\n');
-    body.queries[0].csvContent = [header, ...rows.filter((row) => jobs.test(row))].join('\n');
-    return route.fallback({ postData: body });
-  });
-  // And the new Base map's tiles are kept back, until the test serves them.
+  const queryJobs = await queryOnly(page, /job-a/);
+  // The new Base map's tiles are kept back, until the test serves them.
   let serveTiles = () => {};
   const served = new Promise<void>((serve) => (serveTiles = serve));
   await page.route(
@@ -509,37 +560,85 @@ test('Trails that arrive in the middle of a Base map switch are drawn on the new
   await panelEditPage.getCustomOptions('Base map').getSelect('Base map').selectOption('OpenStreetMap');
   // The switch is under way, and stays so for as long as the new Base map has no tiles.
   await expect(map).not.toHaveAttribute('data-map-idle');
-  jobs = /job-[abc]/;
+  queryJobs(/job-[ab]/);
   // Not refreshPanel(), which gives the button two seconds: a map being restyled under software
   // rendering can keep the page busy for longer.
   await panelEditPage.getByGrafanaSelector(selectors.components.RefreshPicker.runButtonV2).click();
-  // The panel has the new Trails once the mower is where they end, 30 m east of where Job a did.
-  await expect.poll(async () => (await mower.boundingBox())!.x).toBeGreaterThan(afterJobA.x + 50);
+  // The panel has Job b once the mower is where that ended, 30 m south of where Job a did.
+  await expect.poll(async () => (await mower.boundingBox())?.y ?? 0).toBeGreaterThan(afterJobA.y + 50);
   await expect(map).not.toHaveAttribute('data-map-idle');
 
   serveTiles();
   await expectDrawn(panel);
   await expect(panel.locator('.maplibregl-ctrl-attrib')).toContainText('© OpenStreetMap contributors');
-  await expect(map).toHaveAttribute('data-trails-drawn', '3');
-  // The mower moved there: it was not put on the map a second time.
+  await expect(map).toHaveAttribute('data-trails-drawn', '2');
+  // The mower moved there: neither it nor its age was put on the map a second time.
   await expect(mower).toHaveCount(1);
-  // Jobs b and c ran within what the view was framed on for Job a, so the view has stayed where it was.
+  await expect(panel.getByText(/^Last seen/)).toHaveCount(1);
+  // Job b ran within what the view was framed on for Job a, so the view has stayed where it was.
   expectSamePlace(await cameraOf(panel), framed);
+});
+
+test('a Trail that arrives before a new map has loaded its style is drawn once it has', async ({
+  gotoDashboardPage,
+  lifecycleDashboard,
+  selectors,
+  page,
+}) => {
+  const queryJobs = await queryOnly(page, /job-a/);
+  const dashboardPage = await gotoDashboardPage(lifecycleDashboard);
+  const panel = dashboardPage.getPanelByTitle('Map in a row').locator;
+  const map = panel.getByTestId('navimow-map');
+  const mower = panel.getByRole('img', { name: /^Mower/ });
+  await expect(mower).toBeVisible();
+
+  // The row is collapsed and opened again for a new map, which loads its style in the frame after
+  // it is made: with the frames held, it has none for as long as the test likes.
+  const row = dashboardPage.getByGrafanaSelector(selectors.components.DashboardRow.title('Map row'));
+  await row.click();
+  await expect(map).toHaveCount(0);
+  const releaseFrames = await holdFrames(page);
+  await row.click();
+  const afterJobA = (await mower.boundingBox())!;
+  queryJobs(/job-[ab]/);
+  await dashboardPage.refreshDashboard();
+  // The panel has Job b once the mower is where that ended, 30 m south of where Job a did.
+  await expect.poll(async () => (await mower.boundingBox())?.y ?? 0).toBeGreaterThan(afterJobA.y + 50);
+  await expect(map).not.toHaveAttribute('data-map-idle');
+
+  await releaseFrames();
+  await expectDrawn(panel);
+  await expect(map).toHaveAttribute('data-trails-drawn', '2');
 });
 
 test('the panel opens with the whole Trail in view, and little else', async ({ openLifecycle }) => {
   const panel = await openLifecycle('Map in a row');
+  const map = panel.getByTestId('navimow-map');
   await expectDrawn(panel);
-  const { width, height } = (await panel.getByTestId('navimow-map').boundingBox())!;
-  // The Trail's corners: Job a starts in the south-west, and Job c ends in the north-east.
-  const southWest = await metresFromDock(panel, -10, -15);
-  const northEast = await metresFromDock(panel, 20, 15);
-  expect(southWest.x).toBeGreaterThan(0);
-  expect(southWest.y).toBeLessThan(height);
-  expect(northEast.x).toBeLessThan(width);
-  expect(northEast.y).toBeGreaterThan(0);
-  // Seen from near enough to be a lawn, not a dot on the map of Norway that a panel starts from.
-  expect(southWest.y - northEast.y).toBeGreaterThan(height / 4);
+  await expect(map).toHaveAttribute('data-trails-drawn', '3');
+  expect(await inView(panel, ...SOUTH_WEST)).toBe(true);
+  expect(await inView(panel, ...NORTH_EAST)).toBe(true);
+  // Seen from near enough to be a lawn, not a dot on the map of Norway that a panel starts from:
+  // its 70 m from south to north take up over half of the map's height.
+  const [south, north] = [await metresFromDock(panel, 0, -15), await metresFromDock(panel, 0, 55)];
+  expect(south.y - north.y).toBeGreaterThan((await map.boundingBox())!.height / 2);
+});
+
+test('a Trail that grows out of the view is framed again', async ({ gotoDashboardPage, lifecycleDashboard, page }) => {
+  const queryJobs = await queryOnly(page, /job-[ab]/);
+  const dashboardPage = await gotoDashboardPage(lifecycleDashboard);
+  const panel = dashboardPage.getPanelByTitle('Map in a row').locator;
+  const map = panel.getByTestId('navimow-map');
+  await expectDrawn(panel);
+  await expect(map).toHaveAttribute('data-trails-drawn', '2');
+  // Framed on Jobs a and b, the view ends short of where Job c will, 55 m north of the dock.
+  expect(await inView(panel, ...NORTH_EAST)).toBe(false);
+
+  queryJobs(/job-[abc]/);
+  await dashboardPage.refreshDashboard();
+  await expect(map).toHaveAttribute('data-trails-drawn', '3');
+  expect(await inView(panel, ...SOUTH_WEST)).toBe(true);
+  expect(await inView(panel, ...NORTH_EAST)).toBe(true);
 });
 
 test('each Job is drawn as a Trail in a colour of its own', async ({ openLifecycle, page }) => {
@@ -568,24 +667,40 @@ test('each Job is drawn as a Trail in a colour of its own', async ({ openLifecyc
   }).toPass({ timeout: 20_000 });
 });
 
-test('the mower is an arrow pointing where it was last heading, faded once that was long ago', async ({
+test('the mower is an arrow pointing where it was last heading, and fades once that was a while ago', async ({
   openLifecycle,
+  page,
 }) => {
+  // Four minutes after Job c ended, at 10:42:40.
+  await page.clock.install({ time: new Date('2026-09-21T10:46:40Z') });
   const panel = await openLifecycle('Map in a row');
   await expectDrawn(panel);
-  // The fixture is from September 2026, so its last position is days old by now.
-  const mower = panel.getByRole('img', { name: /^Mower, last seen \d+ d ago$/ });
-  await expect(mower).toHaveCSS('opacity', '0.75');
-  await expect(panel.getByText(/^Last seen \d+ d ago$/)).toBeVisible();
+  const mower = panel.getByRole('img', { name: /^Mower/ });
+  await expect(mower).toHaveAccessibleName('Mower');
+  await expect(mower).toHaveCSS('opacity', '1');
+  await expect(panel.getByText(/^Last seen/)).toHaveCount(0);
 
-  // An arrow, where a mower of unknown heading is a dot. Job c ended on its way east: a quarter
-  // turn to the right of the arrow's own up.
-  await expect(mower.locator('path')).toHaveCount(1);
-  const turned = await mower.evaluate((marker) => {
-    const { a, b } = new DOMMatrix(getComputedStyle(marker).transform);
-    return (Math.atan2(b, a) * 180) / Math.PI;
+  // An arrow, where a mower of unknown heading is a dot. Job c ended on its way east, which is
+  // where the arrow points on screen: its outline weighs most at its notched tail, so its tip is to
+  // the other side of its middle.
+  const pointing = await mower.locator('path').evaluate((arrow: SVGPathElement) => {
+    const onScreen = arrow.getScreenCTM()!;
+    const length = arrow.getTotalLength();
+    const outline = Array.from({ length: 200 }, (_, i) =>
+      arrow.getPointAtLength((i / 200) * length).matrixTransform(onScreen)
+    );
+    const mean = (of: 'x' | 'y') => outline.reduce((sum, point) => sum + point[of], 0) / outline.length;
+    const box = arrow.getBoundingClientRect();
+    const [east, north] = [box.x + box.width / 2 - mean('x'), mean('y') - (box.y + box.height / 2)];
+    return (Math.atan2(east, north) * 180) / Math.PI;
   });
-  expect(turned).toBeCloseTo(90, 1);
+  expect(pointing).toBeCloseTo(90, 0);
+
+  // With no refresh, the panel's own clock ages the position: 20 minutes on, it is 24 minutes old.
+  await page.clock.fastForward('20:00');
+  await expect(mower).toHaveAccessibleName(/^Mower, last seen 2\d min ago$/);
+  await expect(mower).toHaveCSS('opacity', '0.75');
+  await expect(panel.getByText(/^Last seen 2\d min ago$/)).toBeVisible();
 });
 
 test('the switch on the panel recreates the map in terrain and back, without the view jumping', async ({
