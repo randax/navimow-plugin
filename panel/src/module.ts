@@ -102,8 +102,7 @@ const TRAIL_COLUMN_EDITORS: ColumnEditors<TrailColumns> = [
   {
     key: 'job',
     name: 'Job',
-    description:
-      'Optional. Each Job is drawn as its own line, in its own colour, and named when hovering it. With SQL, use Format as: Table, which keeps text columns like this one as columns.',
+    description: 'Optional. Each Job is drawn as its own line, in its own colour, and named when hovering it.',
   },
   {
     key: 'zone',

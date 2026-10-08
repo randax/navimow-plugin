@@ -11,4 +11,5 @@
 - Coverage: where the mower has cut, as a Grid, a Heatmap or a Buffered line, flat or raised, coloured by visit count or time since mowed. Computed in the panel from the Trail.
 - Controls on the panel: zoom, north up, fit to Trail, follow the mower, visibility of the Trail, Coverage and the Boundary, and the style of Coverage.
 - A warning when a panel receives positions from more than one mower.
+- The Trail query may be in a SQL data source's Time series format as well as its Table format: Job, Zone, status and mower are read from the labels its text columns become.
 - The Dock origin and Boundary are saved under a key per mower, so a panel for several mowers can come later without moving what is saved. A panel for one mower uses the key for any mower; panels saved earlier are read as before and moved on their next save.
