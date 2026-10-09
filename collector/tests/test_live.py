@@ -223,7 +223,9 @@ class Live:
         tokens = TokenManager(
             TokenClient(self.vendor, "id", "secret"), self.store, clock=self.clock
         )
-        self.retention = Retention(self.db.open, retention_days) if retention_days else None
+        self.retention = (
+            Retention(self.db.open, retention_days, clock=self.clock) if retention_days else None
+        )
         self.collector = Collector(
             self.vendor,
             tokens,

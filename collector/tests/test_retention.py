@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -13,9 +14,10 @@ import pytest
 
 from navimow_collector.cli import main
 from navimow_collector.records import Gap, GapReason, Job, Mower, MowerState, Progress, TrailPoint
-from navimow_collector.storage import postgres, retention, write_rows
+from navimow_collector.storage import Storage, postgres, retention, write_rows
+from navimow_collector.storage.retention import Retention
 
-from .conftest import FIXTURE
+from .conftest import FIXTURE, Clock
 from .test_live import NOW, STATE, Live, at, stopped_at_its_first_request, until
 
 HOUR = 3600
@@ -93,15 +95,29 @@ def test_rows_older_than_the_owner_keeps_are_removed_and_the_history_of_jobs_is_
 def test_old_rows_are_removed_a_few_at_a_time_until_none_is_left(
     live: Live, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(retention, "BATCH_ROWS", 3)
+    monkeypatch.setattr(retention, "BATCH_ROWS", 2)
     kept = days_ago(29)
     with live.db.open() as storage:
-        write_rows(storage, [*rows_at(days_ago(31)), *rows_at(days_ago(45)), *rows_at(kept)])
+        for days in (31, 32, 33, 34, 35):
+            write_rows(storage, rows_at(days_ago(days)))
+        write_rows(storage, rows_at(kept))
+    with psycopg.connect(live.db.dsn) as conn:  # the database notes what each statement removes
+        conn.execute("CREATE TABLE removal (points integer)")
+        conn.execute(
+            "CREATE FUNCTION note_removal() RETURNS trigger LANGUAGE plpgsql AS"
+            " $$ BEGIN INSERT INTO removal SELECT count(*) FROM gone; RETURN NULL; END $$"
+        )
+        conn.execute(
+            "CREATE TRIGGER note_removal AFTER DELETE ON trail_point REFERENCING OLD TABLE AS gone"
+            " FOR EACH STATEMENT EXECUTE FUNCTION note_removal()"
+        )
 
     removed_as_of(live, NOW)
 
     assert expiring(live) == dict.fromkeys(EXPIRING_TABLES, [kept])
-    assert sum(live.db.removed) == 8 and max(live.db.removed) <= 3
+    with psycopg.connect(live.db.dsn) as conn:
+        statements = [row[0] for row in conn.execute("SELECT points FROM removal")]
+    assert sum(statements) == 5 and max(statements) == 2
 
 
 def test_rows_are_removed_about_once_a_day(live: Live) -> None:
@@ -138,7 +154,7 @@ def test_replay_removes_nothing_whatever_the_owner_keeps(
 
     assert main(["--config", str(config_file), "replay", str(FIXTURE)]) == 0
 
-    assert stored(live, "trail_point", "device_time")[0] == ancient
+    assert all(times[0] == ancient for times in expiring(live).values())
     assert len(stored(live, "trail_point", "device_time")) > 1000
 
 
@@ -156,10 +172,32 @@ def test_the_collect_command_removes_what_is_older_than_the_owner_keeps(
 
     assert main(["--config", str(config_file), "collect"], session_factory=session) == 0
 
-    deadline = time.monotonic() + 5
-    while len(stored(live, "trail_point", "device_time")) > 1 and time.monotonic() < deadline:
-        time.sleep(0.01)
+    removal_ended()
     assert expiring(live) == dict.fromkeys(EXPIRING_TABLES, [kept])
+
+
+def removal_ended() -> None:
+    """Wait for whatever removal the `collect` command left under way when it stopped."""
+    for thread in threading.enumerate():
+        if thread.name == "retention":
+            thread.join()
+
+
+def test_the_collect_command_removes_nothing_unless_the_owner_says_how_long_to_keep_rows(
+    live: Live, config_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ancient = datetime.now(UTC).replace(microsecond=0) - timedelta(days=3650)
+    with live.db.open() as storage:
+        write_rows(storage, rows_at(ancient))
+    monkeypatch.setenv("NAVIMOW_AUTH_STATE_FILE", str(live.store.path))
+    monkeypatch.setenv("NAVIMOW_COLLECTOR_STATE_DIR", str(live.state))
+    monkeypatch.setenv("NAVIMOW_HEALTH_LISTEN", "")
+    session = stopped_at_its_first_request(live)
+
+    assert main(["--config", str(config_file), "collect"], session_factory=session) == 0
+
+    removal_ended()
+    assert expiring(live) == dict.fromkeys(EXPIRING_TABLES, [ancient])
 
 
 def test_a_removal_that_fails_is_left_to_the_next_day(
@@ -175,8 +213,11 @@ def test_a_removal_that_fails_is_left_to_the_next_day(
         live.db.down = True  # to new connections, which a removal makes
         await collector.tick()
         live.retention.join()
-        assert stored(live, "trail_point", "device_time") == [old]
         live.db.down = False
+        live.clock.now = NOW + 23 * HOUR
+        await collector.tick()
+        live.retention.join()
+        assert stored(live, "trail_point", "device_time") == [old]
         live.clock.now = NOW + 24 * HOUR
         await collector.tick()
         live.retention.join()
@@ -248,3 +289,88 @@ def test_each_mowers_old_rows_are_removed(database: str, tmp_path: Path) -> None
     removed_as_of(live, NOW)
 
     assert expiring(live) == dict.fromkeys(EXPIRING_TABLES, [kept] * 3)
+
+
+def test_a_gap_made_longer_while_old_rows_are_removed_is_kept(live: Live) -> None:
+    # A collector that died before noting its reconnection records the same gap again when
+    # it restarts, as ending now: just when a removal is first made.
+    began = days_ago(60)
+    with live.db.open() as storage:
+        write_rows(storage, [Gap("DEVICE_1", began, days_ago(40), GapReason.RECONNECT)])
+        removing = threading.Thread(target=storage.remove_older_than, args=(days_ago(30), 5000))
+        with psycopg.connect(live.db.dsn) as recording:
+            recording.execute("UPDATE collector_gap SET end_time = %s", (at(NOW),))
+            removing.start()
+            deadline = time.monotonic() + 4
+            while not live.db.held() and time.monotonic() < deadline:
+                time.sleep(0.01)
+        removing.join()
+
+    assert stored(live, "collector_gap", "end_time") == [at(NOW)]
+
+
+def test_a_removal_the_database_never_answers_is_said_and_not_made_again(
+    live: Live, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(postgres, "STATEMENT_TIMEOUT_MS", 0)
+    with live.db.open() as storage:
+        write_rows(storage, rows_at(days_ago(31)))
+
+    async def scenario() -> None:
+        collector = live.start(retention_days=30)
+        assert live.retention is not None
+        with live.db.suspended():
+            await collector.tick()
+            await until(live.db.held)
+            connections = live.db.attempts
+            for hours in (23, 24):
+                live.clock.now = NOW + hours * HOUR
+                await collector.tick()
+                assert ("still waiting" in caplog.text) == (hours == 24)
+            assert live.db.attempts == connections
+        live.retention.join()
+
+    asyncio.run(scenario())
+
+
+def test_a_clock_set_back_does_not_put_the_next_removal_off(live: Live) -> None:
+    # The schedule goes by time elapsed; only what counts as old goes by the date.
+    elapsed, old = Clock(), days_ago(31)
+    removal = Retention(live.db.open, 30, clock=elapsed)
+    with live.db.open() as storage:
+        write_rows(storage, rows_at(old))
+
+    removal.remove_if_due(NOW - 7 * 24 * HOUR)  # by a clock a week behind, nothing is old
+    removal.join()
+    assert stored(live, "trail_point", "device_time") == [old]
+
+    elapsed.now = 24 * HOUR
+    removal.remove_if_due(NOW)
+    removal.join()
+    assert stored(live, "trail_point", "device_time") == []
+
+
+def test_a_removal_that_fails_in_a_way_nobody_foresaw_is_logged_and_tried_again_the_next_day(
+    live: Live, caplog: pytest.LogCaptureFixture
+) -> None:
+    elapsed, opened = Clock(), 0
+
+    def opener() -> Storage:
+        nonlocal opened
+        opened += 1
+        if opened == 1:
+            raise RuntimeError("a fault in the driver")
+        return live.db.open()
+
+    with live.db.open() as storage:
+        write_rows(storage, rows_at(days_ago(31)))
+    removal = Retention(opener, 30, clock=elapsed)
+
+    removal.remove_if_due(NOW)
+    removal.join()
+    assert "Could not remove rows older than" in caplog.text
+
+    elapsed.now = 24 * HOUR
+    removal.remove_if_due(NOW + 24 * HOUR)
+    removal.join()
+    assert stored(live, "trail_point", "device_time") == []

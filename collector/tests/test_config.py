@@ -185,7 +185,7 @@ def test_a_retention_that_is_not_a_positive_whole_number_of_days_is_refused(
     assert "storage.retention_days must be a positive whole number" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("days", ["0", "-7", "1.5", "a year", ""])
+@pytest.mark.parametrize("days", ["0", "-7", "1.5", "a year", "", "３０", " 30"])
 def test_a_retention_from_the_environment_is_held_to_the_same(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],

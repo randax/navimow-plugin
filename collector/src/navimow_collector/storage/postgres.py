@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import astuple, fields, replace
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import psycopg
@@ -135,9 +135,9 @@ EXPIRING = {
     "mower_state": ("device_time", "device_time"),
     "collector_gap": ("start_time", "end_time"),
 }
-# Both statements of a removal go by the key, which begins with the mower, and neither reads
-# the table through: finding what is old among millions of positions, on the small machine
-# this shares with its database, would otherwise take longer than a statement is given.
+# Both statements of a removal can go by the key, which begins with the mower: reading
+# millions of positions through to find what is old, on the small machine this shares with
+# its database, would take longer than a statement is given.
 # The mowers a table has rows of, each found from the one before it.
 _MOWERS = """
     WITH RECURSIVE mowers AS (
@@ -149,14 +149,20 @@ _MOWERS = """
     )
     SELECT mower_id FROM mowers WHERE mower_id IS NOT NULL
 """
-# One mower's oldest rows. A row older than `before` by its age is so by its key as well.
+# One mower's oldest rows past `after`, where the statement before this one ended: the rows
+# that one removed are not walked over again. A row older than `before` by its age is so by
+# its key as well. The row is asked its age once more as it is removed: a gap recorded again
+# meanwhile, as ending later, is no longer the old gap that was found.
 _REMOVE = """
-    DELETE FROM {table} WHERE mower_id = %(mower)s AND {key} IN (
+    DELETE FROM {table} WHERE mower_id = %(mower)s AND {age} < %(before)s AND {key} IN (
         SELECT {key} FROM {table}
-        WHERE mower_id = %(mower)s AND {key} < %(before)s AND {age} < %(before)s
-        ORDER BY {key} LIMIT %(limit)s
+        WHERE mower_id = %(mower)s AND {key} > %(after)s AND {key} < %(before)s
+            AND {age} < %(before)s
+        ORDER BY {key} LIMIT %(batch)s
     )
+    RETURNING {key}
 """
+_EARLIEST = datetime.min.replace(tzinfo=UTC)
 
 
 def _insert(row: type[Row], table: str) -> str:
@@ -288,17 +294,20 @@ class PostgresStorage:
             [astuple(mower) for mower in mowers],
         )
 
-    def remove_older_than(self, before: datetime, limit: int) -> int:
+    def remove_older_than(self, before: datetime, batch: int) -> int:
         removed = 0
         with _translated():
             for table, (key, age) in EXPIRING.items():
+                remove = _REMOVE.format(table=table, key=key, age=age)
                 mowers = self._connection.execute(_MOWERS.format(table=table)).fetchall()
                 for (mower,) in mowers:
-                    if removed < limit:
-                        removed += self._connection.execute(
-                            _REMOVE.format(table=table, key=key, age=age),
-                            {"mower": mower, "before": before, "limit": limit - removed},
-                        ).rowcount
+                    after, found = _EARLIEST, batch
+                    while found == batch:  # a statement that found fewer found the last
+                        bounds = {"mower": mower, "after": after, "before": before, "batch": batch}
+                        keys = self._connection.execute(remove, bounds).fetchall()
+                        found = len(keys)
+                        removed += found
+                        after = max((row[0] for row in keys), default=after)
         return removed
 
     def _write(self, statement: str, rows: Sequence[tuple[object, ...]]) -> int:

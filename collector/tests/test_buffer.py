@@ -54,7 +54,6 @@ class Database:
         self.writes = 0
         self.drop_at_write: int | None = None  # the connection is lost at this write
         self.crash: BaseException | None = None  # raised by the next write, as a dying process
-        self.removed: list[int] = []  # how many old rows each removal took
 
     def open(self) -> Storage:
         self.attempts += 1
@@ -146,9 +145,8 @@ class Observed:
     def write_mowers(self, mowers: Sequence[Mower]) -> int:
         return self._storage.write_mowers(mowers)
 
-    def remove_older_than(self, before: datetime, limit: int) -> int:
-        self._db.removed.append(self._storage.remove_older_than(before, limit))
-        return self._db.removed[-1]
+    def remove_older_than(self, before: datetime, batch: int) -> int:
+        return self._storage.remove_older_than(before, batch)
 
     def close(self) -> None:
         self._storage.close()
