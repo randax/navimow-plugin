@@ -41,6 +41,12 @@ describe('readZoneProgress', () => {
     });
   });
 
+  test('progress written with a decimal comma is read as a decimal', () => {
+    expect(readZoneProgress([frame({ zone: [1], progress: ['87,5'], time: [T] })])).toEqual({
+      '1': { progress: 87.5, time: T },
+    });
+  });
+
   test('a row with no Zone or no readable progress says nothing', () => {
     const rows = frame({ zone: [1, null, 2, 3], progress: [null, 50, 'n/a', 12], time: [T, T, T, T] });
     expect(readZoneProgress([rows])).toEqual({ '3': { progress: 12, time: T } });

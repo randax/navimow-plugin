@@ -267,7 +267,7 @@ export function readTrails(
     }
   }
 
-  // Rows that all came back unreadable, from a decimal comma or an unfamiliar date, would otherwise be
+  // Rows that all came back unreadable, from grouped digits or an unfamiliar date, would otherwise be
   // an empty map that looks like an empty range.
   if (trails.size === 0) {
     for (const column of REQUIRED) {
@@ -279,7 +279,7 @@ export function readTrails(
             `The "${names[column]}" column has no value the Trail can read, such as "${String(given[0])}". ` +
             (column === 'time'
               ? 'Times must be epoch milliseconds or seconds, or dates like 2026-09-21T10:23:07Z.'
-              : 'Positions must be numbers of metres, written with a decimal point.'),
+              : 'Positions must be numbers of metres, such as -0.31 or -0,31, without grouped digits.'),
         };
       }
     }

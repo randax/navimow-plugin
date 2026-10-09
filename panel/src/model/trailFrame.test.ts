@@ -664,6 +664,20 @@ describe('readTrails', () => {
     ]);
   });
 
+  test('text positions with a decimal comma, as a Norwegian spreadsheet writes them, are read as decimals', () => {
+    const csv = frame({ time: at(0, SEC), x: ['-0,31', '1,0'], y: ['-0,357', '2'], theta: ['1,039', '-0,5'] });
+    expect(trails([csv])).toEqual([
+      {
+        segments: [
+          [
+            { time: T, x: -0.31, y: -0.357, heading: 1.039 },
+            { time: T + SEC, x: 1, y: 2, heading: -0.5 },
+          ],
+        ],
+      },
+    ]);
+  });
+
   test('times may arrive as text', () => {
     const [trail] = trails([frame({ time: ['2026-09-21T10:23:07.389Z', '1789986188447'], x: [0, 1], y: [0, 0] })]);
     expect(trail.segments.flat().map((p) => p.time)).toEqual([1789986187389, 1789986188447]);
@@ -718,12 +732,21 @@ describe('readTrails', () => {
   });
 
   test.each([
-    ['x', { time: at(0, SEC), x: ['-0,31', '1,0'], y: [0, 0] }, '-0,31'],
+    ['x', { time: at(0, SEC), x: ['1.234,5', '-2.000,25'], y: [0, 0] }, '1.234,5'],
+    ['y', { time: at(0, SEC), x: [0, 0], y: ['1,234,5', '1 234,5'] }, '1,234,5'],
     ['time', { time: ['21.09.2026 10:23:07'], x: [0], y: [0] }, '21.09.2026 10:23:07'],
     ['time', { time: ['2026-09-21T10:00:00+02'], x: [0], y: [0] }, '2026-09-21T10:00:00+02'],
   ])('a "%s" column with nothing readable says so, with an example', (column, columns, example) => {
     expect(readTrails([frame(columns)])).toEqual({
       problem: expect.stringContaining(`"${column}" column has no value the Trail can read, such as "${example}"`),
+    });
+  });
+
+  test('unreadable positions are told how to write them', () => {
+    expect(readTrails([frame({ time: at(0), x: ['1.234,5'], y: [0] })])).toEqual({
+      problem: expect.stringContaining(
+        'Positions must be numbers of metres, such as -0.31 or -0,31, without grouped digits.'
+      ),
     });
   });
 
