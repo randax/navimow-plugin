@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from ..config import StorageConfig
 from .base import RejectedError, SchemaError, Storage, StorageError, Writer, write_rows
 from .postgres import PostgresStorage
@@ -18,7 +20,19 @@ __all__ = [
     "write_rows",
 ]
 
-STORAGE_BACKENDS = {"postgres": PostgresStorage}
+
+def _clickhouse(config: StorageConfig) -> Storage:
+    # Loaded where it is the backend chosen: its client is not small, and most have no use
+    # for it.
+    from .clickhouse import ClickHouseStorage
+
+    return ClickHouseStorage(config)
+
+
+STORAGE_BACKENDS: dict[str, Callable[[StorageConfig], Storage]] = {
+    "postgres": PostgresStorage,
+    "clickhouse": _clickhouse,
+}
 
 
 def open_storage(config: StorageConfig) -> Storage:

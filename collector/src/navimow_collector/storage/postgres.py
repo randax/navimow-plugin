@@ -11,7 +11,7 @@ import logging
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import astuple, fields, replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 
 import psycopg
@@ -20,7 +20,7 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from ..config import StorageConfig
 from ..records import Gap, Job, Mower, MowerState, Progress, Row, TrailPoint
-from .base import RejectedError, SchemaError, StorageError
+from .base import RejectedError, SchemaError, StorageError, lifetime
 
 # A database call should not wait for long: by default a connection attempt, a statement
 # held up by a lock and a server that vanished from the network each fail within seconds,
@@ -248,19 +248,6 @@ _BY_THE_KEY = (
 )
 
 
-def _kept_for(days: int | None) -> timedelta | None:
-    """How long rows are kept, of a number of days; None if for ever, which is also to keep
-    them for longer than dates go back."""
-    if days is None:
-        return None
-    try:
-        keep = timedelta(days=days)
-        _ = datetime.now(UTC) - keep  # fails where that is before dates begin
-    except OverflowError:
-        return None
-    return keep
-
-
 def _insert(row: type[Row], table: str) -> str:
     """Insert every field of the row into the column of the same name."""
     columns = [field.name for field in fields(row)]
@@ -372,7 +359,7 @@ class PostgresStorage:
             timescaledb = self._timescaledb()
             if timescaledb is None:
                 return
-            days = days if _kept_for(days) is not None else None
+            days = days if lifetime(days) is not None else None
             forget = sql.SQL("SELECT {}.delete_job(%s)").format(timescaledb)
             keep = sql.SQL(
                 "SELECT {}.add_retention_policy(%s, drop_after => make_interval(days => %s))"

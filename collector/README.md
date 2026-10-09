@@ -3,7 +3,9 @@
 The collector records the Trail of every mower on a Navimow account into
 PostgreSQL, live and unattended, and works out which Job and Zone each part of
 it belongs to. It can also replay a raw capture through the same ingestion
-core, which is how it is tested.
+core, which is how it is tested. PostgreSQL is the database it is built around;
+[TimescaleDB](#timescaledb) and [ClickHouse](#clickhouse) are written to as
+well.
 
 ## Install
 
@@ -114,7 +116,8 @@ migrate = true
 
 An inline `dsn = "postgresql://..."` is also accepted. Secret files have their
 trailing newline removed, and `NAVIMOW_STORAGE_DSN_FILE` can supply the path.
-`retention_days` is described under [Retention](#retention).
+`retention_days` is described under [Retention](#retention). `backend` is
+`postgres`, which is TimescaleDB's too, or [`clickhouse`](#clickhouse).
 
 `navimow-collector config` prints what the collector would run with, secrets
 left out.
@@ -350,6 +353,54 @@ With `storage.migrate = false` the collector makes neither hypertables nor
 policies, and leaves any policy as it finds it: a table with a policy is left
 to TimescaleDB, however long that policy keeps rows.
 
+## ClickHouse
+
+```toml
+[storage]
+backend = "clickhouse"
+dsn_file = "/run/secrets/navimow-clickhouse-url"   # http://user:password@clickhouse:8123/navimow
+```
+
+The collector speaks to ClickHouse's HTTP interface (`https://` and port 8443
+where it is set up for TLS). It is tested against ClickHouse 26.8, and needs
+25.6 or later. The database named must exist; the collector creates its tables in it, the same
+tables and columns as in PostgreSQL. Times are `DateTime64(6, 'UTC')`, what a
+mower may leave unsaid is `Nullable`, and a Job's `zones` is an array that is
+empty until they are known.
+
+**Do not run ClickHouse for this on a Raspberry Pi.** Its official image does
+not start on a Raspberry Pi 4, whose processor lacks instructions it requires.
+ClickHouse recommends 32 GB of memory and wants tuning below 16 GB, on a
+machine that here also runs Grafana and the collector. And a year of one mower
+is some three million rows, which a column store is not needed for. Use
+PostgreSQL there. ClickHouse is supported for whoever already runs one.
+
+Three things differ from PostgreSQL:
+
+- **Read every table with `FINAL`.** ClickHouse holds no row to a key: a row
+  told of again is a second row, until ClickHouse merges the two. The collector
+  asks what is stored before it writes, and writes only what is new, so that a
+  capture replayed twice leaves nothing behind; but two writers at once can
+  each store the same row, and a query without `FINAL` then counts it twice.
+  The tables are `ReplacingMergeTree`, so with `FINAL`, or once merged, there
+  is one.
+- **Retention is a TTL.** When `collect` starts with `storage.retention_days`
+  set, it gives the four tables that expire a TTL of that many days, changes it
+  if the number has changed, and removes it if the setting is gone: a TTL you
+  set by hand on one of them is replaced or removed like its own. ClickHouse
+  removes old rows as it merges, some hours later, and the collector removes
+  none itself. `replay` sets no TTL and changes none. With
+  `storage.migrate = false` the collector sets none either: if a number of days
+  is set all the same and a table has no TTL, it says once a day in its log
+  that nothing removes old rows from it.
+- **The bundled dashboard is PostgreSQL's.** For ClickHouse it needs the
+  [ClickHouse data source](https://grafana.com/grafana/plugins/grafana-clickhouse-datasource/)
+  and queries of its own, with `$__timeFilter_ms` on these times.
+
+A mower sends a position every two seconds, and the collector writes rows as
+they come, a few at a time. ClickHouse would rather have them by the thousand,
+but merges what it is given, and at this rate keeps up.
+
 ## Jobs and Zones
 
 Nothing the mower sends names a Job, so the collector decides where each one
@@ -506,7 +557,8 @@ NAVIMOW_TEST_POSTGRES_DSN=postgresql://postgres@localhost:5432/postgres pytest c
 `tests/test_conformance.py` asks the same of every database the collector
 writes to, where they differ: a schema made from nothing, rows written out of
 order and from years ago, a batch, one Job's Trail read back in order,
-retention, and a Job read back as it was written. PostgreSQL is the one above.
+retention, a row told of again, and a Job read back as it was written.
+PostgreSQL is the one above.
 For TimescaleDB, start one that keeps nothing once stopped, and name it:
 
 ```bash
@@ -514,6 +566,15 @@ docker run --rm -d --name navimow-timescale -e POSTGRES_HOST_AUTH_METHOD=trust \
   -p 127.0.0.1:55433:5432 --tmpfs /var/lib/postgresql/data timescale/timescaledb:latest-pg16
 NAVIMOW_TEST_TIMESCALE_DSN=postgresql://postgres@127.0.0.1:55433/postgres pytest collector/tests/test_conformance.py
 docker stop navimow-timescale
+```
+
+And for ClickHouse, the same way:
+
+```bash
+docker run --rm -d --name navimow-clickhouse -e CLICKHOUSE_SKIP_USER_SETUP=1 \
+  -p 127.0.0.1:58123:8123 --tmpfs /var/lib/clickhouse clickhouse/clickhouse-server:26.8
+NAVIMOW_TEST_CLICKHOUSE_URL=http://default@127.0.0.1:58123 pytest collector/tests/test_conformance.py
+docker stop navimow-clickhouse
 ```
 
 A backend whose variable is not set is skipped, unless `NAVIMOW_TEST_REQUIRE`

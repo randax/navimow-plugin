@@ -10,6 +10,7 @@
 - Serves `/health` for a container or service manager, and `/metrics` in the Prometheus text format.
 - Creates and migrates its own tables, unless told not to. The schema only ever gains tables and columns.
 - Uses TimescaleDB where its extension is installed: the tables of readings are made hypertables as the collector makes them, and `storage.retention_days` becomes a retention policy of TimescaleDB's own.
+- Writes to ClickHouse as well (`backend = "clickhouse"`), the same tables and columns, with `storage.retention_days` as a TTL. Not recommended on a Raspberry Pi.
 - Keeps everything by default. With `storage.retention_days` set, positions, progress reports, states and gaps older than that are removed once a day; Jobs and mowers are always kept.
 - Replays a raw capture through the same ingestion as live collection.
 - Released as a container image for 64-bit x86 and ARM and as `navimow-collector` on the package index, with a sample systemd unit.

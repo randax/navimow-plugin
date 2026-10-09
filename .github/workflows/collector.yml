@@ -62,23 +62,39 @@ jobs:
         include:
           - backend: postgres
             image: postgres:16
-            dsn_variable: NAVIMOW_TEST_POSTGRES_DSN
+            port: 5432
+            healthy: pg_isready -U postgres
+            variable: NAVIMOW_TEST_POSTGRES_DSN
+            address: postgresql://postgres@localhost:5432/postgres
           - backend: timescaledb
             image: timescale/timescaledb:latest-pg16
-            dsn_variable: NAVIMOW_TEST_TIMESCALE_DSN
+            port: 5432
+            healthy: pg_isready -U postgres
+            variable: NAVIMOW_TEST_TIMESCALE_DSN
+            address: postgresql://postgres@localhost:5432/postgres
+          # A release line, not the latest: ClickHouse has no tag that follows its
+          # long-term releases.
+          - backend: clickhouse
+            image: clickhouse/clickhouse-server:26.8
+            port: 8123
+            healthy: clickhouse-client --query 'SELECT 1'
+            variable: NAVIMOW_TEST_CLICKHOUSE_URL
+            address: http://default@localhost:8123
     services:
       database:
         image: ${{ matrix.image }}
         env:
-          # No password: a throwaway service reachable only from this job.
+          # No password, for whichever of them this is: a throwaway service reachable
+          # only from this job.
           POSTGRES_HOST_AUTH_METHOD: trust
+          CLICKHOUSE_SKIP_USER_SETUP: "1"
         options: >-
-          --health-cmd "pg_isready -U postgres"
+          --health-cmd "${{ matrix.healthy }}"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
         ports:
-          - 5432:5432
+          - ${{ matrix.port }}:${{ matrix.port }}
     env:
       # The backend this job is for must be there: without it the job fails, where any other
       # run of the suite skips a backend it cannot reach.
@@ -90,9 +106,10 @@ jobs:
           python-version: "3.13"
           cache: pip
       - run: pip install -e 'collector[dev]'
-      - run: echo "$DSN_VARIABLE=postgresql://postgres@localhost:5432/postgres" >> "$GITHUB_ENV"
+      - run: echo "$VARIABLE=$ADDRESS" >> "$GITHUB_ENV"
         env:
-          DSN_VARIABLE: ${{ matrix.dsn_variable }}
+          VARIABLE: ${{ matrix.variable }}
+          ADDRESS: ${{ matrix.address }}
       # By what each test needs, not by its name: one named without its backend would be
       # run by no job at all.
       - run: pytest collector/tests/test_conformance.py -m "$BACKEND" -rs
