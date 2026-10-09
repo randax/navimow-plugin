@@ -47,16 +47,15 @@ with `FINAL`.
   listed them, which it does every five minutes or so. A message of that kind with no list
   in it, as the mower sends near the dock, changes nothing.
 - **A Job is told of again whenever it changes**, and a telling replaces the stored one
-  unless it is older by `updated_time`. That is when the mower sent the newest message that
-  changed the Job (a Job given up keeps the time of its telling before, as the moment it was
-  last heard), moved on where need be to a microsecond after the telling before: a
-  message sent no later than the last can still change a Job, and of two tellings as of one
-  moment only the order of writing would say which stands. Rows are written out of order by
-  a write that live collection gave up on and the database took late, and by a buffer file
-  read after the rows held in memory. The mower's times are whole milliseconds, and a
-  telling is moved on a microsecond at a time, so short of a thousand tellings as of one
-  millisecond it stays in that millisecond, and when the message was sent is still read
-  from it.
+  unless it is older by `updated_time`. That is when the mower sent the newest message
+  that changed the Job (a Job given up keeps the time of its telling before), moved on
+  where need be to a microsecond after the telling before: a message sent no later than
+  the last can still change a Job, and of two tellings as of one moment only the order of
+  writing would say which stands. Rows are written out of order by a write that live
+  collection gave up on and the database took late, and by a buffer file read after the
+  rows held in memory. The mower's times are whole milliseconds, and a telling is moved on
+  a microsecond at a time, so short of a thousand tellings as of one millisecond it stays
+  in that millisecond, and when the message was sent is still read from it.
 - **`mower`** is one row per mower as the account's device list describes it, rewritten
   when the list describes it differently; `updated_time` says since when. The firmware
   matters because ADR 0001's rules were checked on one.
