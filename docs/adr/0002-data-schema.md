@@ -77,13 +77,13 @@ to apply to its hypertables, as a retention policy that live collection keeps to
 setting, and removes old readings a chunk at a time; gaps, which are no hypertable, the
 collector still removes. ClickHouse is given the rule as a TTL on all four tables, and
 removes old rows as it merges. InfluxDB keeps retention on the bucket, which the owner
-creates, so there the setting is to be refused; it is not built yet
-([#31](https://github.com/randax/navimow-plugin/issues/31)).
+creates, so there the setting is refused when the configuration is read.
 
 ## The InfluxDB shape
 
-Not yet built ([#31](https://github.com/randax/navimow-plugin/issues/31)). Measurements are
-named as the tables and fields as the columns.
+One shape for InfluxDB 1, 2 and 3, written through `/write` or `/api/v2/write` and read
+in InfluxQL, which all three take. Measurements are named as the tables and fields as the
+columns.
 
 - **Time** is `device_time`; for `job` and `collector_gap`, `start_time`; for `mower`,
   `updated_time`.
@@ -93,7 +93,9 @@ named as the tables and fields as the columns.
 - **Everything else is a field.** The other times are integer epoch milliseconds, `state`
   and `reason` are strings, and `job.zones` is a string such as `1,6,7,9,10,11`.
 - **A Job is written as a `job` point as well**, at its start time, and written again as
-  the Job goes on.
+  the Job goes on. One that is not ended has an `end_time` of 0: a field cannot be unset,
+  and a Job is ended and begun again around each charge.
+- **A value not known is a field not written**, InfluxDB having no way to say so.
 
 ## Considered options
 
@@ -131,10 +133,15 @@ named as the tables and fields as the columns.
   the next start, not when it happened.
 - The bundled dashboard has no signal-strength panel until a mower is seen to send one.
 - InfluxDB cannot do three things the relational shape does. It overwrites a point with the
-  same measurement, tags and time, so a row delivered again replaces the one stored, where
-  the relational shape skips it; the values are the same but for `received_time`. It cannot
-  refuse an older version of a Job, so one written out of order replaces a newer; the
-  collector writes them in order, and it takes an outage and a buffer replayed to do
-  otherwise. And a row stored again under a different Job or Zone is a second point, not a
+  same measurement, tags and time, field by field, so a row delivered again replaces the
+  one stored, where the relational shape skips it; the values are the same but for
+  `received_time`. It cannot refuse an older version of a Job, so one written out of order
+  is written over a newer, and what only the newer said stays; the collector writes them
+  in order, and it takes an outage and a buffer replayed to do otherwise. And a row stored again under a different Job or Zone is a second point, not a
   replacement; ADR 0001's rules decide from a row's own time, so that takes the restart in
   the middle of a decision which that ADR already lists.
+- In InfluxDB a mower described anew is a new point, at the time it was so described: the
+  descriptions before stay, where the relational shape rewrites the one row. A mower of
+  which nothing is known is no point, a point needing a field. And the collector cannot
+  tell a point that was there from one that was not, so there it counts every row it
+  writes as written.

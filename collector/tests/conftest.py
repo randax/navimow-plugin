@@ -9,17 +9,21 @@ a variable of their own, and skipped where it is unset.
 
 from __future__ import annotations
 
+import base64
 import glob
+import json
 import os
 import shutil
 import socket
 import subprocess
+import urllib.request
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import NoReturn
+from typing import Any, NoReturn
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 import clickhouse_connect
 import psycopg
@@ -173,6 +177,81 @@ def fresh_clickhouse(server: str) -> Iterator[str]:
         client.close()
 
 
+def influxdb_server(line: int) -> str:
+    """Address of an InfluxDB server of one major line, with the login of one who may make
+    databases on it: `http://user:password@host:8086` for the older way in, or
+    `http://host:8086?org=...&token=...` for the newer."""
+    url = os.environ.get(f"NAVIMOW_TEST_INFLUXDB{line}_URL")
+    if not url:
+        unavailable(f"influxdb{line}", f"set NAVIMOW_TEST_INFLUXDB{line}_URL")
+    return url
+
+
+def influxdb_ways(server: str) -> dict[str, str]:
+    """The same InfluxDB server by each of its two ways in, with the login the tests were
+    given put as that way takes it: `older` for `/write`, `newer` for `/api/v2/write`."""
+    address = urlsplit(server)
+    said = {key: values[-1] for key, values in parse_qs(address.query).items()}
+    host = f"{address.hostname}:{address.port}"
+    user, secret = address.username or "navimow", said.get("token") or address.password
+    older = f"{user}:{secret}@{host}" if secret else host
+    token = said.get("token") or (f"{user}:{secret}" if secret else None)
+    newer = {"org": said.get("org", "home"), **({"token": token} if token else {})}
+    return {
+        "older": f"{address.scheme}://{older}",
+        "newer": f"{address.scheme}://{host}?{urlencode(newer)}",
+    }
+
+
+def influxdb_asked(server: str, method: str, path: str, body: object = None) -> Any:
+    """What an InfluxDB server answers one who administers it. A text is sent as it is,
+    anything else as JSON."""
+    address = urlsplit(server)
+    named = {key: values[-1] for key, values in parse_qs(address.query).items()}
+    headers = {"Content-Type": "application/json"}
+    if "token" in named:
+        headers["Authorization"] = f"Token {named['token']}"
+    elif address.username:
+        login = f"{address.username}:{address.password or ''}".encode()
+        headers["Authorization"] = f"Basic {base64.b64encode(login).decode()}"
+    sent = body.encode() if isinstance(body, str) else json.dumps(body).encode()
+    request = urllib.request.Request(
+        f"{address.scheme}://{address.hostname}:{address.port}{path}",
+        data=None if body is None else sent,
+        headers=headers,
+        method=method,
+    )
+    with urllib.request.urlopen(request, timeout=10) as answer:
+        said = answer.read()
+    return json.loads(said) if said.strip() else None
+
+
+@contextmanager
+def fresh_influxdb(line: int, server: str) -> Iterator[str]:
+    """Address of a new, empty database on an InfluxDB server, dropped afterwards. Each line
+    has its own way of making one."""
+    name = f"t_{uuid.uuid4().hex[:12]}"
+    made = urlencode({"q": f'CREATE DATABASE "{name}"'})
+    dropped = urlencode({"q": f'DROP DATABASE "{name}"'})
+    if line == 1:
+        influxdb_asked(server, "POST", f"/query?{made}")
+        drop = ("POST", f"/query?{dropped}")
+    elif line == 2:
+        org = parse_qs(urlsplit(server).query)["org"][-1]
+        [found] = influxdb_asked(server, "GET", f"/api/v2/orgs?{urlencode({'org': org})}")["orgs"]
+        bucket = influxdb_asked(
+            server, "POST", "/api/v2/buckets", {"orgID": found["id"], "name": name}
+        )
+        drop = ("DELETE", f"/api/v2/buckets/{bucket['id']}")
+    else:
+        influxdb_asked(server, "POST", "/api/v3/configure/database", {"db": name})
+        drop = ("DELETE", f"/api/v3/configure/database?db={name}")
+    try:
+        yield urlsplit(server)._replace(path=f"/{name}").geturl()
+    finally:
+        influxdb_asked(server, *drop)
+
+
 @pytest.fixture
 def config_file(tmp_path: Path, database: str) -> Path:
     path = tmp_path / "collector.toml"
@@ -180,10 +259,10 @@ def config_file(tmp_path: Path, database: str) -> Path:
     return path
 
 
-BACKENDS = ("postgres", "timescaledb", "clickhouse")
+BACKENDS = ("postgres", "timescaledb", "clickhouse", "influxdb1", "influxdb2", "influxdb3")
 # The fixtures that are one backend each, and those that are each of several in turn.
 ONE_BACKEND = {"timescale": "timescaledb", "clickhouse": "clickhouse"}
-SEVERAL_BACKENDS = ("backend", "postgresql")
+SEVERAL_BACKENDS = ("backend", "postgresql", "relational", "influx")
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -197,7 +276,10 @@ def pytest_collection_modifyitems(items: list[pytest.Function]) -> None:
     they happen to be called."""
     for item in items:
         given = getattr(getattr(item, "callspec", None), "params", {})
-        needed = [given[fixture] for fixture in SEVERAL_BACKENDS if fixture in given]
+        # A line of InfluxDB is one backend, by whichever of its ways in: `influxdb2-newer`.
+        needed = [
+            given[fixture].partition("-")[0] for fixture in SEVERAL_BACKENDS if fixture in given
+        ]
         needed += [
             backend for fixture, backend in ONE_BACKEND.items() if fixture in item.fixturenames
         ]

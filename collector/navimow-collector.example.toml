@@ -1,6 +1,7 @@
 [storage]
-# "postgres", which is TimescaleDB's too, or "clickhouse" with a dsn such as
-# http://user:password@clickhouse:8123/navimow
+# "postgres", which is TimescaleDB's too; "clickhouse", with a dsn such as
+# http://user:password@clickhouse:8123/navimow; or "influxdb", with one such as
+# http://user:password@influxdb:8086/navimow or http://influxdb:8086/navimow?org=home&token=...
 backend = "postgres"
 # dsn = "postgresql://user:password@localhost/navimow"
 dsn_file = "/run/secrets/navimow-postgres-dsn"

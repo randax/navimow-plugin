@@ -6,6 +6,7 @@ from collections.abc import Callable
 
 from ..config import StorageConfig
 from .base import RejectedError, SchemaError, Storage, StorageError, Writer, write_rows
+from .influxdb import InfluxStorage
 from .postgres import PostgresStorage
 
 __all__ = [
@@ -32,6 +33,7 @@ def _clickhouse(config: StorageConfig) -> Storage:
 STORAGE_BACKENDS: dict[str, Callable[[StorageConfig], Storage]] = {
     "postgres": PostgresStorage,
     "clickhouse": _clickhouse,
+    "influxdb": InfluxStorage,
 }
 
 
