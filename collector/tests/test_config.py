@@ -176,9 +176,13 @@ def test_nothing_is_removed_unless_the_owner_says_how_long_to_keep_rows(
     assert load_config(config).storage.retention_days == 30
     monkeypatch.setenv("NAVIMOW_STORAGE_RETENTION_DAYS", "0" * 5000 + "30")
     assert load_config(config).storage.retention_days == 30
+    monkeypatch.setenv("NAVIMOW_STORAGE_RETENTION_DAYS", "2147483647")
+    assert "retention_days = 2147483647\n" in show(capsys, "--config", str(config))
 
 
-@pytest.mark.parametrize("days", ["0", "-7", "1.5", '"a year"', "true", '""'])
+@pytest.mark.parametrize(
+    "days", ["0", "-7", "1.5", '"a year"', "true", '""', "2147483648", "0x" + "f" * 4000]
+)
 def test_a_retention_that_is_not_a_positive_whole_number_of_days_is_refused(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], days: str
 ) -> None:
@@ -187,7 +191,9 @@ def test_a_retention_that_is_not_a_positive_whole_number_of_days_is_refused(
     assert "storage.retention_days must be a positive whole number" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("days", ["0", "-7", "1.5", "a year", "", "３０", " 30", "9" * 5000])
+@pytest.mark.parametrize(
+    "days", ["0", "-7", "1.5", "a year", "", "３０", " 30", "9" * 5000, "2147483648"]
+)
 def test_a_retention_from_the_environment_is_held_to_the_same(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],

@@ -135,7 +135,7 @@ EXPIRING = {
     "mower_state": ("device_time", "device_time"),
     "collector_gap": ("start_time", "end_time"),
 }
-# Both statements of a removal can go by the key, which begins with the mower: reading
+# Every statement of a removal can go by the key, which begins with the mower: reading
 # millions of positions through to find what is old, on the small machine this shares with
 # its database, would take longer than a statement is given. What earlier removals took is
 # passed over at the start of each, for as long as the database has not cleaned it up:
@@ -318,7 +318,7 @@ class PostgresStorage:
                 for (mower,) in mowers:
                     bounds = {"mower": mower, "after": _EARLIEST, "before": before}
                     found = batch
-                    while found == batch:  # a batch that found fewer found the last
+                    while found and found == batch:  # a batch that found fewer found the last
                         with self._connection.transaction():
                             self._connection.execute(_BY_THE_KEY)
                             oldest = self._connection.execute(

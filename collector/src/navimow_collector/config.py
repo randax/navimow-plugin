@@ -10,6 +10,9 @@ from pathlib import Path
 from types import UnionType
 from typing import TypeVar, get_args, get_origin, get_type_hints
 
+# The largest number a setting may be: far beyond any use, and short enough to print.
+LARGEST_NUMBER = 2**31 - 1
+
 
 class ConfigError(Exception):
     """A configuration value could not be resolved safely."""
@@ -249,9 +252,9 @@ def _coerce(value: object, annotation: object, key: str) -> object:
         if isinstance(value, str) and value.isascii() and value.isdigit():
             with suppress(ValueError):  # too long for Python to read as a number at all
                 value = int(value.lstrip("0") or "0")
-        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        if isinstance(value, int) and not isinstance(value, bool) and 0 < value <= LARGEST_NUMBER:
             return value
-        raise ConfigError(f"{key} must be a positive whole number")
+        raise ConfigError(f"{key} must be a positive whole number, at most {LARGEST_NUMBER}")
     raise ConfigError(f"unsupported configuration type for {key}")
 
 
