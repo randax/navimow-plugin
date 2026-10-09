@@ -33,7 +33,7 @@ from .health import HealthServer, Probe
 from .ingest import Ingestor, read_capture
 from .live import Collector
 from .logs import JsonFormatter
-from .storage import Storage, StorageError, open_storage
+from .storage import Storage, StorageError, open_for_collection, open_storage
 from .storage.buffered import BackgroundStorage
 from .storage.retention import Retention
 
@@ -141,7 +141,7 @@ def _collect(config: Config, session_factory: Callable[[], HTTPSession], login_c
         raise ConfigError(f"collector.state_dir {state_dir} cannot be written: {error}") from error
 
     def opener() -> Storage:
-        return open_storage(config.storage)
+        return open_for_collection(config.storage)
 
     storage = BackgroundStorage(opener, state_dir / "buffer.jsonl")
     storage.connect()

@@ -145,6 +145,9 @@ class Observed:
     def write_mowers(self, mowers: Sequence[Mower]) -> int:
         return self._storage.write_mowers(mowers)
 
+    def keep_for(self, days: int | None) -> None:
+        self._storage.keep_for(days)
+
     def remove_older_than(self, before: datetime, batch: int) -> int:
         return self._storage.remove_older_than(before, batch)
 

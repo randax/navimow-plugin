@@ -13,6 +13,7 @@ __all__ = [
     "Storage",
     "StorageError",
     "Writer",
+    "open_for_collection",
     "open_storage",
     "write_rows",
 ]
@@ -28,6 +29,21 @@ def open_storage(config: StorageConfig) -> Storage:
             storage.migrate()
         else:
             storage.check_schema()
+    except BaseException:
+        storage.close()
+        raise
+    return storage
+
+
+def open_for_collection(config: StorageConfig) -> Storage:
+    """Open the configured backend as live collection uses it: the database is also told
+    how long the owner keeps rows, wherever it removes old ones itself. `replay` opens
+    without, and so neither removes anything nor changes what the database was told. Nor
+    is a database told anything whose schema is not the collector's to change."""
+    storage = open_storage(config)
+    try:
+        if config.migrate:
+            storage.keep_for(config.retention_days)
     except BaseException:
         storage.close()
         raise

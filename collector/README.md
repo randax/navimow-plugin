@@ -232,7 +232,11 @@ and TCP keep-alives notice a server that vanished from the network. These are
 defaults, for `collect`, `replay` and migrations alike: a `connect_timeout` or
 keep-alive setting in the DSN is used instead, and so is a `statement_timeout`
 set anywhere at all (the DSN's `options`, the role, the database or the server
-configuration).
+configuration). One wait is 5 seconds at most, whatever longer is set: the
+wait for a lock while the collector makes or changes its tables, or tells
+TimescaleDB how long to keep rows, behind another collector doing the same or
+a query that holds one of the tables. A start that fails for it is tried again
+like any outage; TimescaleDB not told is logged, and told at the next start.
 
 The collector never waits on the database to do anything else. Rows are written
 one batch at a time on a thread of their own, so collection, token refresh,
@@ -295,6 +299,56 @@ collector's clock: one set far ahead removes rows early.
 
 `replay` removes nothing, whatever the setting. What it stores that is older
 than the setting is removed by `collect`, the next time it removes old rows.
+
+## TimescaleDB
+
+TimescaleDB (2.x) needs no setting of its own: to the collector it is
+PostgreSQL, with `backend = "postgres"` and a DSN. Where the `timescaledb`
+extension is installed in the database, the collector does two things more:
+
+- As it creates its tables, it makes hypertables of the readings:
+  `trail_point`, `job_progress` and `mower_state`, by their `device_time`.
+  `collector_gap`, `job` and `mower` stay ordinary tables. Only a table it is
+  just creating is made one: see below for a database it made its tables in
+  before.
+- When `collect` starts, it gives TimescaleDB a retention policy for each
+  hypertable if `storage.retention_days` is set, replaces it if the number has
+  changed or the policy was set aside, and removes it if the setting is gone:
+  a policy you made by hand on one of these tables is replaced or removed like
+  its own. Only its age and whether it is set aside (`scheduled`) are looked
+  at: one whose schedule you changed some other way is left as it is. Whatever
+  else TimescaleDB does with these tables, compression for one, is left alone. TimescaleDB then
+  removes old readings itself, a whole chunk at a time, so a reading can
+  outlive the setting by a week or so. Old gaps are removed by the collector,
+  as on PostgreSQL.
+
+`replay` gives TimescaleDB no policy and changes none. What it stores that is
+older than a policy already there, TimescaleDB removes when it next applies it.
+
+Should TimescaleDB refuse either (it makes no policies under its Apache
+licence), the collector logs a warning and starts all the same: whatever table has no
+retention policy, it removes old rows from itself. So it does where it is not
+let read TimescaleDB's policies at all.
+
+A database the collector made its tables in before the extension was
+installed keeps them as ordinary tables, whether they hold rows yet or not,
+and the collector goes on removing old rows from them itself. It does not make
+hypertables of tables that are there: TimescaleDB rewrites a table that holds
+a Trail under a lock, for as long as that takes, and a reading written at that
+moment by a collector at work could be lost. So it is yours to do, with the
+collector stopped:
+
+```sql
+SELECT create_hypertable('trail_point', 'device_time', migrate_data => true, create_default_indexes => false);
+SELECT create_hypertable('job_progress', 'device_time', migrate_data => true, create_default_indexes => false);
+SELECT create_hypertable('mower_state', 'device_time', migrate_data => true, create_default_indexes => false);
+```
+
+The next start of `collect` gives each its retention policy.
+
+With `storage.migrate = false` the collector makes neither hypertables nor
+policies, and leaves any policy as it finds it: a table with a policy is left
+to TimescaleDB, however long that policy keeps rows.
 
 ## Jobs and Zones
 
@@ -448,6 +502,25 @@ automatically) or point it at an existing server:
 ```bash
 NAVIMOW_TEST_POSTGRES_DSN=postgresql://postgres@localhost:5432/postgres pytest collector
 ```
+
+`tests/test_conformance.py` asks the same of every database the collector
+writes to, where they differ: a schema made from nothing, rows written out of
+order and from years ago, a batch, one Job's Trail read back in order,
+retention, and a Job read back as it was written. PostgreSQL is the one above.
+For TimescaleDB, start one that keeps nothing once stopped, and name it:
+
+```bash
+docker run --rm -d --name navimow-timescale -e POSTGRES_HOST_AUTH_METHOD=trust \
+  -p 127.0.0.1:55433:5432 --tmpfs /var/lib/postgresql/data timescale/timescaledb:latest-pg16
+NAVIMOW_TEST_TIMESCALE_DSN=postgresql://postgres@127.0.0.1:55433/postgres pytest collector/tests/test_conformance.py
+docker stop navimow-timescale
+```
+
+A backend whose variable is not set is skipped, unless `NAVIMOW_TEST_REQUIRE`
+names it: then its absence fails the run. One that is named and does not
+answer fails the tests that need it. That is how each backend has a job of
+its own on every pull request and each night, the night being for what changes
+outside the repository, such as a database image.
 
 Two more checks run on every pull request. `scripts/package.sh` builds the wheel
 and the source distribution and installs the wheel into an environment of its
