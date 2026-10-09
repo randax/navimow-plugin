@@ -7,14 +7,17 @@ dashboard would, in the backend's own query language.
 
 from __future__ import annotations
 
+import threading
 import uuid
 from collections.abc import Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
 import clickhouse_connect
 import psycopg
@@ -34,7 +37,15 @@ from navimow_collector.storage import (
 )
 from navimow_collector.storage.retention import BATCH_ROWS
 
-from .conftest import FIXTURE, fresh_clickhouse, fresh_database
+from .conftest import (
+    FIXTURE,
+    fresh_clickhouse,
+    fresh_database,
+    fresh_influxdb,
+    influxdb_asked,
+    influxdb_server,
+    influxdb_ways,
+)
 from .test_live import Live, stopped_at_its_first_request
 from .test_retention import EXPIRING_TABLES, removal_ended, rows_at
 
@@ -45,13 +56,17 @@ class Database(Protocol):
 
     def open(self, **settings: object) -> Storage: ...
 
-    def a_day_passes(self, storage: Storage, keep_days: int) -> None: ...
-
     def stored(self, table: str, time: str = "device_time") -> list[datetime]: ...
 
-    def expiring(self) -> dict[str, list[datetime]]: ...
-
     def trail(self, mower_id: str, job_id: str) -> list[tuple[datetime, float]]: ...
+
+
+class Relational(Database, Protocol):
+    """A backend of tables and keys, which the collector tells how long to keep rows."""
+
+    def a_day_passes(self, storage: Storage, keep_days: int) -> None: ...
+
+    def expiring(self) -> dict[str, list[datetime]]: ...
 
 
 @dataclass(frozen=True)
@@ -211,30 +226,111 @@ class ClickHouse:
         return [(when.replace(tzinfo=UTC), x) for when, x in found]
 
 
-@pytest.fixture(params=["postgres", "timescaledb", "clickhouse"])
-def backend(request: pytest.FixtureRequest) -> Iterator[Database]:
-    """Each backend in turn, empty."""
-    if request.param == "clickhouse":
-        with fresh_clickhouse(request.getfixturevalue("clickhouse_server")) as url:
-            yield ClickHouse(url)
-    else:
-        yield from _postgresql(request)
+@dataclass(frozen=True)
+class Influx:
+    """An InfluxDB database of whichever line, asked as its dashboards ask: in InfluxQL."""
+
+    address: str
+
+    @property
+    def config(self) -> StorageConfig:
+        return StorageConfig(backend="influxdb", dsn=Secret(self.address))
+
+    def open(self, **settings: object) -> Storage:
+        """The storage as `collect` opens it, with these settings of the owner's."""
+        return open_for_collection(replace(self.config, **settings))  # type: ignore[arg-type]
+
+    def ask(self, question: str) -> list[dict[str, Any]]:
+        """Every point the question is answered with, by the names of its columns."""
+        database = urlsplit(self.address).path.strip("/")
+        asked = urlencode({"db": database, "epoch": "ns", "q": question})
+        [result] = influxdb_asked(self.address, "GET", f"/query?{asked}")["results"]
+        assert "error" not in result, result
+        return [
+            dict(zip(series["columns"], row, strict=True))
+            for series in result.get("series", [])
+            for row in series["values"]
+        ]
+
+    def write(self, line: str) -> None:
+        """A point written by another than the collector, as line protocol."""
+        database = urlsplit(self.address).path.strip("/")
+        influxdb_asked(self.address, "POST", f"/write?db={database}&precision=ns", line)
+
+    def stored(self, table: str, time: str = "device_time") -> list[datetime]:
+        """When each point of a measurement is from, oldest first: by the time it is at, or
+        by another time it holds, which is a field of whole milliseconds."""
+        at = {"job": "start_time", "collector_gap": "start_time", "mower": "updated_time"}
+        points = self.ask(f"SELECT * FROM {table} ORDER BY time")
+        if time == at.get(table, "device_time"):
+            return [EPOCH + timedelta(microseconds=point["time"] // 1000) for point in points]
+        return sorted(EPOCH + timedelta(milliseconds=point[time]) for point in points)
+
+    def trail(self, mower_id: str, job_id: str) -> list[tuple[datetime, float]]:
+        """One Job's Trail as a dashboard asks for it: when, and how far along x."""
+        mower, job = (name.replace("'", "\\'") for name in (mower_id, job_id))
+        points = self.ask(
+            f"SELECT x FROM trail_point WHERE mower_id = '{mower}' AND job_id = '{job}'"
+            " ORDER BY time"
+        )
+        return [(EPOCH + timedelta(microseconds=p["time"] // 1000), p["x"]) for p in points]
 
 
-@pytest.fixture(params=["postgres", "timescaledb"])
+# PostgreSQL without TimescaleDB and with it, which one adapter serves.
+POSTGRESQL = ["postgres", "timescaledb"]
+RELATIONAL = [*POSTGRESQL, "clickhouse"]
+# InfluxDB's three lines, each by both of its ways in.
+INFLUX = [f"influxdb{line}-{way}" for line in (1, 2, 3) for way in ("older", "newer")]
+
+
+@pytest.fixture(params=POSTGRESQL)
 def postgresql(request: pytest.FixtureRequest) -> Iterator[Postgres]:
     """PostgreSQL without TimescaleDB and with it, each in turn, empty: for what is asked
     of the one adapter that serves both."""
-    yield from _postgresql(request)
+    for database in _empty(request):
+        assert isinstance(database, Postgres)
+        yield database
 
 
-def _postgresql(request: pytest.FixtureRequest) -> Iterator[Postgres]:
-    servers = {"postgres": "postgres_server", "timescaledb": "timescale_server"}
-    server: str = request.getfixturevalue(servers[request.param])
-    with fresh_database(server) as dsn:
-        if request.param == "timescaledb":
-            with_timescaledb(dsn)
-        yield Postgres(dsn)
+@pytest.fixture(params=RELATIONAL)
+def relational(request: pytest.FixtureRequest) -> Iterator[Relational]:
+    """Each backend of the relational shape in turn, empty."""
+    for database in _empty(request):
+        assert isinstance(database, Postgres | ClickHouse)
+        yield database
+
+
+@pytest.fixture(params=[*RELATIONAL, *INFLUX])
+def backend(request: pytest.FixtureRequest) -> Iterator[Database]:
+    """Each backend in turn, empty."""
+    yield from _empty(request)
+
+
+@pytest.fixture(params=INFLUX)
+def influx(request: pytest.FixtureRequest) -> Iterator[Influx]:
+    """Each line of InfluxDB in turn, empty, for what only InfluxDB does."""
+    for database in _empty(request):
+        assert isinstance(database, Influx)
+        yield database
+
+
+def _empty(request: pytest.FixtureRequest) -> Iterator[Database]:
+    name: str = request.param
+    if name.startswith("influxdb"):
+        line, way = int(name[8]), name[10:]
+        server = influxdb_server(line)
+        with fresh_influxdb(line, server) as address:
+            database = urlsplit(address).path
+            yield Influx(urlsplit(influxdb_ways(server)[way])._replace(path=database).geturl())
+    elif name == "clickhouse":
+        with fresh_clickhouse(request.getfixturevalue("clickhouse_server")) as url:
+            yield ClickHouse(url)
+    else:
+        servers = {"postgres": "postgres_server", "timescaledb": "timescale_server"}
+        with fresh_database(request.getfixturevalue(servers[name])) as dsn:
+            if name == "timescaledb":
+                with_timescaledb(dsn)
+            yield Postgres(dsn)
 
 
 @pytest.fixture
@@ -259,6 +355,7 @@ def with_timescaledb(dsn: str) -> None:
 
 
 READINGS = {"trail_point", "job_progress", "mower_state"}
+EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 HERE = " WHERE database = currentDatabase()"
 
 
@@ -268,16 +365,27 @@ def old_and_kept() -> tuple[datetime, datetime]:
     return now - timedelta(days=40), now - timedelta(days=1)
 
 
-def test_an_empty_database_is_given_its_schema(backend: Database) -> None:
+def test_an_empty_database_is_given_its_schema(relational: Relational) -> None:
     with pytest.raises(SchemaError):
-        backend.open(migrate=False)  # nothing is there, and nothing was put there
+        relational.open(migrate=False)  # nothing is there, and nothing was put there
 
-    with backend.open():
+    with relational.open():
         pass
-    with backend.open(), backend.open(migrate=False):  # again changes nothing
+    with relational.open(), relational.open(migrate=False):  # again changes nothing
         pass
 
-    assert backend.stored("trail_point") == []
+    assert relational.stored("trail_point") == []
+
+
+def test_an_empty_influxdb_database_needs_nothing_made_in_it(influx: Influx) -> None:
+    # InfluxDB has no schema; the database, or bucket, is the owner's to make.
+    with influx.open(migrate=False), influx.open():
+        pass
+    assert influx.stored("trail_point") == []
+
+    nowhere = urlsplit(influx.address)._replace(path="/not_made").geturl()
+    with pytest.raises(StorageError, match="not_made"):
+        Influx(nowhere).open()
 
 
 def point(
@@ -316,7 +424,10 @@ def test_a_batch_of_rows_is_stored_whole_and_once(backend: Database) -> None:
 
     with backend.open() as storage:
         assert storage.write_trail(batch) == 1200
-        assert storage.write_trail(batch[400:800]) == 0  # delivered again: stored already
+        # Delivered again, and stored already. InfluxDB takes them all the same, each in the
+        # place of the point it is, and cannot say that none was new.
+        again = storage.write_trail(batch[400:800])
+        assert again == (400 if isinstance(backend, Influx) else 0)
 
     assert len(backend.trail("DEVICE_1", "job")) == 1200
 
@@ -352,17 +463,82 @@ def test_a_job_reads_back_as_it_was_written(backend: Database) -> None:
         assert sorted(storage.latest_jobs(), key=lambda job: job.mower_id) == [further, finished]
 
 
-def test_an_older_telling_of_a_job_does_not_replace_a_later_one(backend: Database) -> None:
+def test_a_job_begun_again_after_a_charge_reads_back_as_not_ended(backend: Database) -> None:
+    # A return to the dock to charge ends the Job for the time being, and leaving it again
+    # takes that back.
+    start = datetime(2026, 9, 30, 12, tzinfo=UTC)
+    docked = Job(
+        "DEVICE_1",
+        "1790769600",
+        start,
+        start + timedelta(hours=1),
+        end_time=start + timedelta(hours=1),
+        mowing_percentage=40,
+        arrival_x=-0.288,
+    )
+    away_again = replace(docked, updated_time=start + timedelta(hours=2), end_time=None)
+
+    with backend.open() as storage:
+        assert [storage.write_jobs([job]) for job in (docked, away_again)] == [1, 1]
+        assert list(storage.latest_jobs()) == [away_again]
+
+
+def test_an_older_telling_of_a_job_does_not_replace_a_later_one(relational: Relational) -> None:
     start = datetime(2026, 9, 30, 12, tzinfo=UTC)
     earlier = Job("DEVICE_1", "1790769600", start, start + timedelta(minutes=5))
     later = replace(earlier, updated_time=start + timedelta(minutes=10), mowing_percentage=3)
 
-    with backend.open() as storage:
+    with relational.open() as storage:
         assert storage.write_jobs([later]) == 1
         assert storage.write_jobs([earlier]) == 0  # as a buffer written out of order brings it
 
-    with backend.open() as storage:
+    with relational.open() as storage:
         assert list(storage.latest_jobs()) == [later]
+
+
+def test_in_influxdb_an_older_telling_of_a_job_is_written_over_a_later_one(influx: Influx) -> None:
+    # What ADR 0002 says InfluxDB cannot do otherwise: a point is not refused. It is written
+    # over the one there field by field, so what the older telling does not say stays.
+    start = datetime(2026, 9, 30, 12, tzinfo=UTC)
+    earlier = Job("DEVICE_1", "1790769600", start, start + timedelta(minutes=5))
+    later = replace(earlier, updated_time=start + timedelta(minutes=10), mowing_percentage=3)
+
+    with influx.open() as storage:
+        assert [storage.write_jobs([job]) for job in (later, earlier)] == [1, 1]
+        assert list(storage.latest_jobs()) == [replace(earlier, mowing_percentage=3)]
+
+
+def test_a_job_whose_numbers_are_whole_is_told_of_again_after_a_restart(backend: Database) -> None:
+    # A collector starting up carries on from the Job as the database has it, and tells of
+    # it again: an area of 120 square metres is no whole number for having no fraction.
+    start = datetime(2026, 9, 30, 12, tzinfo=UTC)
+    job = Job("DEVICE_1", "1790769600", start, start, area=120.0, arrival_x=-1.0)
+
+    with backend.open() as storage:
+        assert storage.write_jobs([job]) == 1
+    with backend.open() as storage:
+        [stored] = storage.latest_jobs()
+        further = replace(stored, updated_time=start + timedelta(minutes=5), area=150.0)
+        assert storage.write_jobs([further]) == 1
+        assert list(storage.latest_jobs()) == [further]
+        assert isinstance(stored.area, float)
+
+
+def test_names_are_stored_as_they_are_however_awkward(backend: Database) -> None:
+    # A mower is named by its owner, and its identifier by Navimow: neither is the
+    # collector's to tidy, in a line of text or in a question put to the database.
+    start = datetime(2026, 9, 30, 12, tzinfo=UTC)
+    device, name = "DEVICE 1,a=b o'clock", 'Robo, the 2nd = "big" one\\ o\'clock'
+    job = Job(device, "job 1,a=b", start, start + timedelta(minutes=5))
+
+    with backend.open() as storage:
+        assert storage.write_jobs([job]) == 1
+        assert storage.write_mowers([Mower(device, name, "X420", None, start)]) == 1
+        assert storage.write_mowers([Mower(device, name, "X420", None, start)]) == 0
+        assert storage.write_trail([point(start, 1.0, "job 1,a=b", mower=device)]) == 1
+        assert list(storage.latest_jobs()) == [job]
+
+    assert backend.trail(device, "job 1,a=b") == [(start, 1.0)]
 
 
 def test_a_gap_recorded_again_is_made_longer_and_never_shorter(backend: Database) -> None:
@@ -388,21 +564,42 @@ def test_a_mower_is_described_anew_only_when_it_is_described_differently(
         told = [storage.write_mowers([each]) for each in (mower, same_later, updated, mower)]
 
     assert told == [1, 0, 1, 0]
-    assert backend.stored("mower", "updated_time") == [first + timedelta(hours=2)]
+    # A point is at the time its mower was so described: in InfluxDB the description
+    # before stays, as the mower's history, where a row is rewritten.
+    history = [first] if isinstance(backend, Influx) else []
+    assert backend.stored("mower", "updated_time") == [*history, first + timedelta(hours=2)]
 
 
-def test_rows_older_than_the_owner_keeps_are_removed_and_jobs_are_not(backend: Database) -> None:
+def test_rows_older_than_the_owner_keeps_are_removed_and_jobs_are_not(
+    relational: Relational,
+) -> None:
     old, kept = old_and_kept()
 
-    with backend.open(retention_days=30) as storage:
+    with relational.open(retention_days=30) as storage:
         write_rows(storage, [*rows_at(old), *rows_at(kept)])
         write_rows(storage, [Job("DEVICE_1", "old", old, old, end_time=old, completed=True)])
         write_rows(storage, [Mower("DEVICE_1", "Mower", "X420", "005D", old)])
-        backend.a_day_passes(storage, keep_days=30)
+        relational.a_day_passes(storage, keep_days=30)
 
-    assert backend.expiring() == dict.fromkeys(EXPIRING_TABLES, [kept])
-    assert backend.stored("job", "start_time") == [old]
-    assert backend.stored("mower", "updated_time") == [old]
+    assert relational.expiring() == dict.fromkeys(EXPIRING_TABLES, [kept])
+    assert relational.stored("job", "start_time") == [old]
+    assert relational.stored("mower", "updated_time") == [old]
+
+
+def test_how_long_influxdb_keeps_points_is_not_the_collectors_to_say(
+    influx: Influx, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Its bucket, or retention policy, says: a number of days set here would be a promise
+    # the collector cannot keep, and is refused when the configuration is read.
+    config = tmp_path / "collector.toml"
+    config.write_text(
+        f'[storage]\nbackend = "influxdb"\ndsn = "{influx.address}"\nretention_days = 30\n'
+    )
+
+    assert main(["--config", str(config), "replay", str(FIXTURE)]) == 2
+
+    assert "storage.retention_days is not for InfluxDB" in capsys.readouterr().err
+    assert influx.stored("trail_point") == []
 
 
 def test_timescaledb_holds_the_readings_in_hypertables(timescale: Postgres) -> None:
@@ -1095,3 +1292,103 @@ def test_a_clickhouse_that_is_not_there_is_an_outage_like_any_other() -> None:
 def test_clickhouse_must_be_told_where_it_is() -> None:
     with pytest.raises(StorageError, match="storage.dsn is required"):
         open_for_collection(StorageConfig(backend="clickhouse"))
+
+
+def test_an_influxdb_that_is_not_there_is_an_outage_like_any_other() -> None:
+    nowhere = StorageConfig(backend="influxdb", dsn=Secret("http://127.0.0.1:1/navimow"))
+
+    with pytest.raises(StorageError, match="influxdb"):
+        open_for_collection(nowhere)
+
+
+@pytest.mark.parametrize(
+    "dsn", [None, "http://influxdb:8086", "influxdb:8086/navimow", "udp://influxdb:8089/navimow"]
+)
+def test_influxdb_must_be_told_where_it_is_and_which_database(dsn: str | None) -> None:
+    told = StorageConfig(backend="influxdb", dsn=None if dsn is None else Secret(dsn))
+
+    with pytest.raises(StorageError, match="storage.dsn"):
+        open_for_collection(told)
+
+
+def test_a_point_influxdb_will_never_take_is_refused_and_not_tried_for_ever(influx: Influx) -> None:
+    # Live collection drops the row of a RejectedError, and waits out any other StorageError
+    # with every row behind it: a field of another kind than the points before it is the
+    # first, whatever number the line of InfluxDB answers it with.
+    when = datetime(2026, 9, 30, 12, tzinfo=UTC)
+    influx.write(f'trail_point,mower_id=DEVICE_2 x="here" {int(when.timestamp())}000000000')
+
+    with influx.open() as storage:
+        with pytest.raises(RejectedError):
+            storage.write_trail([point(when, 1.0)])
+        with pytest.raises(RejectedError):
+            storage.write_trail([replace(point(when, 1.0), y="far")])  # type: ignore[arg-type]
+
+
+def test_a_mower_nothing_is_known_of_is_no_point_in_influxdb(influx: Influx) -> None:
+    when = datetime(2026, 9, 30, 12, tzinfo=UTC)
+
+    with influx.open() as storage:
+        assert storage.write_mowers([Mower("DEVICE_1", None, None, None, when)]) == 0
+        assert storage.write_mowers([Mower("DEVICE_1", None, "X420", None, when)]) == 1
+
+    assert influx.stored("mower", "updated_time") == [when]
+
+
+def test_a_database_that_was_never_made_is_found_when_influxdb_is_opened(influx: Influx) -> None:
+    # Found here it is an outage, which loses no row; found at the first write it could
+    # look like a row InfluxDB will not take, and the row be dropped for it.
+    with pytest.raises(StorageError) as refusal:
+        Influx(urlsplit(influx.address)._replace(path="/not_made").geturl()).open()
+    assert not isinstance(refusal.value, RejectedError)
+
+
+def test_a_token_without_its_organisation_is_found_when_influxdb_2_is_opened(
+    influx: Influx, request: pytest.FixtureRequest
+) -> None:
+    # InfluxDB 2 answers any question so asked, and then asks for the organisation at
+    # every write, in the words it has for a row it will not take.
+    if request.node.callspec.id != "influxdb2-newer":
+        pytest.skip("only InfluxDB 2 wants an organisation named, and only by its newer way in")
+    address = urlsplit(influx.address)
+    token = parse_qs(address.query)["token"][-1]
+
+    with pytest.raises(StorageError) as refusal:
+        Influx(address._replace(query=urlencode({"token": token})).geturl()).open()
+    assert not isinstance(refusal.value, RejectedError)
+
+
+def test_a_password_with_marks_in_it_is_given_as_an_address_writes_them(influx: Influx) -> None:
+    address = urlsplit(influx.address)
+    if not address.password:
+        pytest.skip("this way in has no password to it")
+    # Its first letter as an address may write any letter: by its number.
+    marked = f"%{ord(address.password[0]):02X}{quote(address.password[1:], safe='')}"
+    host = address.netloc.rpartition("@")[2]
+
+    with Influx(address._replace(netloc=f"{address.username}:{marked}@{host}").geturl()).open():
+        pass
+
+
+def test_an_answer_that_is_not_influxdbs_stays_behind_the_storage_boundary() -> None:
+    # A proxy's page of apology, say, where InfluxDB was expected.
+    class Apology(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"<html>Back soon</html>")
+
+        do_POST = do_GET
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    with ThreadingHTTPServer(("127.0.0.1", 0), Apology) as proxy:
+        answering = threading.Thread(target=proxy.serve_forever, daemon=True)
+        answering.start()
+        try:
+            elsewhere = Secret(f"http://127.0.0.1:{proxy.server_address[1]}/navimow")
+            with pytest.raises(StorageError, match="not an answer"):
+                open_for_collection(StorageConfig(backend="influxdb", dsn=elsewhere))
+        finally:
+            proxy.shutdown()

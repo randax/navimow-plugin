@@ -80,14 +80,45 @@ jobs:
             healthy: clickhouse-client --query 'SELECT 1'
             variable: NAVIMOW_TEST_CLICKHOUSE_URL
             address: http://default@localhost:8123
+          # InfluxDB's three lines: the first by the older way in, the others by the newer.
+          - backend: influxdb1
+            image: influxdb:1.11
+            port: 8086
+            healthy: curl -sf http://localhost:8086/ping
+            variable: NAVIMOW_TEST_INFLUXDB1_URL
+            address: http://navimow:conformance@localhost:8086
+          - backend: influxdb2
+            image: influxdb:2.7
+            port: 8086
+            healthy: influx ping
+            variable: NAVIMOW_TEST_INFLUXDB2_URL
+            address: http://localhost:8086?org=home&token=conformance
+          - backend: influxdb3
+            image: influxdb:3-core
+            port: 8181
+            healthy: curl -sf http://localhost:8181/health
+            variable: NAVIMOW_TEST_INFLUXDB3_URL
+            address: http://localhost:8181?org=home
     services:
       database:
         image: ${{ matrix.image }}
         env:
-          # No password, for whichever of them this is: a throwaway service reachable
-          # only from this job.
+          # No password, or one that is no secret, for whichever of them this is: a
+          # throwaway service reachable only from this job. Each image reads its own.
           POSTGRES_HOST_AUTH_METHOD: trust
           CLICKHOUSE_SKIP_USER_SETUP: "1"
+          INFLUXDB_HTTP_AUTH_ENABLED: "true"
+          INFLUXDB_ADMIN_USER: navimow
+          INFLUXDB_ADMIN_PASSWORD: conformance
+          DOCKER_INFLUXDB_INIT_MODE: setup
+          DOCKER_INFLUXDB_INIT_USERNAME: navimow
+          DOCKER_INFLUXDB_INIT_PASSWORD: conformance
+          DOCKER_INFLUXDB_INIT_ORG: home
+          DOCKER_INFLUXDB_INIT_BUCKET: navimow
+          DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: conformance
+          INFLUXDB3_NODE_IDENTIFIER_PREFIX: conformance
+          INFLUXDB3_OBJECT_STORE: memory
+          INFLUXDB3_START_WITHOUT_AUTH: "true"
         options: >-
           --health-cmd "${{ matrix.healthy }}"
           --health-interval 10s

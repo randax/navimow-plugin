@@ -22,7 +22,12 @@ class SchemaError(StorageError):
 
 
 class Writer(Protocol):
-    """The persistent boundary used by the transport-free ingestion core."""
+    """The persistent boundary used by the transport-free ingestion core.
+
+    What each method says of rows already stored holds for the relational backends.
+    InfluxDB, which has points and no keys, cannot tell a reading that was there from one
+    that was not, nor refuse the older telling of a Job: docs/adr/0002-data-schema.md.
+    """
 
     def write_trail(self, points: Sequence[TrailPoint]) -> int:
         """Store points, skipping any already stored; return how many were new."""

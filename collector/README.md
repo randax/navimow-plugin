@@ -4,8 +4,8 @@ The collector records the Trail of every mower on a Navimow account into
 PostgreSQL, live and unattended, and works out which Job and Zone each part of
 it belongs to. It can also replay a raw capture through the same ingestion
 core, which is how it is tested. PostgreSQL is the database it is built around;
-[TimescaleDB](#timescaledb) and [ClickHouse](#clickhouse) are written to as
-well.
+[TimescaleDB](#timescaledb), [ClickHouse](#clickhouse) and
+[InfluxDB](#influxdb) are written to as well.
 
 ## Install
 
@@ -117,7 +117,8 @@ migrate = true
 An inline `dsn = "postgresql://..."` is also accepted. Secret files have their
 trailing newline removed, and `NAVIMOW_STORAGE_DSN_FILE` can supply the path.
 `retention_days` is described under [Retention](#retention). `backend` is
-`postgres`, which is TimescaleDB's too, or [`clickhouse`](#clickhouse).
+`postgres`, which is TimescaleDB's too, [`clickhouse`](#clickhouse) or
+[`influxdb`](#influxdb).
 
 `navimow-collector config` prints what the collector would run with, secrets
 left out.
@@ -401,6 +402,73 @@ A mower sends a position every two seconds, and the collector writes rows as
 they come, a few at a time. ClickHouse would rather have them by the thousand,
 but merges what it is given, and at this rate keeps up.
 
+## InfluxDB
+
+InfluxDB 1, 2 and 3 are all written to by the one `influxdb` backend. Each of
+them takes rows at the older `/write` and at the newer `/api/v2/write`, and
+answers InfluxQL at `/query`; the address says which way in to use.
+
+```toml
+[storage]
+backend = "influxdb"
+# The older way in: a database, and a user with a password if it asks for one.
+dsn = "http://navimow:password@influxdb:8086/navimow"
+# The newer: a bucket, with a token and, for InfluxDB 2, the organisation.
+# dsn = "http://influxdb:8086/navimow?org=home&token=..."
+```
+
+A DSN with a `token` or an `org` is written through `/api/v2/write`, with the
+token sent as `Authorization: Token ...`; any other through `/write`, with the
+user and password, if any, as HTTP basic authentication. InfluxDB 2 wants the
+organisation named beside a token. A password or a database name with marks in
+it is written as an address writes them, `%2F` for a `/`. Keep the DSN in a
+file (`dsn_file`) like any other.
+
+The database or bucket must exist; nothing is made in it but points. When it
+opens the database, the collector asks it one question and sends it one write
+with nothing in it, so that a wrong address, login or organisation stops it
+there, and is not found out later one row at a time.
+
+The data has another shape here, since InfluxDB has measurements and tags
+where the others have tables and keys:
+
+| | |
+|---|---|
+| Measurements | named as the tables: `trail_point`, `job_progress`, `mower_state`, `job`, `collector_gap`, `mower` |
+| Time | `device_time`; a Job's and a gap's `start_time`; a mower's `updated_time` |
+| Tags | `mower_id` on all; `job_id` wherever a row names a Job; `zone` on `trail_point` and `job_progress` |
+| Fields | every other column, by its name. Other times are whole milliseconds since 1970, and a Job's `zones` is text such as `1,6,7,9,10,11` |
+
+A point written again at the same time under the same tags is written over the
+first, field by field, and a field once written cannot be unset. What follows
+from that differs from the other databases:
+
+- A reading delivered twice is stored once, as elsewhere, but with the later
+  `received_time`. The collector cannot tell that it was there, and counts it
+  as written.
+- A Job is told of again as it goes on, each telling written over the one
+  before. An older telling written late (after an outage, from the buffer) is
+  written over a later one, where the other databases refuse it: what it says
+  is put back, and what only the later one said stays.
+- A Job that is not ended has an `end_time` of 0, since it is ended and begun
+  again around each charge.
+- A reading stored again under another Job or Zone is a second point.
+- A mower described anew is a new point: the descriptions before stay, as its
+  history. The latest is how it is now. A mower of which neither name, model
+  nor firmware is known is no point at all.
+
+**Retention is InfluxDB's own.** Points are kept for as long as their bucket,
+or in InfluxDB 1 their retention policy, says. `storage.retention_days` is
+refused with this backend when the configuration is read: set it there.
+
+InfluxDB 3 answers a write once it has flushed its log, which it does each
+second, so replaying a long capture into it takes about a second for every 500
+rows. Live collection, which writes a few rows at a time off its own loop, is
+not held up by that.
+
+The bundled dashboard is PostgreSQL's; for InfluxDB it needs queries of its
+own, in InfluxQL, which all three answer.
+
 ## Jobs and Zones
 
 Nothing the mower sends names a Job, so the collector decides where each one
@@ -575,6 +643,24 @@ docker run --rm -d --name navimow-clickhouse -e CLICKHOUSE_SKIP_USER_SETUP=1 \
   -p 127.0.0.1:58123:8123 --tmpfs /var/lib/clickhouse clickhouse/clickhouse-server:26.8
 NAVIMOW_TEST_CLICKHOUSE_URL=http://default@127.0.0.1:58123 pytest collector/tests/test_conformance.py
 docker stop navimow-clickhouse
+```
+
+And for InfluxDB, one of each line, each named by a variable of its own with
+the login of one who may make databases on it:
+
+```bash
+docker run --rm -d --name navimow-influx1 -p 127.0.0.1:58086:8086 --tmpfs /var/lib/influxdb:uid=1500,gid=1500 \
+  -e INFLUXDB_HTTP_AUTH_ENABLED=true -e INFLUXDB_ADMIN_USER=navimow -e INFLUXDB_ADMIN_PASSWORD=conformance influxdb:1.11
+docker run --rm -d --name navimow-influx2 -p 127.0.0.1:58087:8086 --tmpfs /var/lib/influxdb2 --tmpfs /etc/influxdb2 \
+  -e DOCKER_INFLUXDB_INIT_MODE=setup -e DOCKER_INFLUXDB_INIT_USERNAME=navimow -e DOCKER_INFLUXDB_INIT_PASSWORD=conformance \
+  -e DOCKER_INFLUXDB_INIT_ORG=home -e DOCKER_INFLUXDB_INIT_BUCKET=navimow -e DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=conformance influxdb:2.7
+docker run --rm -d --name navimow-influx3 -p 127.0.0.1:58181:8181 -e INFLUXDB3_NODE_IDENTIFIER_PREFIX=conformance \
+  -e INFLUXDB3_OBJECT_STORE=memory -e INFLUXDB3_START_WITHOUT_AUTH=true influxdb:3-core
+export NAVIMOW_TEST_INFLUXDB1_URL='http://navimow:conformance@127.0.0.1:58086'
+export NAVIMOW_TEST_INFLUXDB2_URL='http://127.0.0.1:58087?org=home&token=conformance'
+export NAVIMOW_TEST_INFLUXDB3_URL='http://127.0.0.1:58181?org=home'
+pytest collector/tests/test_conformance.py
+docker stop navimow-influx1 navimow-influx2 navimow-influx3
 ```
 
 A backend whose variable is not set is skipped, unless `NAVIMOW_TEST_REQUIRE`

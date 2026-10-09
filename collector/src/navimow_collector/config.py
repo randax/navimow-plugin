@@ -116,6 +116,11 @@ def load_config(config_path: Path | None = None) -> Config:
     # automatic; mypy cannot infer the dynamically assembled field names.
     config = replace(defaults, **sections)
     _validate_backend(config.storage.backend)
+    if config.storage.backend == "influxdb" and config.storage.retention_days is not None:
+        raise ConfigError(
+            "storage.retention_days is not for InfluxDB, which keeps points for as long as"
+            " their bucket or retention policy says: set that there, and leave this unset"
+        )
     config.health.address()  # only to validate: a bad address fails here, not at bind time
     return config
 
