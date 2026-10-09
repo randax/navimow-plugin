@@ -622,16 +622,39 @@ def test_a_report_held_up_from_before_the_charging_break_does_not_confirm_a_resu
     assert second["start_time"] == ms(1788085297268 + 90 * 60_000)
 
 
-def test_a_collector_carrying_on_from_a_job_told_of_anew_still_hears_that_millisecond() -> None:
+CHANNEL = "/downlink/vehicle/DEVICE_1/realtimeDate/"
+
+
+@pytest.mark.parametrize(
+    ("channel", "payload", "heard"),
+    [
+        ("location", [{"type": 2, "mowStartType": 1, "subtotalArea": 20}], {"area": 20.0}),
+        ("location", [{"type": 3, "partitionIds": [1, 6]}], {"zones": (1, 6)}),
+        ("state", {"state": "isDocked"}, {"end_time": "sent"}),
+    ],
+    ids=["progress", "zone-list", "state"],
+)
+def test_a_collector_carrying_on_from_a_job_told_of_anew_still_hears_that_millisecond(
+    channel: str, payload: Any, heard: dict[str, Any]
+) -> None:
     # A telling moved on to after the one before is still of the message it was sent in:
     # what else the mower sent in that millisecond is no older than what was heard.
     stored = told_of((0, 9))[-1]
     told = Told()
     ingestor = Ingestor(told, jobs=[stored])
     sent = int(stored.start_time.timestamp() * 1000)
-    report = {"type": 2, "time": sent, "mowStartType": 1, "subtotalArea": 20}
-    topic = "/downlink/vehicle/DEVICE_1/realtimeDate/location"
-    ingestor.feed({"recv_ms": sent, "kind": "mqtt", "topic": topic, "payload": [report]})
+    for item in payload if isinstance(payload, list) else [payload]:
+        item["time" if channel == "location" else "timestamp"] = sent
+    ingestor.feed({"recv_ms": sent, "kind": "mqtt", "topic": CHANNEL + channel, "payload": payload})
     ingestor.flush()
     [job] = told.jobs
-    assert job.area == 20 and job.updated_time > stored.updated_time
+    expected = {key: ms(sent) if value == "sent" else value for key, value in heard.items()}
+    assert {key: getattr(job, key) for key in heard} == expected
+    assert job.updated_time > stored.updated_time
+
+
+def test_a_job_given_up_after_it_was_told_of_anew_ends_in_the_millisecond_last_heard() -> None:
+    # Told of again as the mower left, a microsecond on; given up for another a minute later.
+    first, *_, given_up, _ = told_of((0, 9), (60, 0))
+    assert given_up.job_id == first.job_id
+    assert given_up.end_time == first.start_time
