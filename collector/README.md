@@ -506,8 +506,9 @@ NAVIMOW_TEST_TIMESCALE_DSN=postgresql://postgres@127.0.0.1:55433/postgres pytest
 docker stop navimow-timescale
 ```
 
-A backend the suite cannot reach is skipped, unless `NAVIMOW_TEST_REQUIRE`
-names it: then its absence fails the run. That is how each backend has a job of
+A backend whose variable is not set is skipped, unless `NAVIMOW_TEST_REQUIRE`
+names it: then its absence fails the run. One that is named and does not
+answer fails the tests that need it. That is how each backend has a job of
 its own on every pull request and each night, the night being for what changes
 outside the repository, such as a database image.
 

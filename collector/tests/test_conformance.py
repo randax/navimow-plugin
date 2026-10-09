@@ -334,10 +334,12 @@ def test_timescaledb_installed_out_of_the_way_is_used_all_the_same(timescale: Po
         conn.execute("CREATE EXTENSION timescaledb SCHEMA extensions")
 
     with timescale.open(retention_days=30):
-        pass
-
-    assert timescale.hypertables() == READINGS
-    assert dict(timescale.policies().values()) == dict.fromkeys(READINGS, timedelta(days=30))
+        assert timescale.hypertables() == READINGS
+        assert timescale.rules() == dict.fromkeys(READINGS, ["30 days"])
+    with timescale.open(retention_days=60):
+        assert timescale.rules() == dict.fromkeys(READINGS, ["60 days"])
+    with timescale.open():
+        assert timescale.rules() == {}
 
 
 def test_two_collectors_starting_at_once_on_timescaledb_both_start(
@@ -444,8 +446,12 @@ def test_where_timescaledbs_policies_cannot_be_read_old_rows_are_removed_all_the
 def test_two_collectors_starting_at_once_leave_timescaledb_one_rule_a_table(
     timescale: Postgres, caplog: pytest.LogCaptureFixture
 ) -> None:
-    with timescale.open():
-        pass
+    with timescale.open(), psycopg.connect(timescale.dsn, autocommit=True) as conn:
+        # The harder case: each sees the database as it was when its transaction began.
+        conn.execute(
+            f'ALTER DATABASE "{conn.info.dbname}"'
+            " SET default_transaction_isolation = 'repeatable read'"
+        )
 
     with ThreadPoolExecutor(max_workers=8) as collectors:
         opened = [
@@ -467,6 +473,8 @@ def test_rules_timescaledb_was_given_twice_over_are_put_right(timescale: Postgre
             maker.execute("SELECT add_retention_policy('trail_point', INTERVAL '30 days')")
     assert timescale.rules()["trail_point"] == ["30 days", "30 days"]
 
+    with timescale.open(retention_days=30):  # the very age both were made for
+        assert timescale.rules() == dict.fromkeys(READINGS, ["30 days"])
     with timescale.open(retention_days=60):
         assert timescale.rules() == dict.fromkeys(READINGS, ["60 days"])
     with timescale.open():
@@ -530,6 +538,43 @@ def test_timescaledb_is_told_of_the_collectors_tables_wherever_it_finds_them(
         storage.remove_older_than(datetime.now(UTC) - timedelta(days=30), BATCH_ROWS)
     assert timescale.stored("trail_point") == [old, kept]  # the engine's, by its own rule
     assert timescale.stored("collector_gap", "start_time") == [kept]  # and the collector's
+
+
+def test_hypertables_that_are_not_the_collectors_do_not_come_between_it_and_timescaledb(
+    timescale: Postgres, caplog: pytest.LogCaptureFixture
+) -> None:
+    # TimescaleDB lists every hypertable in the database to whoever asks: one in a schema
+    # the collector may not look in, one named as no table of its own could be, and one
+    # that keeps rows by a count and not by an age.
+    with psycopg.connect(timescale.dsn, autocommit=True) as conn:
+        conn.execute("CREATE SCHEMA metrics")
+        conn.execute("CREATE TABLE metrics.cpu (at timestamptz NOT NULL, load float8)")
+        conn.execute("SELECT create_hypertable('metrics.cpu', 'at')")
+        conn.execute('CREATE TABLE "a.b.c" (at timestamptz NOT NULL)')
+        conn.execute("""SELECT create_hypertable('"a.b.c"', 'at')""")
+        conn.execute("CREATE TABLE counts (n bigint NOT NULL)")
+        conn.execute("SELECT create_hypertable('counts', 'n', chunk_time_interval => 1000)")
+        conn.execute(
+            "CREATE FUNCTION counts_now() RETURNS bigint LANGUAGE sql STABLE AS 'SELECT 0::bigint'"
+        )
+        conn.execute("SELECT set_integer_now_func('counts', 'counts_now')")
+        conn.execute(
+            "SELECT add_retention_policy('counts', drop_after => BIGINT '1000000000000000000')"
+        )
+
+    with timescale.another_user("navimow_among_others") as among_others:
+        with among_others.open(retention_days=30) as storage:
+            assert timescale.rules() == {"counts": ["1000000000000000000"]} | dict.fromkeys(
+                READINGS, ["30 days"]
+            )
+            assert storage.remove_older_than(datetime.now(UTC), BATCH_ROWS) == 0
+        with among_others.open(retention_days=365):
+            pass
+        rules, hypertables = timescale.rules(), timescale.hypertables()
+
+    assert rules == {"counts": ["1000000000000000000"]} | dict.fromkeys(READINGS, ["365 days"])
+    assert hypertables == {*READINGS, "a.b.c", "counts"}
+    assert "TimescaleDB" not in caplog.text
 
 
 def test_timescaledb_is_told_nothing_of_tables_that_are_not_the_collectors(

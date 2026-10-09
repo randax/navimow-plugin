@@ -65,9 +65,9 @@ def free_port() -> int:
 
 
 def unavailable(backend: str, how: str) -> NoReturn:
-    """A backend the conformance suite cannot reach is skipped, unless this run is the one
+    """A backend the conformance suite was not given is skipped, unless this run is the one
     which is there to test it: CI names that backend in NAVIMOW_TEST_REQUIRE, so that a
-    service which did not come up fails the run rather than passing it by."""
+    job set up without it fails rather than passing it by."""
     if backend in os.environ.get("NAVIMOW_TEST_REQUIRE", "").split(","):
         pytest.fail(f"no {backend} to test against: {how}")
     pytest.skip(f"no {backend}: {how}")

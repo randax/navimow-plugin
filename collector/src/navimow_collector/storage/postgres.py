@@ -151,28 +151,40 @@ _TIMESCALEDB = """
     SELECT nspname FROM pg_extension JOIN pg_namespace ON pg_namespace.oid = extnamespace
     WHERE extname = 'timescaledb'
 """
-# A hypertable is the collector's where its bare name is found to be that table: by the
-# connection's own search for it, in whichever schema that ends.
-_ITS_OWN = "to_regclass(format('%I.%I', hypertable_schema, hypertable_name))"
-_HYPERTABLES = f"""
-    SELECT hypertable_name::text FROM timescaledb_information.hypertables
-    WHERE {_ITS_OWN} = to_regclass(hypertable_name::text)
+# The collector's tables as this connection finds them: each by its bare name, in
+# whichever schema of its search path that ends. TimescaleDB is asked of these alone. It
+# lists every hypertable in the database, and another's may be in a schema the collector
+# is not let look in, or keep its rows by a count where these go by an age.
+_MINE = """
+    SELECT relname, nspname FROM unnest(%(tables)s::text[]) AS name
+    JOIN pg_class ON pg_class.oid = to_regclass(name)
+    JOIN pg_namespace ON pg_namespace.oid = relnamespace
 """
-# The retention policies on the collector's tables, each with whether it keeps rows for
-# just so many days. TimescaleDB is asked, and the answer is not read here: a month is
-# not 30 days to it, a policy may go by when a chunk was made and not by age, and how an
-# interval is written out is the server's to set.
+_HYPERTABLES = f"""
+    WITH mine AS ({_MINE})
+    SELECT hypertable_name::text FROM timescaledb_information.hypertables
+    JOIN mine ON relname = hypertable_name AND nspname = hypertable_schema
+"""
+# The retention policies on them, each with whether it keeps rows for just so many days.
+# TimescaleDB is asked, and the answer is not read here: a month is not 30 days to it, a
+# policy may go by when a chunk was made and not by age, and how an interval is written
+# out is the server's to set.
 _POLICIES = f"""
+    WITH mine AS ({_MINE})
     SELECT hypertable_name::text, job_id,
         (config->>'drop_after')::interval::text
             IS NOT DISTINCT FROM make_interval(days => %(days)s)::text
     FROM timescaledb_information.jobs
+    JOIN mine ON relname = hypertable_name AND nspname = hypertable_schema
     WHERE proc_name = 'policy_retention'
-        AND {_ITS_OWN.replace("%", "%%")} = to_regclass(hypertable_name::text)
 """
 # One collector at a time gives TimescaleDB its rule: two starting together would each
-# make a policy for the same table.
-_ONE_AT_A_TIME = "SELECT pg_advisory_xact_lock(hashtext('navimow_collector.keep_for'))"
+# make a policy for the same table. And each must see what the one before it did, which a
+# transaction that reads as of its start would not.
+_ONE_AT_A_TIME = (
+    "SET TRANSACTION ISOLATION LEVEL READ COMMITTED",
+    "SELECT pg_advisory_xact_lock(hashtext('navimow_collector.keep_for'))",
+)
 # Every statement of a removal can go by the key, which begins with the mower: reading
 # millions of positions through to find what is old, on the small machine this shares with
 # its database, would take longer than a statement is given. What earlier removals took is
@@ -319,8 +331,7 @@ class PostgresStorage:
         ).format(timescaledb)
         try:
             with self._connection.transaction():
-                held = {row[0] for row in self._connection.execute(_HYPERTABLES)}
-                for table in set(READINGS) - held:
+                for table in set(READINGS) - self._hypertables():
                     rows = self._connection.execute(f"SELECT FROM {table} LIMIT 1").fetchone()
                     if rows is None:
                         self._connection.execute(hold, (table, EXPIRING[table][0]))
@@ -349,9 +360,9 @@ class PostgresStorage:
             ).format(timescaledb)
             try:
                 with self._connection.transaction():
-                    self._connection.execute(_ONE_AT_A_TIME)
-                    policies = self._policies(days)
-                    held = {row[0] for row in self._connection.execute(_HYPERTABLES)}
+                    for statement in _ONE_AT_A_TIME:
+                        self._connection.execute(statement)
+                    policies, held = self._policies(days), self._hypertables()
                     for table in held.intersection(READINGS):
                         made = policies.get(table, {})
                         # As wanted: none where everything is kept, else the one, of that age.
@@ -376,13 +387,19 @@ class PostgresStorage:
             raise error
         _LOGGER.warning("%s: %s", what, str(error).strip())
 
+    def _hypertables(self) -> set[str]:
+        """Which of the collector's tables TimescaleDB holds as hypertables."""
+        asked = self._connection.execute(_HYPERTABLES, {"tables": list(EXPIRING)})
+        return {row[0] for row in asked}
+
     def _policies(self, days: int | None = None) -> dict[str, dict[int, bool]]:
         """The collector's tables that TimescaleDB keeps to a retention policy: for each,
         its policies by their job, and whether each keeps rows for just so many days.
-        None where TimescaleDB is not installed."""
+        No tables where TimescaleDB is not installed."""
         policies: dict[str, dict[int, bool]] = {}
         if self._timescaledb() is not None:
-            for table, job, as_wanted in self._connection.execute(_POLICIES, {"days": days}):
+            asked = {"tables": list(EXPIRING), "days": days}
+            for table, job, as_wanted in self._connection.execute(_POLICIES, asked):
                 policies.setdefault(table, {})[job] = as_wanted
         return policies
 
