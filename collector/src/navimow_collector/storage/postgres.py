@@ -163,14 +163,21 @@ _OLD = """
     ) AS oldest
 """
 # The rows as far as that last key, each asked its age once more: a gap recorded again since
-# it was counted, as ending later, is no longer the old gap it was. They are bounded by their
-# keys alone, which leaves the database one way to find them whatever it believes it holds.
+# it was counted, as ending later, is no longer the old gap it was.
 _REMOVE = """
     DELETE FROM {table}
     WHERE mower_id = %(mower)s AND {key} > %(after)s AND {key} <= %(last)s
         AND {age} < %(before)s
 """
 _EARLIEST = datetime.min.replace(tzinfo=UTC)
+# For the transaction it is run in, rows are found by an index or not at all. What the
+# database believes it holds can be far from it, just after a capture of last year is
+# replayed or on a table it has not yet looked at, and it would then read every old row
+# through for each batch, or sort them.
+_BY_THE_KEY = (
+    "SELECT set_config('enable_seqscan', 'off', true),"
+    " set_config('enable_bitmapscan', 'off', true), set_config('enable_sort', 'off', true)"
+)
 
 
 def _insert(row: type[Row], table: str) -> str:
@@ -312,15 +319,17 @@ class PostgresStorage:
                     bounds = {"mower": mower, "after": _EARLIEST, "before": before}
                     found = batch
                     while found == batch:  # a batch that found fewer found the last
-                        oldest = self._connection.execute(
-                            _OLD.format(**names), {**bounds, "batch": batch}
-                        ).fetchone()
-                        found, last = oldest or (0, None)
-                        if found:
-                            removed += self._connection.execute(
-                                _REMOVE.format(**names), {**bounds, "last": last}
-                            ).rowcount
-                            bounds["after"] = last
+                        with self._connection.transaction():
+                            self._connection.execute(_BY_THE_KEY)
+                            oldest = self._connection.execute(
+                                _OLD.format(**names), {**bounds, "batch": batch}
+                            ).fetchone()
+                            found, last = oldest or (0, None)
+                            if found:
+                                removed += self._connection.execute(
+                                    _REMOVE.format(**names), {**bounds, "last": last}
+                                ).rowcount
+                                bounds["after"] = last
         return removed
 
     def _write(self, statement: str, rows: Sequence[tuple[object, ...]]) -> int:

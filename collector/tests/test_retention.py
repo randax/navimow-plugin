@@ -162,13 +162,14 @@ def test_replay_removes_nothing_whatever_the_owner_keeps(
 def test_the_collect_command_removes_what_is_older_than_the_owner_keeps(
     live: Live, config_file: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    old, kept = datetime.now(UTC) - timedelta(days=31), datetime.now(UTC) - timedelta(days=29)
+    # A week, where every other test keeps 30 days: the number is the owner's.
+    old, kept = datetime.now(UTC) - timedelta(days=8), datetime.now(UTC) - timedelta(days=6)
     with live.db.open() as storage:
         write_rows(storage, [*rows_at(old), *rows_at(kept)])
     monkeypatch.setenv("NAVIMOW_AUTH_STATE_FILE", str(live.store.path))
     monkeypatch.setenv("NAVIMOW_COLLECTOR_STATE_DIR", str(live.state))
     monkeypatch.setenv("NAVIMOW_HEALTH_LISTEN", "")
-    monkeypatch.setenv("NAVIMOW_STORAGE_RETENTION_DAYS", "30")
+    monkeypatch.setenv("NAVIMOW_STORAGE_RETENTION_DAYS", "7")
     session = stopped_at_its_first_request(live)
 
     assert main(["--config", str(config_file), "collect"], session_factory=session) == 0
@@ -412,6 +413,7 @@ def test_old_rows_the_database_did_not_know_it_had_are_removed_as_quickly(
 ) -> None:
     # A capture from last year replayed into a database that had held this year only: its
     # statistics say nothing is old, and a statement planned by them must not take for ever.
+    # Batches enough that the later ones run as statements prepared and planned once for all.
     monkeypatch.setattr(postgres, "STATEMENT_TIMEOUT_MS", 1000)
     insert = (
         "INSERT INTO trail_point (mower_id, device_time, received_time, x, y, theta)"
@@ -423,6 +425,6 @@ def test_old_rows_the_database_did_not_know_it_had_are_removed_as_quickly(
         conn.execute("ANALYZE trail_point")
         conn.execute(insert, {"first": days_ago(400), "rows": 12_000})
 
-        assert storage.remove_older_than(days_ago(30), 5000) == 12_001
+        assert storage.remove_older_than(days_ago(30), 500) == 12_001
 
     assert stored(live, "trail_point", "device_time")[0] == days_ago(20)

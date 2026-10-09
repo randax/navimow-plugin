@@ -174,7 +174,7 @@ def test_nothing_is_removed_unless_the_owner_says_how_long_to_keep_rows(
     assert "retention_days = 365\n" in show(capsys, "--config", str(config))
     monkeypatch.setenv("NAVIMOW_STORAGE_RETENTION_DAYS", "30")
     assert load_config(config).storage.retention_days == 30
-    monkeypatch.setenv("NAVIMOW_STORAGE_RETENTION_DAYS", "0000000000000000030")
+    monkeypatch.setenv("NAVIMOW_STORAGE_RETENTION_DAYS", "0" * 5000 + "30")
     assert load_config(config).storage.retention_days == 30
 
 

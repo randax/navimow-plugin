@@ -248,7 +248,7 @@ def _coerce(value: object, annotation: object, key: str) -> object:
             return None
         if isinstance(value, str) and value.isascii() and value.isdigit():
             with suppress(ValueError):  # too long for Python to read as a number at all
-                value = int(value)
+                value = int(value.lstrip("0") or "0")
         if isinstance(value, int) and not isinstance(value, bool) and value > 0:
             return value
         raise ConfigError(f"{key} must be a positive whole number")
