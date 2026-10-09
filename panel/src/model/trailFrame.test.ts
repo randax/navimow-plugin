@@ -742,6 +742,14 @@ describe('readTrails', () => {
     });
   });
 
+  test('unreadable positions are told how to write them', () => {
+    expect(readTrails([frame({ time: at(0), x: ['1.234,5'], y: [0] })])).toEqual({
+      problem: expect.stringContaining(
+        'Positions must be numbers of metres, such as -0.31 or -0,31, without grouped digits.'
+      ),
+    });
+  });
+
   test('x set to the time column, so epoch milliseconds are read as metres, names both columns and the distance', () => {
     expect(readTrails([frame({ time: at(0, SEC), y: [1, 2] })], { x: 'time' })).toEqual({
       problem:

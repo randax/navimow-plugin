@@ -13,17 +13,11 @@ export function columnNames<T extends { [K in keyof T]: string }>(defaults: T, o
   return names;
 }
 
-// A decimal comma, as a spreadsheet in Norwegian writes -0,31. Only a lone comma between digits:
-// text with a point as well, or more than one comma, is grouped digits, and a guess at those is left
-// unread.
-const DECIMAL_COMMA = /^\s*[+-]?\d+,\d+\s*$/;
-
+// A decimal comma, as a spreadsheet in Norwegian writes -0,31, is read as a point. Grouped digits,
+// such as 1.234,5 or 1,234,5, keep a separator Number cannot read, so they are left unread rather
+// than guessed at.
 export const toNumber = (v: unknown): number =>
-  typeof v === 'number'
-    ? v
-    : typeof v !== 'string' || v.trim() === ''
-      ? NaN
-      : Number(DECIMAL_COMMA.test(v) ? v.replace(',', '.') : v);
+  typeof v === 'number' ? v : typeof v === 'string' && v.trim() !== '' ? Number(v.replace(',', '.')) : NaN;
 
 // Epoch milliseconds passed 1e11 in 1973, and epoch seconds will not reach it for three thousand years.
 const toEpochMs = (n: number): number => (Math.abs(n) < 1e11 ? n * 1000 : n);
