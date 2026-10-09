@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -294,18 +295,27 @@ def test_each_mowers_old_rows_are_removed(database: str, tmp_path: Path) -> None
 def test_a_gap_made_longer_while_old_rows_are_removed_is_kept(live: Live) -> None:
     # A collector that died before noting its reconnection records the same gap again when
     # it restarts, as ending now: just when a removal is first made.
-    began = days_ago(60)
-    with live.db.open() as storage:
-        write_rows(storage, [Gap("DEVICE_1", began, days_ago(40), GapReason.RECONNECT)])
-        removing = threading.Thread(target=storage.remove_older_than, args=(days_ago(30), 5000))
+    first, second, third = days_ago(60), days_ago(50), days_ago(40)
+    with live.db.open() as storage, ThreadPoolExecutor() as removal:
+        write_rows(
+            storage,
+            [
+                Gap("DEVICE_1", began, began + timedelta(hours=1), GapReason.RECONNECT)
+                for began in (first, second, third)
+            ],
+        )
         with psycopg.connect(live.db.dsn) as recording:
-            recording.execute("UPDATE collector_gap SET end_time = %s", (at(NOW),))
-            removing.start()
+            recording.execute(
+                "UPDATE collector_gap SET end_time = %s WHERE start_time = %s", (at(NOW), first)
+            )
+            # Two rows a statement: the first finds the gap being recorded again, and waits.
+            removed = removal.submit(storage.remove_older_than, days_ago(30), 2)
             deadline = time.monotonic() + 4
-            while not live.db.held() and time.monotonic() < deadline:
+            while not live.db.held():
+                assert time.monotonic() < deadline, "the removal never waited for the gap"
                 time.sleep(0.01)
-        removing.join()
 
+        assert removed.result() == 2  # the statement that removed one fewer was not the last
     assert stored(live, "collector_gap", "end_time") == [at(NOW)]
 
 
@@ -323,10 +333,10 @@ def test_a_removal_the_database_never_answers_is_said_and_not_made_again(
             await collector.tick()
             await until(live.db.held)
             connections = live.db.attempts
-            for hours in (23, 24):
+            for hours, said in ((23, 0), (24, 1), (24.1, 1), (47, 1), (48, 2)):
                 live.clock.now = NOW + hours * HOUR
                 await collector.tick()
-                assert ("still waiting" in caplog.text) == (hours == 24)
+                assert caplog.text.count("still waiting") == said
             assert live.db.attempts == connections
         live.retention.join()
 
@@ -335,18 +345,18 @@ def test_a_removal_the_database_never_answers_is_said_and_not_made_again(
 
 def test_a_clock_set_back_does_not_put_the_next_removal_off(live: Live) -> None:
     # The schedule goes by time elapsed; only what counts as old goes by the date.
-    elapsed, old = Clock(), days_ago(31)
+    elapsed, old = Clock(), days_ago(45)
     removal = Retention(live.db.open, 30, clock=elapsed)
+    with live.db.open():
+        removal.remove_if_due(NOW)
+        removal.join()
     with live.db.open() as storage:
         write_rows(storage, rows_at(old))
 
-    removal.remove_if_due(NOW - 7 * 24 * HOUR)  # by a clock a week behind, nothing is old
-    removal.join()
-    assert stored(live, "trail_point", "device_time") == [old]
-
     elapsed.now = 24 * HOUR
-    removal.remove_if_due(NOW)
+    removal.remove_if_due(NOW - 7 * 24 * HOUR)  # a day on, the clock has been set back a week
     removal.join()
+
     assert stored(live, "trail_point", "device_time") == []
 
 

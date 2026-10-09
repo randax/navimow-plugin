@@ -137,7 +137,9 @@ EXPIRING = {
 }
 # Both statements of a removal can go by the key, which begins with the mower: reading
 # millions of positions through to find what is old, on the small machine this shares with
-# its database, would take longer than a statement is given.
+# its database, would take longer than a statement is given. What earlier removals took is
+# passed over at the start of each, for as long as the database has not cleaned it up:
+# quickly, unless something has kept it from cleaning up at all for days.
 # The mowers a table has rows of, each found from the one before it.
 _MOWERS = """
     WITH RECURSIVE mowers AS (
@@ -154,7 +156,8 @@ _MOWERS = """
 # its key as well. The row is asked its age once more as it is removed: a gap recorded again
 # meanwhile, as ending later, is no longer the old gap that was found.
 _REMOVE = """
-    DELETE FROM {table} WHERE mower_id = %(mower)s AND {age} < %(before)s AND {key} IN (
+    DELETE FROM {table}
+    WHERE mower_id = %(mower)s AND {key} > %(after)s AND {age} < %(before)s AND {key} IN (
         SELECT {key} FROM {table}
         WHERE mower_id = %(mower)s AND {key} > %(after)s AND {key} < %(before)s
             AND {age} < %(before)s
@@ -301,13 +304,16 @@ class PostgresStorage:
                 remove = _REMOVE.format(table=table, key=key, age=age)
                 mowers = self._connection.execute(_MOWERS.format(table=table)).fetchall()
                 for (mower,) in mowers:
-                    after, found = _EARLIEST, batch
-                    while found == batch:  # a statement that found fewer found the last
+                    after = _EARLIEST
+                    # Until a statement removes nothing: one that removed fewer than it
+                    # may have found a gap recorded again meanwhile, with more beyond it.
+                    while True:
                         bounds = {"mower": mower, "after": after, "before": before, "batch": batch}
                         keys = self._connection.execute(remove, bounds).fetchall()
-                        found = len(keys)
-                        removed += found
-                        after = max((row[0] for row in keys), default=after)
+                        if not keys:
+                            break
+                        removed += len(keys)
+                        after = max(row[0] for row in keys)
         return removed
 
     def _write(self, statement: str, rows: Sequence[tuple[object, ...]]) -> int:
