@@ -35,7 +35,7 @@ from navimow_collector.storage.buffered import (
     BufferedStorage,
 )
 
-from .conftest import Clock, gaps
+from .conftest import Clock, gaps, told_at_once
 
 START = datetime(2026, 9, 30, 12, tzinfo=UTC)
 # The longest the database is ever kept suspended: the server ends it then by itself, so a
@@ -54,6 +54,10 @@ class Database:
         self.writes = 0
         self.drop_at_write: int | None = None  # the connection is lost at this write
         self.crash: BaseException | None = None  # raised by the next write, as a dying process
+        # The next write of Jobs waits for this before it reaches the database, as one sent
+        # to a backend suspended under its connection does; `landed` is set once it has.
+        self.held_jobs: threading.Event | None = None
+        self.landed = threading.Event()
 
     def open(self) -> Storage:
         self.attempts += 1
@@ -134,7 +138,13 @@ class Observed:
         return self._storage.write_gaps(gaps)
 
     def write_jobs(self, jobs: Sequence[Job]) -> int:
-        return self._storage.write_jobs(jobs)
+        held, self._db.held_jobs = self._db.held_jobs, None
+        if held is None:
+            return self._storage.write_jobs(jobs)
+        held.wait(SUSPENDED_SECONDS)
+        written = self._storage.write_jobs(jobs)
+        self._db.landed.set()
+        return written
 
     def write_progress(self, reports: Sequence[Progress]) -> int:
         return self._storage.write_progress(reports)
@@ -422,6 +432,33 @@ def test_a_write_given_up_on_keeps_its_rows_ahead_of_those_admitted_since(
     with psycopg.connect(database) as conn:
         assert conn.execute("SELECT mowing_percentage FROM job").fetchall() == [(40,)]
     assert storage.buffered == 0
+
+
+def test_a_write_given_up_on_that_lands_late_leaves_the_later_telling_of_a_job(
+    database: str, tmp_path: Path
+) -> None:
+    # The attempt given up on keeps its connection, and the database may yet take its rows
+    # after the later ones written over a fresh connection.
+    db, clock = Database(database), Clock()
+    storage = BackgroundStorage(db.open, tmp_path / "buffer.jsonl", clock=clock, deadline=0.1)
+    storage.connect()
+    earlier, later = told_at_once()
+    db.held_jobs = released = threading.Event()
+
+    async def scenario() -> None:
+        storage.write_jobs([earlier])
+        await storage.drain()  # given up on
+        clock.now += RETRY_SECONDS
+        storage.write_jobs([later])
+        await storage.drain()
+
+    asyncio.run(scenario())
+    assert storage.buffered == 0
+    released.set()
+    assert db.landed.wait(5)
+
+    with open_storage(StorageConfig(dsn=Secret(database))) as stored:
+        assert list(stored.latest_jobs()) == [later]
 
 
 def test_rows_the_file_took_only_some_of_while_they_were_written_keep_their_order(

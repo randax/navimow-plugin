@@ -23,6 +23,9 @@ AREA_FALL = 1.0
 ARRIVAL_POSE_AGE = timedelta(minutes=2)
 # How many changes of Job a tracker remembers, to place a reading that is delivered late.
 SPANS_KEPT = 64
+# How much later each telling of a Job is than the one before, at least: storage keeps the
+# later of two, and two as of one moment would leave it the order they were written in.
+TOLD_AFTER = timedelta(microseconds=1)
 
 
 class Span(NamedTuple):
@@ -129,7 +132,7 @@ class JobTracker:
                 # Away on a Job, and the mower has started another: it gave the first up
                 # at the dock if it never took it up again, and else where last heard.
                 last_heard = max(job.updated_time, heard or job.updated_time)
-                given_up = [replace(job, end_time=left_off or last_heard)]
+                given_up = [_told(replace(job, end_time=left_off or last_heard), job)]
             job, zone = self._begin(time), None
         elif left_unseen:
             job = replace(job, end_time=None)
@@ -167,7 +170,7 @@ class JobTracker:
         if it changed."""
         changed: list[Row] = []
         if job is not None and job != self._job:
-            self._job = replace(job, updated_time=max(job.updated_time, time))
+            self._job = _told(replace(job, updated_time=max(job.updated_time, time)), self._job)
             changed.append(self._job)
         last = self._spans[-1] if self._spans else Span(time)
         span = Span(max(time, last.since))
@@ -185,6 +188,14 @@ class JobTracker:
     def _in_its_job(self, reading: Reading) -> Reading:
         """The reading, naming the Job the mower was on at the reading's own time."""
         return replace(reading, job_id=self._span(reading.device_time).job_id)
+
+
+def _told(job: Job, before: Job | None) -> Job:
+    """The Job, told after `before` where that is a telling of the same Job: a message sent
+    no later than the last can still change it, and is then told of a moment after."""
+    if before is None or before.job_id != job.job_id:
+        return job
+    return replace(job, updated_time=max(job.updated_time, before.updated_time + TOLD_AFTER))
 
 
 def _unfinished(job: Job) -> bool:

@@ -46,6 +46,14 @@ with `FINAL`.
   (`partitionIds`): the Zones the Job was set to mow. It is empty until the mower has
   listed them, which it does every five minutes or so. A message of that kind with no list
   in it, as the mower sends near the dock, changes nothing.
+- **A Job is told of again whenever it changes**, and a telling replaces the stored one
+  unless it is older by `updated_time`. That is when the mower sent the message that last
+  changed the Job, moved on where need be to a microsecond after the telling before: a
+  message sent no later than the last can still change a Job, and of two tellings as of one
+  moment only the order of writing would say which stands. Rows are written out of order by
+  a write that live collection gave up on and the database took late, and by a buffer file
+  read after the rows held in memory. The mower's times are whole milliseconds, so a
+  telling moved on stays within the millisecond it was sent in.
 - **`mower`** is one row per mower as the account's device list describes it, rewritten
   when the list describes it differently; `updated_time` says since when. The firmware
   matters because ADR 0001's rules were checked on one.
@@ -113,6 +121,12 @@ columns.
 - **Retention by default**, of a year or two. Rejected: a season of positions is on the
   order of 100 to 150 MB in PostgreSQL, and a default that deletes mowing history costs the
   owner more than the disk it saves.
+- **A revision number for a Job**, a column beside `updated_time` raised with every
+  telling. Rejected: ClickHouse keeps the later of two rows by `updated_time` alone, which
+  no added column changes, and the buffer file and InfluxDB would each have carried it
+  too, for what a microsecond does.
+- **An attempt given up on rolled back** instead of committed. Rejected: it leaves a
+  commit already sent, and a buffer file read late.
 - **A Job on InfluxDB derived by aggregating its Trail**, as the collector's spec first
   had it. Rejected: a collector starting up reads each mower's latest Job to carry on from
   it, and whether a Job completed, the area it mowed and its dock arrival pose are not in

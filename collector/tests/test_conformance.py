@@ -45,6 +45,7 @@ from .conftest import (
     influxdb_asked,
     influxdb_server,
     influxdb_ways,
+    told_at_once,
 )
 from .test_live import Live, stopped_at_its_first_request
 from .test_retention import EXPIRING_TABLES, removal_ended, rows_at
@@ -491,6 +492,23 @@ def test_an_older_telling_of_a_job_does_not_replace_a_later_one(relational: Rela
     with relational.open() as storage:
         assert storage.write_jobs([later]) == 1
         assert storage.write_jobs([earlier]) == 0  # as a buffer written out of order brings it
+
+    with relational.open() as storage:
+        assert list(storage.latest_jobs()) == [later]
+
+
+@pytest.mark.parametrize("newer_first", [False, True])
+def test_of_two_tellings_of_a_job_as_of_one_moment_the_later_stands_in_either_order(
+    relational: Relational, newer_first: bool
+) -> None:
+    # A message sent no later than the one before can still change a Job. Written out of
+    # order, as a write given up on and answered late writes it, the telling before must
+    # not replace it.
+    earlier, later = told_at_once()
+
+    with relational.open() as storage:
+        for job in [later, earlier] if newer_first else [earlier, later]:
+            storage.write_jobs([job])
 
     with relational.open() as storage:
         assert list(storage.latest_jobs()) == [later]

@@ -18,7 +18,7 @@ import socket
 import subprocess
 import urllib.request
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -29,6 +29,9 @@ import clickhouse_connect
 import psycopg
 import pytest
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
+
+from navimow_collector.ingest import Ingestor
+from navimow_collector.records import Gap, Job, Mower, MowerState, Progress, TrailPoint
 
 REPO = Path(__file__).resolve().parents[2]
 FIXTURE = REPO / "fixtures" / "synthetic-job.jsonl.gz"
@@ -42,6 +45,56 @@ class Clock:
 
     def __call__(self) -> float:
         return self.now
+
+
+class Told:
+    """A writer that keeps the Jobs the ingestion core hands it, in the order handed."""
+
+    def __init__(self) -> None:
+        self.jobs: list[Job] = []
+
+    def write_jobs(self, jobs: Sequence[Job]) -> int:
+        self.jobs.extend(jobs)
+        return len(jobs)
+
+    def write_trail(self, points: Sequence[TrailPoint]) -> int:
+        return len(points)
+
+    def write_gaps(self, gaps: Sequence[Gap]) -> int:
+        return len(gaps)
+
+    def write_progress(self, reports: Sequence[Progress]) -> int:
+        return len(reports)
+
+    def write_states(self, states: Sequence[MowerState]) -> int:
+        return len(states)
+
+    def write_mowers(self, mowers: Sequence[Mower]) -> int:
+        return len(mowers)
+
+
+def told_at_once() -> tuple[Job, Job]:
+    """Two tellings of one Job, oldest first, as the ingestion core tells them of a mower
+    that leaves the dock and reports progress in the same millisecond."""
+    sent, topic = 1_790_769_600_000, "/downlink/vehicle/DEVICE_1/realtimeDate/"
+    report = {"type": 2, "time": sent, "mowStartType": 1, "mowingPercentage": 5, "subtotalArea": 9}
+    told = Told()
+    ingestor = Ingestor(told)
+    ingestor.feed(
+        {
+            "recv_ms": sent,
+            "kind": "mqtt",
+            "topic": f"{topic}state",
+            "payload": {"state": "isRunning"},
+        }
+    )
+    ingestor.feed(
+        {"recv_ms": sent, "kind": "mqtt", "topic": f"{topic}location", "payload": [report]}
+    )
+    ingestor.flush()
+    earlier, later = told.jobs
+    assert (earlier.mowing_percentage, later.mowing_percentage) == (None, 5)
+    return earlier, later
 
 
 def gaps(dsn: str) -> list[tuple[str, datetime, datetime, str]]:
