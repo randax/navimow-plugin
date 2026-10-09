@@ -38,8 +38,8 @@ def open_storage(config: StorageConfig) -> Storage:
 def open_for_collection(config: StorageConfig) -> Storage:
     """Open the configured backend as live collection uses it: the database is also told
     how long the owner keeps rows, wherever it removes old ones itself. `replay` opens
-    without, and so neither removes anything nor has anything removed. Nor is a database
-    told anything whose schema is not the collector's to change."""
+    without, and so neither removes anything nor changes what the database was told. Nor
+    is a database told anything whose schema is not the collector's to change."""
     storage = open_storage(config)
     try:
         if config.migrate:

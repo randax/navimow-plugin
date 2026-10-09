@@ -319,7 +319,8 @@ older than a policy already there, TimescaleDB removes when it next applies it.
 Should TimescaleDB refuse either (it makes no policies under its Apache
 licence, and no hypertable of a table the collector's user does not own), the
 collector logs a warning and starts all the same: whatever table has no
-retention policy, it removes old rows from itself.
+retention policy, it removes old rows from itself. So it does where it is not
+let read TimescaleDB's policies at all.
 
 Only a table with no rows is made a hypertable. A database that already holds
 Trails keeps its ordinary tables when the extension is installed later, for as

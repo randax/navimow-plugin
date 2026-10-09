@@ -151,16 +151,28 @@ _TIMESCALEDB = """
     SELECT nspname FROM pg_extension JOIN pg_namespace ON pg_namespace.oid = extnamespace
     WHERE extname = 'timescaledb'
 """
-_HYPERTABLES = """
+# A hypertable is the collector's where its bare name is found to be that table: by the
+# connection's own search for it, in whichever schema that ends.
+_ITS_OWN = "to_regclass(format('%I.%I', hypertable_schema, hypertable_name))"
+_HYPERTABLES = f"""
     SELECT hypertable_name::text FROM timescaledb_information.hypertables
-    WHERE hypertable_schema = current_schema()
+    WHERE {_ITS_OWN} = to_regclass(hypertable_name::text)
 """
-# The tables of this schema that TimescaleDB keeps to a retention policy, and for how long.
-_POLICIES = """
-    SELECT hypertable_name::text, (config->>'drop_after')::interval
+# The retention policies on the collector's tables, each with whether it keeps rows for
+# just so many days. TimescaleDB is asked, and the answer is not read here: a month is
+# not 30 days to it, a policy may go by when a chunk was made and not by age, and how an
+# interval is written out is the server's to set.
+_POLICIES = f"""
+    SELECT hypertable_name::text, job_id,
+        (config->>'drop_after')::interval::text
+            IS NOT DISTINCT FROM make_interval(days => %(days)s)::text
     FROM timescaledb_information.jobs
-    WHERE proc_name = 'policy_retention' AND hypertable_schema = current_schema()
+    WHERE proc_name = 'policy_retention'
+        AND {_ITS_OWN.replace("%", "%%")} = to_regclass(hypertable_name::text)
 """
+# One collector at a time gives TimescaleDB its rule: two starting together would each
+# make a policy for the same table.
+_ONE_AT_A_TIME = "SELECT pg_advisory_xact_lock(hashtext('navimow_collector.keep_for'))"
 # Every statement of a removal can go by the key, which begins with the mower: reading
 # millions of positions through to find what is old, on the small machine this shares with
 # its database, would take longer than a statement is given. What earlier removals took is
@@ -308,16 +320,19 @@ class PostgresStorage:
         try:
             with self._connection.transaction():
                 held = {row[0] for row in self._connection.execute(_HYPERTABLES)}
-                for table in READINGS:
+                for table in set(READINGS) - held:
                     rows = self._connection.execute(f"SELECT FROM {table} LIMIT 1").fetchone()
-                    if table not in held and rows is None:
+                    if rows is None:
                         self._connection.execute(hold, (table, EXPIRING[table][0]))
         except psycopg.Error as error:
-            self._carry_on_without("TimescaleDB made no hypertables of the readings", error)
+            self._carry_on_without(
+                "TimescaleDB made no hypertables of the readings, which stay the tables they are",
+                error,
+            )
 
     def keep_for(self, days: int | None) -> None:
         """Where TimescaleDB holds readings in hypertables, have it keep them for as long as
-        the owner does: a retention policy of so many days, or none.
+        the owner does: one retention policy of so many days on each, or none.
 
         Whatever it is given no policy for, because it will not take one (under its Apache
         licence it takes none) or because the table is no hypertable, the collector goes on
@@ -327,34 +342,61 @@ class PostgresStorage:
             timescaledb = self._timescaledb()
             if timescaledb is None:
                 return
-            wanted = _kept_for(days)
-            forget = sql.SQL("SELECT {}.remove_retention_policy(%s, if_exists => true)")
-            keep = sql.SQL("SELECT {}.add_retention_policy(%s, drop_after => %s)")
+            days = days if _kept_for(days) is not None else None
+            forget = sql.SQL("SELECT {}.delete_job(%s)").format(timescaledb)
+            keep = sql.SQL(
+                "SELECT {}.add_retention_policy(%s, drop_after => make_interval(days => %s))"
+            ).format(timescaledb)
             try:
                 with self._connection.transaction():
-                    kept = self._policies()
+                    self._connection.execute(_ONE_AT_A_TIME)
+                    policies = self._policies(days)
                     held = {row[0] for row in self._connection.execute(_HYPERTABLES)}
                     for table in held.intersection(READINGS):
-                        if kept.get(table) != wanted:
-                            self._connection.execute(forget.format(timescaledb), (table,))
-                            if wanted is not None:
-                                self._connection.execute(keep.format(timescaledb), (table, wanted))
+                        made = policies.get(table, {})
+                        # As wanted: none where everything is kept, else the one, of that age.
+                        if list(made.values()) == ([] if days is None else [True]):
+                            continue
+                        for job in made:
+                            self._connection.execute(forget, (job,))
+                        if days is not None:
+                            self._connection.execute(keep, (table, days))
             except psycopg.Error as error:
-                self._carry_on_without("TimescaleDB was not told how long to keep readings", error)
+                self._carry_on_without(
+                    "TimescaleDB's retention policies could not be made what"
+                    " storage.retention_days says: a table that has one is left to it, and"
+                    " the collector removes old rows from the others itself",
+                    error,
+                )
 
     def _carry_on_without(self, what: str, error: psycopg.Error) -> None:
         """TimescaleDB refused something the collector does as well without: say so and go
         on, unless it is the connection that failed, which is an outage like any other."""
         if self._connection.broken:
             raise error
-        _LOGGER.warning("%s, and the collector removes old rows itself: %s", what, error)
+        _LOGGER.warning("%s: %s", what, str(error).strip())
 
-    def _policies(self) -> dict[str, timedelta]:
-        """The tables TimescaleDB keeps to a retention policy, and for how long each; none
-        where it is not installed."""
-        if self._timescaledb() is None:
-            return {}
-        return dict(self._connection.execute(_POLICIES).fetchall())
+    def _policies(self, days: int | None = None) -> dict[str, dict[int, bool]]:
+        """The collector's tables that TimescaleDB keeps to a retention policy: for each,
+        its policies by their job, and whether each keeps rows for just so many days.
+        None where TimescaleDB is not installed."""
+        policies: dict[str, dict[int, bool]] = {}
+        if self._timescaledb() is not None:
+            for table, job, as_wanted in self._connection.execute(_POLICIES, {"days": days}):
+                policies.setdefault(table, {})[job] = as_wanted
+        return policies
+
+    def _left_to_timescaledb(self) -> set[str]:
+        """The tables whose old rows TimescaleDB removes itself, having a policy for them.
+        Where it will not say, none is taken to be: old rows are then the collector's to
+        remove, as the owner asked."""
+        try:
+            return set(self._policies())
+        except psycopg.Error as error:
+            if self._connection.broken:
+                raise
+            _LOGGER.warning("TimescaleDB's retention policies could not be read: %s", error)
+            return set()
 
     def check_schema(self) -> None:
         for table in TABLES:
@@ -425,8 +467,7 @@ class PostgresStorage:
     def remove_older_than(self, before: datetime, batch: int) -> int:
         removed = 0
         with _translated():
-            # What TimescaleDB was given the rule for is its own to remove.
-            left_to_the_engine = self._policies()
+            left_to_the_engine = self._left_to_timescaledb()
             for table, (key, age) in EXPIRING.items():
                 if table in left_to_the_engine:
                     continue
