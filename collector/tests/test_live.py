@@ -53,6 +53,7 @@ from navimow_collector.storage.buffered import (
     BackgroundStorage,
     BufferedStorage,
 )
+from navimow_collector.storage.retention import Retention
 
 from .conftest import FIXTURE, Clock, free_port, gaps
 from .test_auth import Request, Response, logged_in, token
@@ -212,6 +213,7 @@ class Live:
         self,
         connect: Callable[[BrokerCredentials, Sequence[str]], Broker] | None = None,
         deadline: float = WRITE_SECONDS,
+        retention_days: int | None = None,
     ) -> Collector:
         """A new collector process over whatever state the last one left behind."""
         self.storage = BackgroundStorage(
@@ -221,11 +223,15 @@ class Live:
         tokens = TokenManager(
             TokenClient(self.vendor, "id", "secret"), self.store, clock=self.clock
         )
+        self.retention = (
+            Retention(self.db.open, retention_days, clock=self.clock) if retention_days else None
+        )
         self.collector = Collector(
             self.vendor,
             tokens,
             self.storage,
             self.state,
+            retention=self.retention,
             connect=connect or self._connect,
             clock=self.clock,
         )

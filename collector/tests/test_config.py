@@ -163,3 +163,51 @@ def test_an_unusable_health_address_is_rejected_by_name(
     config = write(tmp_path, f'[health]\nlisten = "{listen}"\n')
     assert main(["--config", str(config), "config"]) == 2
     assert "health.listen" in capsys.readouterr().err
+
+
+def test_nothing_is_removed_unless_the_owner_says_how_long_to_keep_rows(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert load_config(write(tmp_path, "")).storage.retention_days is None
+    config = write(tmp_path, "[storage]\nretention_days = 365\n")
+    assert load_config(config).storage.retention_days == 365
+    assert "retention_days = 365\n" in show(capsys, "--config", str(config))
+    monkeypatch.setenv("NAVIMOW_STORAGE_RETENTION_DAYS", "30")
+    assert load_config(config).storage.retention_days == 30
+    monkeypatch.setenv("NAVIMOW_STORAGE_RETENTION_DAYS", "0" * 5000 + "30")
+    assert load_config(config).storage.retention_days == 30
+    monkeypatch.setenv("NAVIMOW_STORAGE_RETENTION_DAYS", "2147483647")
+    assert "retention_days = 2147483647\n" in show(capsys, "--config", str(config))
+
+
+@pytest.mark.parametrize(
+    "days", ["0", "-7", "1.5", '"a year"', "true", '""', "2147483648", "0x" + "f" * 4000]
+)
+def test_a_retention_that_is_not_a_positive_whole_number_of_days_is_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], days: str
+) -> None:
+    config = write(tmp_path, f"[storage]\nretention_days = {days}\n")
+    assert main(["--config", str(config), "config"]) == 2
+    assert "storage.retention_days must be a positive whole number" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "days", ["0", "-7", "1.5", "a year", "", "３０", " 30", "9" * 5000, "2147483648"]
+)
+def test_a_retention_from_the_environment_is_held_to_the_same(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    days: str,
+) -> None:
+    monkeypatch.setenv("NAVIMOW_STORAGE_RETENTION_DAYS", days)
+    assert main(["--config", str(write(tmp_path, "")), "config"]) == 2
+    assert "storage.retention_days must be a positive whole number" in capsys.readouterr().err
+
+
+def test_a_number_too_long_to_read_is_refused_as_the_file_it_is_in(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = write(tmp_path, f"[storage]\nretention_days = {'9' * 5000}\n")
+    assert main(["--config", str(config), "config"]) == 2
+    assert f"invalid TOML in {config}" in capsys.readouterr().err

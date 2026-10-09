@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import astuple, fields, replace
+from datetime import UTC, datetime
 from typing import Any
 
 import psycopg
@@ -125,6 +126,58 @@ MIGRATIONS = (
     """,
 )
 TABLES = ("trail_point", "collector_gap", "job", "job_progress", "mower_state", "mower")
+# The tables whose rows an owner may have removed once old: the time each is keyed by beside
+# its mower, and the time that says how old a row is. A gap is as old as its end. A Job and a
+# mower are kept whatever their age.
+EXPIRING = {
+    "trail_point": ("device_time", "device_time"),
+    "job_progress": ("device_time", "device_time"),
+    "mower_state": ("device_time", "device_time"),
+    "collector_gap": ("start_time", "end_time"),
+}
+# Every statement of a removal can go by the key, which begins with the mower: reading
+# millions of positions through to find what is old, on the small machine this shares with
+# its database, would take longer than a statement is given. What earlier removals took is
+# passed over at the start of each, for as long as the database has not cleaned it up:
+# quickly, unless something has kept it from cleaning up at all for days.
+# The mowers a table has rows of, each found from the one before it.
+_MOWERS = """
+    WITH RECURSIVE mowers AS (
+        (SELECT mower_id FROM {table} ORDER BY mower_id LIMIT 1)
+        UNION ALL
+        SELECT (SELECT mower_id FROM {table} WHERE mower_id > mowers.mower_id
+                ORDER BY mower_id LIMIT 1)
+        FROM mowers WHERE mower_id IS NOT NULL
+    )
+    SELECT mower_id FROM mowers WHERE mower_id IS NOT NULL
+"""
+# One mower's oldest rows past `after`, where the batch before this one ended, so that the
+# rows it removed are not walked over again: how many there are, to a batch at most, and the
+# key of the last. A row older than `before` by its age is so by its key as well.
+_OLD = """
+    SELECT count(*), max({key}) FROM (
+        SELECT {key} FROM {table}
+        WHERE mower_id = %(mower)s AND {key} > %(after)s AND {key} < %(before)s
+            AND {age} < %(before)s
+        ORDER BY {key} LIMIT %(batch)s
+    ) AS oldest
+"""
+# The rows as far as that last key, each asked its age once more: a gap recorded again since
+# it was counted, as ending later, is no longer the old gap it was.
+_REMOVE = """
+    DELETE FROM {table}
+    WHERE mower_id = %(mower)s AND {key} > %(after)s AND {key} <= %(last)s
+        AND {age} < %(before)s
+"""
+_EARLIEST = datetime.min.replace(tzinfo=UTC)
+# For the transaction it is run in, PostgreSQL finds rows by an index wherever one will
+# do. What it believes a table holds can be far from it, just after a capture of last year
+# is replayed or on a table it has not yet looked at, and it would then read every old row
+# through for each batch, or sort them.
+_BY_THE_KEY = (
+    "SELECT set_config('enable_seqscan', 'off', true),"
+    " set_config('enable_bitmapscan', 'off', true), set_config('enable_sort', 'off', true)"
+)
 
 
 def _insert(row: type[Row], table: str) -> str:
@@ -255,6 +308,29 @@ class PostgresStorage:
             " IS DISTINCT FROM (EXCLUDED.name, EXCLUDED.model, EXCLUDED.firmware)",
             [astuple(mower) for mower in mowers],
         )
+
+    def remove_older_than(self, before: datetime, batch: int) -> int:
+        removed = 0
+        with _translated():
+            for table, (key, age) in EXPIRING.items():
+                names = {"table": table, "key": key, "age": age}
+                mowers = self._connection.execute(_MOWERS.format(**names)).fetchall()
+                for (mower,) in mowers:
+                    bounds = {"mower": mower, "after": _EARLIEST, "before": before}
+                    found = batch
+                    while found and found == batch:  # a batch that found fewer found the last
+                        with self._connection.transaction():
+                            self._connection.execute(_BY_THE_KEY)
+                            oldest = self._connection.execute(
+                                _OLD.format(**names), {**bounds, "batch": batch}
+                            ).fetchone()
+                            found, last = oldest or (0, None)
+                            if found:
+                                removed += self._connection.execute(
+                                    _REMOVE.format(**names), {**bounds, "last": last}
+                                ).rowcount
+                                bounds["after"] = last
+        return removed
 
     def _write(self, statement: str, rows: Sequence[tuple[object, ...]]) -> int:
         with _translated(), self._connection.transaction(), self._connection.cursor() as cursor:

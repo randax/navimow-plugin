@@ -109,10 +109,12 @@ in `NAVIMOW_CONFIG`.
 backend = "postgres"
 dsn_file = "/run/secrets/navimow-postgres-dsn"
 migrate = true
+# retention_days = 365
 ```
 
 An inline `dsn = "postgresql://..."` is also accepted. Secret files have their
 trailing newline removed, and `NAVIMOW_STORAGE_DSN_FILE` can supply the path.
+`retention_days` is described under [Retention](#retention).
 
 `navimow-collector config` prints what the collector would run with, secrets
 left out.
@@ -260,6 +262,39 @@ write there. Should the directory stop being writable while it collects,
 collection goes on and the failure is logged every minute, but the connection
 note stays at its last value: the gap recorded at the next restart then starts
 too early and lies across Trail that was in fact collected.
+
+## Retention
+
+Everything is kept unless you say otherwise: a season of mowing is on the order
+of 100 to 150 MB in PostgreSQL.
+
+```toml
+[storage]
+retention_days = 365
+```
+
+With `storage.retention_days` set (or `NAVIMOW_STORAGE_RETENTION_DAYS`), `collect`
+removes what is older than that many days:
+
+| Removed once old | Always kept |
+|---|---|
+| `trail_point`, `job_progress`, `mower_state`, `collector_gap` | `job`, `mower` |
+
+So the history of Jobs (when each ran, how far it got, the area it mowed)
+outlives their Trails. A position, progress report or state is as old as its
+`device_time`, and a gap as old as its `end_time`. The value must be a positive
+whole number of days.
+
+Old rows are removed when the collector starts and once a day after that, so a
+row can outlive the setting by a day. The removal has a thread and a database
+connection of its own and takes at most 5,000 rows a statement: collection does
+not wait for it. One that fails, or finds the database away, is logged and left
+to the next day, and so is one the database has not answered by then. The day
+between removals is counted in time elapsed, but what is old goes by the
+collector's clock: one set far ahead removes rows early.
+
+`replay` removes nothing, whatever the setting. What it stores that is older
+than the setting is removed by `collect`, the next time it removes old rows.
 
 ## Jobs and Zones
 

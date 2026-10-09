@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import os
 import tomllib
+from contextlib import suppress
 from dataclasses import MISSING, Field, dataclass, fields, replace
 from pathlib import Path
 from types import UnionType
 from typing import TypeVar, get_args, get_origin, get_type_hints
+
+# The largest number a setting may be: far beyond any use, and short enough to print.
+LARGEST_NUMBER = 2**31 - 1
 
 
 class ConfigError(Exception):
@@ -41,6 +45,8 @@ class StorageConfig:
     backend: str = "postgres"
     dsn: Secret | None = None
     migrate: bool = True
+    # How many days of positions, progress, states and gaps to keep; unset keeps them all.
+    retention_days: int | None = None
 
 
 PUBLIC_CLIENT_ID = "homeassistant"
@@ -130,7 +136,7 @@ def _load_toml(path: Path) -> dict[str, object]:
         raise ConfigError(f"configuration file not found: {path}") from error
     except OSError as error:
         raise ConfigError(f"could not read configuration file {path}: {error}") from error
-    except tomllib.TOMLDecodeError as error:
+    except ValueError as error:  # not TOML, or a number in it too long for Python to read
         raise ConfigError(f"invalid TOML in {path}: {error}") from error
     return {str(key): value for key, value in parsed.items()}
 
@@ -240,6 +246,15 @@ def _coerce(value: object, annotation: object, key: str) -> object:
             if coerced is not None:
                 return coerced
         raise ConfigError(f"{key} must be a boolean (true/false, 1/0, or yes/no)")
+    if annotation == int | None:
+        if value is None:
+            return None
+        if isinstance(value, str) and value.isascii() and value.isdigit():
+            with suppress(ValueError):  # too long for Python to read as a number at all
+                value = int(value.lstrip("0") or "0")
+        if isinstance(value, int) and not isinstance(value, bool) and 0 < value <= LARGEST_NUMBER:
+            return value
+        raise ConfigError(f"{key} must be a positive whole number, at most {LARGEST_NUMBER}")
     raise ConfigError(f"unsupported configuration type for {key}")
 
 
