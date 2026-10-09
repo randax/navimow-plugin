@@ -53,8 +53,9 @@ with `FINAL`.
   moment only the order of writing would say which stands. Rows are written out of order by
   a write that live collection gave up on and the database took late, and by a buffer file
   read after the rows held in memory. The mower's times are whole milliseconds, and a
-  telling moved on stays in the millisecond of the one before, so when the message was
-  sent is still read from it.
+  telling is moved on a microsecond at a time, so short of a thousand tellings as of one
+  millisecond it stays in that millisecond, and when the message was sent is still read
+  from it.
 - **`mower`** is one row per mower as the account's device list describes it, rewritten
   when the list describes it differently; `updated_time` says since when. The firmware
   matters because ADR 0001's rules were checked on one.
@@ -144,6 +145,10 @@ columns.
   mower lists its Zones as it leaves the dock, but a third of a second before the state
   channel says it has left, so that list falls outside the Job; the next came 225 seconds
   later in the capture.
+- A collector carries on from each mower's latest Job as storage and its buffer have it.
+  One that starts while its buffer file cannot be read does not see a telling waiting
+  there, and may tell the Job anew as of the same moment: whichever of the two is written
+  last stands, as before #80. A revision number would not have changed that.
 - The device list is read when the collector starts, so a firmware update is recorded at
   the next start, not when it happened.
 - The bundled dashboard has no signal-strength panel until a mower is seen to send one.

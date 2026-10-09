@@ -35,7 +35,7 @@ from navimow_collector.storage.buffered import (
     BufferedStorage,
 )
 
-from .conftest import Clock, gaps, told_at_once
+from .conftest import Clock, gaps, told_of
 
 START = datetime(2026, 9, 30, 12, tzinfo=UTC)
 # The longest the database is ever kept suspended: the server ends it then by itself, so a
@@ -440,9 +440,9 @@ def test_a_write_given_up_on_that_lands_late_leaves_the_later_telling_of_a_job(
     # The attempt given up on keeps its connection, and the database may yet take its rows
     # after the later ones written over a fresh connection.
     db, clock = Database(database), Clock()
-    storage = BackgroundStorage(db.open, tmp_path / "buffer.jsonl", clock=clock, deadline=0.1)
+    storage = BackgroundStorage(db.open, tmp_path / "buffer.jsonl", clock=clock, deadline=1)
     storage.connect()
-    earlier, later = told_at_once(9)
+    earlier, later = told_of((0, 9))
     db.held_jobs = released = threading.Event()
 
     async def scenario() -> None:

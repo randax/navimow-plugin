@@ -17,7 +17,7 @@ from psycopg.rows import dict_row
 from navimow_collector.cli import main
 from navimow_collector.ingest import Ingestor, read_capture
 
-from .conftest import FIXTURE, Told, told_at_once
+from .conftest import FIXTURE, Told, told_of
 
 HOUR_MS = 3_600_000
 DAY_MS = 24 * HOUR_MS
@@ -625,7 +625,7 @@ def test_a_report_held_up_from_before_the_charging_break_does_not_confirm_a_resu
 def test_a_collector_carrying_on_from_a_job_told_of_anew_still_hears_that_millisecond() -> None:
     # A telling moved on to after the one before is still of the message it was sent in:
     # what else the mower sent in that millisecond is no older than what was heard.
-    stored = told_at_once(9)[-1]
+    stored = told_of((0, 9))[-1]
     told = Told()
     ingestor = Ingestor(told, jobs=[stored])
     sent = int(stored.start_time.timestamp() * 1000)

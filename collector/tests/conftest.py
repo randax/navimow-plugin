@@ -73,16 +73,17 @@ class Told:
         return len(mowers)
 
 
-def told_at_once(*areas: float) -> list[Job]:
-    """Every telling of a Job, oldest first, as the ingestion core tells them of a mower
-    that leaves the dock and then reports so many square metres mowed, all in the same
-    millisecond."""
-    sent, topic = 1_790_769_600_000, "/downlink/vehicle/DEVICE_1/realtimeDate/"
+def told_of(*reports: tuple[int, float]) -> list[Job]:
+    """Every telling of the mower's Jobs, oldest first, as the ingestion core tells them of
+    a mower that leaves the dock and then reports, so many seconds later, so many square
+    metres mowed."""
+    left, topic = 1_790_769_600_000, "/downlink/vehicle/DEVICE_1/realtimeDate/"
     told = Told()
     ingestor = Ingestor(told)
     state = {"state": "isRunning"}
-    ingestor.feed({"recv_ms": sent, "kind": "mqtt", "topic": f"{topic}state", "payload": state})
-    for area in areas:
+    ingestor.feed({"recv_ms": left, "kind": "mqtt", "topic": f"{topic}state", "payload": state})
+    for seconds, area in reports:
+        sent = left + seconds * 1000
         report = {"type": 2, "time": sent, "mowStartType": 1, "subtotalArea": area}
         location = {"recv_ms": sent, "kind": "mqtt", "topic": f"{topic}location"}
         ingestor.feed({**location, "payload": [report]})

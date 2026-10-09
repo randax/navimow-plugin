@@ -45,7 +45,7 @@ from .conftest import (
     influxdb_asked,
     influxdb_server,
     influxdb_ways,
-    told_at_once,
+    told_of,
 )
 from .test_live import Live, stopped_at_its_first_request
 from .test_retention import EXPIRING_TABLES, removal_ended, rows_at
@@ -499,28 +499,28 @@ def test_an_older_telling_of_a_job_does_not_replace_a_later_one(relational: Rela
 
 @pytest.mark.parametrize("newest_first", [False, True])
 @pytest.mark.parametrize(
-    "areas",
+    "reports",
     [
-        pytest.param((9,), id="progress"),
-        # A Job begun in the second the one before began in is the same row.
-        pytest.param((9, 0), id="progress-then-another-job"),
+        pytest.param([(0, 9)], id="progress-as-the-mower-leaves"),
+        # The Job given up is told of in the millisecond it was last told of in.
+        pytest.param([(60, 50), (120, 0)], id="given-up-for-another"),
     ],
 )
-def test_of_tellings_of_a_job_as_of_one_moment_the_last_stands_in_either_order(
-    relational: Relational, areas: tuple[float, ...], newest_first: bool
+def test_of_the_tellings_of_a_job_the_last_stands_in_either_order(
+    relational: Relational, reports: list[tuple[int, float]], newest_first: bool
 ) -> None:
     # A message sent no later than the one before can still change a Job. Written out of
     # order, as a write given up on and answered late writes it, a telling before must not
     # replace it.
-    tellings = told_at_once(*areas)
-    assert len(tellings) > len(areas)  # each report told of the Job anew
+    tellings = told_of(*reports)
+    first = [job for job in tellings if job.job_id == tellings[0].job_id]
 
     with relational.open() as storage:
-        for job in reversed(tellings) if newest_first else tellings:
+        for job in reversed(first) if newest_first else first:
             storage.write_jobs([job])
 
     with relational.open() as storage:
-        assert list(storage.latest_jobs()) == [tellings[-1]]
+        assert list(storage.latest_jobs()) == [first[-1]]
 
 
 def test_in_influxdb_an_older_telling_of_a_job_is_written_over_a_later_one(influx: Influx) -> None:
