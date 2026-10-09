@@ -151,19 +151,21 @@ _MOWERS = """
     )
     SELECT mower_id FROM mowers WHERE mower_id IS NOT NULL
 """
-# One mower's oldest rows past `after`, where the statement before this one ended: the rows
-# that one removed are not walked over again. A row older than `before` by its age is so by
-# its key as well. The row is asked its age once more as it is removed: a gap recorded again
-# meanwhile, as ending later, is no longer the old gap that was found.
+# The keys of one mower's oldest rows past `after`, where the batch before this one ended:
+# the rows that one removed are not walked over again. A row older than `before` by its age
+# is so by its key as well.
+_OLD = """
+    SELECT {key} FROM {table}
+    WHERE mower_id = %(mower)s AND {key} > %(after)s AND {key} < %(before)s
+        AND {age} < %(before)s
+    ORDER BY {key} LIMIT %(batch)s
+"""
+# The rows of those keys, each asked its age once more: a gap recorded again since it was
+# found, as ending later, is no longer the old gap it was. The keys are given outright, so
+# that how the rows are found does not hang on what the database believes it holds.
 _REMOVE = """
     DELETE FROM {table}
-    WHERE mower_id = %(mower)s AND {key} > %(after)s AND {age} < %(before)s AND {key} IN (
-        SELECT {key} FROM {table}
-        WHERE mower_id = %(mower)s AND {key} > %(after)s AND {key} < %(before)s
-            AND {age} < %(before)s
-        ORDER BY {key} LIMIT %(batch)s
-    )
-    RETURNING {key}
+    WHERE mower_id = %(mower)s AND {key} = ANY(%(keys)s) AND {age} < %(before)s
 """
 _EARLIEST = datetime.min.replace(tzinfo=UTC)
 
@@ -301,19 +303,22 @@ class PostgresStorage:
         removed = 0
         with _translated():
             for table, (key, age) in EXPIRING.items():
-                remove = _REMOVE.format(table=table, key=key, age=age)
-                mowers = self._connection.execute(_MOWERS.format(table=table)).fetchall()
+                names = {"table": table, "key": key, "age": age}
+                mowers = self._connection.execute(_MOWERS.format(**names)).fetchall()
                 for (mower,) in mowers:
-                    after = _EARLIEST
-                    # Until a statement removes nothing: one that removed fewer than it
-                    # may have found a gap recorded again meanwhile, with more beyond it.
+                    bounds = {"mower": mower, "after": _EARLIEST, "before": before}
                     while True:
-                        bounds = {"mower": mower, "after": after, "before": before, "batch": batch}
-                        keys = self._connection.execute(remove, bounds).fetchall()
-                        if not keys:
+                        found = self._connection.execute(
+                            _OLD.format(**names), {**bounds, "batch": batch}
+                        ).fetchall()
+                        if found:
+                            keys = [row[0] for row in found]
+                            removed += self._connection.execute(
+                                _REMOVE.format(**names), {**bounds, "keys": keys}
+                            ).rowcount
+                            bounds["after"] = keys[-1]
+                        if len(found) < batch:  # a batch that found fewer found the last
                             break
-                        removed += len(keys)
-                        after = max(row[0] for row in keys)
         return removed
 
     def _write(self, statement: str, rows: Sequence[tuple[object, ...]]) -> int:

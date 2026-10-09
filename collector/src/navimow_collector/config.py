@@ -245,7 +245,8 @@ def _coerce(value: object, annotation: object, key: str) -> object:
     if annotation == int | None:
         if value is None:
             return None
-        if isinstance(value, str) and value.isascii() and value.isdigit():
+        # Not so long that Python refuses to read it as a number at all.
+        if isinstance(value, str) and value.isascii() and value.isdigit() and len(value) < 19:
             value = int(value)
         if isinstance(value, int) and not isinstance(value, bool) and value > 0:
             return value

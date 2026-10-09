@@ -292,31 +292,36 @@ def test_each_mowers_old_rows_are_removed(database: str, tmp_path: Path) -> None
     assert expiring(live) == dict.fromkeys(EXPIRING_TABLES, [kept] * 3)
 
 
-def test_a_gap_made_longer_while_old_rows_are_removed_is_kept(live: Live) -> None:
+@pytest.mark.parametrize("recorded_again", [1, 2], ids=["one gap", "a whole batch of gaps"])
+def test_a_gap_made_longer_while_old_rows_are_removed_is_kept(
+    live: Live, recorded_again: int
+) -> None:
     # A collector that died before noting its reconnection records the same gap again when
     # it restarts, as ending now: just when a removal is first made.
-    first, second, third = days_ago(60), days_ago(50), days_ago(40)
+    began = [days_ago(60), days_ago(50), days_ago(40)]
     with live.db.open() as storage, ThreadPoolExecutor() as removal:
         write_rows(
             storage,
             [
-                Gap("DEVICE_1", began, began + timedelta(hours=1), GapReason.RECONNECT)
-                for began in (first, second, third)
+                Gap("DEVICE_1", start, start + timedelta(hours=1), GapReason.RECONNECT)
+                for start in began
             ],
         )
         with psycopg.connect(live.db.dsn) as recording:
             recording.execute(
-                "UPDATE collector_gap SET end_time = %s WHERE start_time = %s", (at(NOW), first)
+                "UPDATE collector_gap SET end_time = %s WHERE start_time = ANY(%s)",
+                (at(NOW), began[:recorded_again]),
             )
-            # Two rows a statement: the first finds the gap being recorded again, and waits.
+            # Two rows a batch: the first finds what is being recorded again, and waits.
             removed = removal.submit(storage.remove_older_than, days_ago(30), 2)
             deadline = time.monotonic() + 4
             while not live.db.held():
                 assert time.monotonic() < deadline, "the removal never waited for the gap"
                 time.sleep(0.01)
 
-        assert removed.result() == 2  # the statement that removed one fewer was not the last
-    assert stored(live, "collector_gap", "end_time") == [at(NOW)]
+        # The batch that removed fewer than it found, or nothing, was not the last.
+        assert removed.result() == 3 - recorded_again
+    assert stored(live, "collector_gap", "end_time") == [at(NOW)] * recorded_again
 
 
 def test_a_removal_the_database_never_answers_is_said_and_not_made_again(
@@ -384,3 +389,24 @@ def test_a_removal_that_fails_in_a_way_nobody_foresaw_is_logged_and_tried_again_
     removal.remove_if_due(NOW + 24 * HOUR)
     removal.join()
     assert stored(live, "trail_point", "device_time") == []
+
+
+def test_old_rows_the_database_did_not_know_it_had_are_removed_as_quickly(
+    live: Live, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A capture from last year replayed into a database that had held this year only: its
+    # statistics say nothing is old, and a statement planned by them must not take for ever.
+    monkeypatch.setattr(postgres, "STATEMENT_TIMEOUT_MS", 1000)
+    insert = (
+        "INSERT INTO trail_point (mower_id, device_time, received_time, x, y, theta)"
+        " SELECT 'DEVICE_1', t, t, 1, 2, 3 FROM generate_series("
+        "%(first)s::timestamptz, %(first)s + %(rows)s * interval '2 seconds', '2 seconds') t"
+    )
+    with live.db.open() as storage, psycopg.connect(live.db.dsn, autocommit=True) as conn:
+        conn.execute(insert, {"first": days_ago(20), "rows": 200_000})
+        conn.execute("ANALYZE trail_point")
+        conn.execute(insert, {"first": days_ago(400), "rows": 12_000})
+
+        assert storage.remove_older_than(days_ago(30), 5000) == 12_001
+
+    assert stored(live, "trail_point", "device_time")[0] == days_ago(20)
