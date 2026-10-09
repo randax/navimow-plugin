@@ -198,8 +198,9 @@ def _told(job: Job, before: Job | None) -> Job:
 
 
 def _sent(job: Job) -> datetime:
-    """When the newest of the messages that changed the Job was sent. The mower's times are
-    whole milliseconds, and a telling moved on stays in the millisecond of the one before."""
+    """When the newest of the messages that changed the Job was sent; of a Job given up, when
+    the one before was. The mower's times are whole milliseconds, and a telling moved on stays
+    in the millisecond of the one before."""
     return job.updated_time - timedelta(microseconds=job.updated_time.microsecond % 1000)
 
 
