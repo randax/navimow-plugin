@@ -80,7 +80,7 @@ def removed_as_of(live: Live, *times: float, retention_days: int | None = 30) ->
 def test_rows_older_than_the_owner_keeps_are_removed_and_the_history_of_jobs_is_not(
     live: Live,
 ) -> None:
-    old, kept = days_ago(31), days_ago(29)
+    old, kept = days_ago(30) - timedelta(seconds=2), days_ago(30)  # 30 days old is not older
     with live.db.open() as storage:
         write_rows(storage, [*rows_at(old), *rows_at(kept)])
         write_rows(storage, [Job("DEVICE_1", "old", old, old, end_time=old, completed=True)])
@@ -363,6 +363,22 @@ def test_a_clock_set_back_does_not_put_the_next_removal_off(live: Live) -> None:
     removal.join()
 
     assert stored(live, "trail_point", "device_time") == []
+
+
+def test_a_clock_set_ahead_does_not_bring_the_next_removal_on(live: Live) -> None:
+    elapsed, old = Clock(), days_ago(31)
+    removal = Retention(live.db.open, 30, clock=elapsed)
+    with live.db.open():
+        removal.remove_if_due(NOW - 7 * 24 * HOUR)  # by a clock a week behind
+        removal.join()
+    with live.db.open() as storage:
+        write_rows(storage, rows_at(old))
+
+    elapsed.now = HOUR
+    removal.remove_if_due(NOW)  # an hour on, the clock has been set right
+    removal.join()
+
+    assert stored(live, "trail_point", "device_time") == [old]
 
 
 def test_a_removal_that_fails_in_a_way_nobody_foresaw_is_logged_and_tried_again_the_next_day(

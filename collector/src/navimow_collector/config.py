@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import tomllib
+from contextlib import suppress
 from dataclasses import MISSING, Field, dataclass, fields, replace
 from pathlib import Path
 from types import UnionType
@@ -245,9 +246,9 @@ def _coerce(value: object, annotation: object, key: str) -> object:
     if annotation == int | None:
         if value is None:
             return None
-        # Not so long that Python refuses to read it as a number at all.
-        if isinstance(value, str) and value.isascii() and value.isdigit() and len(value) < 19:
-            value = int(value)
+        if isinstance(value, str) and value.isascii() and value.isdigit():
+            with suppress(ValueError):  # too long for Python to read as a number at all
+                value = int(value)
         if isinstance(value, int) and not isinstance(value, bool) and value > 0:
             return value
         raise ConfigError(f"{key} must be a positive whole number")

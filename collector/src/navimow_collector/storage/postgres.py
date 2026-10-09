@@ -151,21 +151,24 @@ _MOWERS = """
     )
     SELECT mower_id FROM mowers WHERE mower_id IS NOT NULL
 """
-# The keys of one mower's oldest rows past `after`, where the batch before this one ended:
-# the rows that one removed are not walked over again. A row older than `before` by its age
-# is so by its key as well.
+# One mower's oldest rows past `after`, where the batch before this one ended, so that the
+# rows it removed are not walked over again: how many there are, to a batch at most, and the
+# key of the last. A row older than `before` by its age is so by its key as well.
 _OLD = """
-    SELECT {key} FROM {table}
-    WHERE mower_id = %(mower)s AND {key} > %(after)s AND {key} < %(before)s
-        AND {age} < %(before)s
-    ORDER BY {key} LIMIT %(batch)s
+    SELECT count(*), max({key}) FROM (
+        SELECT {key} FROM {table}
+        WHERE mower_id = %(mower)s AND {key} > %(after)s AND {key} < %(before)s
+            AND {age} < %(before)s
+        ORDER BY {key} LIMIT %(batch)s
+    ) AS oldest
 """
-# The rows of those keys, each asked its age once more: a gap recorded again since it was
-# found, as ending later, is no longer the old gap it was. The keys are given outright, so
-# that how the rows are found does not hang on what the database believes it holds.
+# The rows as far as that last key, each asked its age once more: a gap recorded again since
+# it was counted, as ending later, is no longer the old gap it was. They are bounded by their
+# keys alone, which leaves the database one way to find them whatever it believes it holds.
 _REMOVE = """
     DELETE FROM {table}
-    WHERE mower_id = %(mower)s AND {key} = ANY(%(keys)s) AND {age} < %(before)s
+    WHERE mower_id = %(mower)s AND {key} > %(after)s AND {key} <= %(last)s
+        AND {age} < %(before)s
 """
 _EARLIEST = datetime.min.replace(tzinfo=UTC)
 
@@ -307,18 +310,17 @@ class PostgresStorage:
                 mowers = self._connection.execute(_MOWERS.format(**names)).fetchall()
                 for (mower,) in mowers:
                     bounds = {"mower": mower, "after": _EARLIEST, "before": before}
-                    while True:
-                        found = self._connection.execute(
+                    found = batch
+                    while found == batch:  # a batch that found fewer found the last
+                        oldest = self._connection.execute(
                             _OLD.format(**names), {**bounds, "batch": batch}
-                        ).fetchall()
+                        ).fetchone()
+                        found, last = oldest or (0, None)
                         if found:
-                            keys = [row[0] for row in found]
                             removed += self._connection.execute(
-                                _REMOVE.format(**names), {**bounds, "keys": keys}
+                                _REMOVE.format(**names), {**bounds, "last": last}
                             ).rowcount
-                            bounds["after"] = keys[-1]
-                        if len(found) < batch:  # a batch that found fewer found the last
-                            break
+                            bounds["after"] = last
         return removed
 
     def _write(self, statement: str, rows: Sequence[tuple[object, ...]]) -> int:
