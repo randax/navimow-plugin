@@ -7,6 +7,7 @@ dashboard would, in the backend's own query language.
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
@@ -21,11 +22,18 @@ from psycopg.conninfo import make_conninfo
 from navimow_collector.cli import main
 from navimow_collector.config import Secret, StorageConfig
 from navimow_collector.records import Job, Mower, TrailPoint
-from navimow_collector.storage import SchemaError, Storage, open_for_collection, write_rows
+from navimow_collector.storage import (
+    SchemaError,
+    Storage,
+    StorageError,
+    open_for_collection,
+    write_rows,
+)
 from navimow_collector.storage.retention import BATCH_ROWS
 
 from .conftest import FIXTURE, fresh_database
-from .test_retention import EXPIRING_TABLES, rows_at
+from .test_live import Live, stopped_at_its_first_request
+from .test_retention import EXPIRING_TABLES, removal_ended, rows_at
 
 
 @dataclass(frozen=True)
@@ -99,11 +107,11 @@ class Postgres:
         return Postgres(make_conninfo(self.dsn, options=f"-csearch_path={','.join(schemas)}"))
 
     @contextmanager
-    def another_user(self, name: str) -> Iterator[Postgres]:
+    def another_user(self) -> Iterator[Postgres]:
         """The same database as a user who is no superuser, gone again afterwards with
         whatever is theirs."""
+        name = f"navimow_{uuid.uuid4().hex[:12]}"  # users are the server's, not the database's
         with psycopg.connect(self.dsn, autocommit=True) as conn:
-            conn.execute(f"DROP ROLE IF EXISTS {name}")
             conn.execute(f"CREATE ROLE {name} LOGIN")
             conn.execute(f"GRANT ALL ON SCHEMA public TO {name}")
         try:
@@ -293,15 +301,16 @@ def test_timescaledb_is_given_the_rule_of_what_to_keep(timescale: Postgres) -> N
 
 def test_in_timescaledb_it_is_the_engine_that_removes_old_readings(timescale: Postgres) -> None:
     # Were the rule not given, or not applied, the readings would stay: the collector itself
-    # removes nothing from a hypertable.
-    old, kept = old_and_kept()
+    # removes nothing from a table TimescaleDB keeps. Shown with readings its rule keeps and
+    # the collector, asked to, would not: TimescaleDB applies its rule when it pleases.
+    week_old = datetime.now(UTC).replace(microsecond=0) - timedelta(days=7)
 
     with timescale.open(retention_days=30) as storage:
-        write_rows(storage, [*rows_at(old), *rows_at(kept)])
-        storage.remove_older_than(datetime.now(UTC) - timedelta(days=30), BATCH_ROWS)
+        write_rows(storage, rows_at(week_old))
+        storage.remove_older_than(datetime.now(UTC) - timedelta(days=1), BATCH_ROWS)
 
-        assert timescale.stored("trail_point") == [old, kept]
-        assert timescale.stored("collector_gap", "start_time") == [kept]  # no hypertable
+    assert timescale.stored("trail_point") == [week_old]
+    assert timescale.stored("collector_gap", "start_time") == []  # no table of TimescaleDB's
 
 
 @pytest.mark.parametrize("holding_rows", [True, False], ids=["holding rows", "empty"])
@@ -326,6 +335,27 @@ def test_tables_made_before_timescaledb_was_there_stay_as_they_are_and_still_exp
     assert timescale.hypertables() == set()
     assert "TimescaleDB" not in caplog.text  # left alone, not tried and refused
     assert timescale.expiring() == dict.fromkeys(EXPIRING_TABLES, [kept])
+
+
+def test_a_table_that_was_there_and_is_migrated_further_stays_as_it_is(
+    timescale: Postgres, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A database from before the Trail's table had its Job and Zone: the migration that adds
+    # them changes the table, and does not make it.
+    with psycopg.connect(timescale.dsn, autocommit=True) as conn:
+        conn.execute("DROP EXTENSION timescaledb")
+    with timescale.open():
+        pass
+    with psycopg.connect(timescale.dsn, autocommit=True) as conn:
+        conn.execute("ALTER TABLE trail_point DROP COLUMN job_id, DROP COLUMN zone")
+        conn.execute("DELETE FROM schema_version WHERE version = 3")
+        conn.execute("CREATE EXTENSION timescaledb")
+
+    with timescale.open(retention_days=30) as storage:
+        assert storage.write_trail([point(datetime.now(UTC), 1.0, "job")]) == 1
+
+    assert timescale.hypertables() == set()
+    assert "TimescaleDB" not in caplog.text
 
 
 def test_a_table_its_owner_makes_a_hypertable_of_is_given_the_rule_like_any(
@@ -374,7 +404,13 @@ def test_timescaledb_installed_out_of_the_way_is_used_all_the_same(timescale: Po
 def test_collectors_starting_at_once_on_an_empty_database_all_start(
     backend: Postgres, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # Each would make the tables, and one be told they are there: they take their turn.
+    # Each would make the tables, and one be told they are there: they take their turn,
+    # and see what the one before did, even where a transaction reads as of its start.
+    with psycopg.connect(backend.dsn, autocommit=True) as conn:
+        conn.execute(
+            f'ALTER DATABASE "{conn.info.dbname}"'
+            " SET default_transaction_isolation = 'repeatable read'"
+        )
     with ThreadPoolExecutor(max_workers=8) as collectors:
         opened = [collectors.submit(lambda: backend.open().close()) for _ in range(8)]
         for each in opened:
@@ -408,7 +444,7 @@ def test_where_timescaledb_takes_no_rule_the_collector_removes_old_rows_itself(
     with psycopg.connect(timescale.dsn, autocommit=True) as conn:
         conn.execute("REVOKE EXECUTE ON FUNCTION add_retention_policy FROM PUBLIC")
 
-    with timescale.another_user("navimow_no_policies") as limited:
+    with timescale.another_user() as limited:
         with limited.open(retention_days=30) as storage:
             write_rows(storage, [*rows_at(old), *rows_at(kept)])
             limited.a_day_passes(storage, keep_days=30)
@@ -432,7 +468,7 @@ def test_where_timescaledb_makes_no_hypertable_the_collector_starts_all_the_same
         for (maker,) in makers:
             conn.execute(f"REVOKE EXECUTE ON FUNCTION {maker} FROM PUBLIC")
 
-    with timescale.another_user("navimow_no_hypertables") as limited:
+    with timescale.another_user() as limited:
         with limited.open(retention_days=30) as storage:
             write_rows(storage, [*rows_at(old), *rows_at(kept)])
             limited.a_day_passes(storage, keep_days=30)
@@ -450,7 +486,7 @@ def test_where_timescaledbs_policies_cannot_be_read_old_rows_are_removed_all_the
     with psycopg.connect(timescale.dsn, autocommit=True) as conn:
         conn.execute("REVOKE ALL ON SCHEMA timescaledb_information FROM PUBLIC")
 
-    with timescale.another_user("navimow_no_view") as limited:
+    with timescale.another_user() as limited:
         with limited.open(retention_days=30) as storage:
             write_rows(storage, [*rows_at(old), *rows_at(kept)])
             storage.remove_older_than(datetime.now(UTC) - timedelta(days=30), BATCH_ROWS)
@@ -626,6 +662,76 @@ def test_timescaledb_is_told_of_the_collectors_tables_wherever_it_finds_them(
     assert timescale.stored("collector_gap", "start_time") == [kept]  # and the collector's
 
 
+def test_tables_made_beside_others_of_their_names_are_made_hypertables_all_the_same(
+    timescale: Postgres,
+) -> None:
+    # A connection that makes its tables in a schema of its own, and can see in another
+    # the tables an earlier collector made: these are new, whatever is in sight.
+    with timescale.open(retention_days=7), psycopg.connect(timescale.dsn) as conn:
+        conn.execute("CREATE SCHEMA mine")
+
+    with timescale.looking_in("mine", "public").open(retention_days=30):
+        pass
+
+    assert timescale.hypertables("mine") == READINGS
+    in_mine = dict(timescale.policies("mine").values())
+    assert in_mine == dict.fromkeys(READINGS, timedelta(days=30))
+    assert dict(timescale.policies().values()) == dict.fromkeys(READINGS, timedelta(days=7))
+
+
+def test_a_table_that_went_missing_is_no_table_to_make_a_hypertable_of(
+    timescale: Postgres, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Dropped by hand, its migration long applied: not the collector's to make again, and
+    # nothing for TimescaleDB to be asked about.
+    with timescale.open(), psycopg.connect(timescale.dsn, autocommit=True) as conn:
+        conn.execute("DROP TABLE mower_state")
+
+    with pytest.raises(SchemaError):
+        timescale.open(migrate=False)
+    with timescale.open(retention_days=30):
+        pass
+
+    assert "TimescaleDB" not in caplog.text
+
+
+def test_a_collector_kept_waiting_for_its_turn_gives_up_whatever_the_owner_set(
+    backend: Postgres,
+) -> None:
+    # A statement may take as long as the owner says. Waiting for another collector may
+    # not: a start that hangs says nothing of why.
+    with backend.open():
+        pass
+    patient = Postgres(make_conninfo(backend.dsn, options="-cstatement_timeout=0"))
+    # The one holding its turn lets go before the wait for the other is given up on here,
+    # so that a collector which would wait for ever fails this test and does not hang it.
+    with ThreadPoolExecutor() as waiting, psycopg.connect(backend.dsn) as holding:
+        holding.execute("SELECT pg_advisory_xact_lock(hashtext('navimow_collector.schema'))")
+        opening = waiting.submit(lambda: patient.open().close())
+        with pytest.raises(StorageError):
+            opening.result(timeout=40)
+
+    with patient.open():
+        pass
+
+
+def test_the_collect_command_gives_timescaledb_the_owners_rule(
+    timescale: Postgres, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    live = Live(timescale.dsn, tmp_path)
+    config = tmp_path / "collector.toml"
+    config.write_text(f'[storage]\ndsn = "{timescale.dsn}"\nretention_days = 30\n')
+    monkeypatch.setenv("NAVIMOW_AUTH_STATE_FILE", str(live.store.path))
+    monkeypatch.setenv("NAVIMOW_COLLECTOR_STATE_DIR", str(live.state))
+    monkeypatch.setenv("NAVIMOW_HEALTH_LISTEN", "")
+    session = stopped_at_its_first_request(live)
+
+    assert main(["--config", str(config), "collect"], session_factory=session) == 0
+
+    removal_ended()
+    assert timescale.rules() == dict.fromkeys(READINGS, ["30 days"])
+
+
 def test_hypertables_that_are_not_the_collectors_do_not_come_between_it_and_timescaledb(
     timescale: Postgres, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -648,7 +754,7 @@ def test_hypertables_that_are_not_the_collectors_do_not_come_between_it_and_time
             "SELECT add_retention_policy('counts', drop_after => BIGINT '1000000000000000000')"
         )
 
-    with timescale.another_user("navimow_among_others") as among_others:
+    with timescale.another_user() as among_others:
         with among_others.open(retention_days=30) as storage:
             assert timescale.rules() == {"counts": ["1000000000000000000"]} | dict.fromkeys(
                 READINGS, ["30 days"]

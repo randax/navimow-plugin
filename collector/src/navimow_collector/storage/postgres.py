@@ -1,7 +1,8 @@
 """PostgreSQL storage: the reference backend for the schema in docs/adr/0002-data-schema.md.
 
-TimescaleDB is this same adapter: where its extension is installed, the readings are held
-in hypertables and what the owner keeps is a retention policy of the engine's.
+TimescaleDB is this same adapter: where its extension is installed, the tables of readings
+are made hypertables as they are made, and what the owner keeps is a retention policy of
+the engine's on every hypertable among them.
 """
 
 from __future__ import annotations
@@ -180,10 +181,26 @@ _POLICIES = f"""
 """
 # One collector at a time makes the schema, and gives TimescaleDB its rule: two starting
 # together would each make the tables, and one be refused them, or each make a policy for
-# the same table. And each must see what the one before it did, which a transaction that
-# reads as of its start would not.
-_AS_COMMITTED = "SET TRANSACTION ISOLATION LEVEL READ COMMITTED"
-_ONE_AT_A_TIME = "SELECT pg_advisory_xact_lock(hashtext('navimow_collector.schema'))"
+# the same table. Each must see what the one before it did, which a transaction that reads
+# as of its start would not. And none waits for its turn longer than a statement may take
+# by default, whatever the owner allows a statement: a start that hangs says nothing of why.
+_ONE_AT_A_TIME = (
+    "SET TRANSACTION ISOLATION LEVEL READ COMMITTED",
+    f"SET LOCAL lock_timeout = {STATEMENT_TIMEOUT_MS}",
+    "SELECT pg_advisory_xact_lock(hashtext('navimow_collector.schema'))",
+)
+# Which of some tables are there, as this connection finds them.
+_THERE = """
+    SELECT to_regclass(name)::oid FROM unnest(%s::text[]) AS name
+    WHERE to_regclass(name) IS NOT NULL
+"""
+# Which of them this transaction has made: not there before, and made by no other since.
+_MADE = """
+    SELECT name FROM unnest(%s::text[]) AS name
+    JOIN pg_class ON pg_class.oid = to_regclass(name)
+    WHERE pg_class.oid <> ALL (%s::oid[])
+        AND pg_class.xmin::text = (txid_current() %% 4294967296)::text
+"""
 # Every statement of a removal can go by the key, which begins with the mower: reading
 # millions of positions through to find what is old, on the small machine this shares with
 # its database, would take longer than a statement is given. What earlier removals took is
@@ -291,12 +308,10 @@ class PostgresStorage:
 
     def migrate(self) -> None:
         with _translated(), self._connection.transaction():
-            self._connection.execute(_AS_COMMITTED)
-            self._connection.execute(_ONE_AT_A_TIME)
-            there = (
-                "SELECT name FROM unnest(%s::text[]) AS name WHERE to_regclass(name) IS NOT NULL"
-            )
-            before = {row[0] for row in self._connection.execute(there, (list(READINGS),))}
+            for statement in _ONE_AT_A_TIME:
+                self._connection.execute(statement)
+            readings = list(READINGS)
+            before = [row[0] for row in self._connection.execute(_THERE, (readings,))]
             self._connection.execute(
                 "CREATE TABLE IF NOT EXISTS schema_version ("
                 "version integer PRIMARY KEY, applied_at timestamptz DEFAULT now())"
@@ -310,7 +325,8 @@ class PostgresStorage:
                     self._connection.execute(
                         "INSERT INTO schema_version (version) VALUES (%s)", (version,)
                     )
-            self._hold_in_hypertables(set(READINGS) - before)
+            made = self._connection.execute(_MADE, (readings, before)).fetchall()
+            self._hold_in_hypertables({row[0] for row in made})
 
     def _timescaledb(self) -> sql.Identifier | None:
         """The schema TimescaleDB's functions are in; None where it is not installed."""
@@ -361,8 +377,8 @@ class PostgresStorage:
             ).format(timescaledb)
             try:
                 with self._connection.transaction():
-                    self._connection.execute(_AS_COMMITTED)
-                    self._connection.execute(_ONE_AT_A_TIME)
+                    for statement in _ONE_AT_A_TIME:
+                        self._connection.execute(statement)
                     policies, held = self._policies(days), self._hypertables()
                     for table in held.intersection(READINGS):
                         made = policies.get(table, {})
