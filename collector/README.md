@@ -232,10 +232,11 @@ and TCP keep-alives notice a server that vanished from the network. These are
 defaults, for `collect`, `replay` and migrations alike: a `connect_timeout` or
 keep-alive setting in the DSN is used instead, and so is a `statement_timeout`
 set anywhere at all (the DSN's `options`, the role, the database or the server
-configuration). One wait is 5 seconds whatever is set: the wait for a lock
-while the collector makes or changes its tables, for another collector doing
-the same or for a query that holds one of them. A start that fails for it is
-tried again like any outage.
+configuration). One wait is 5 seconds at most, whatever longer is set: the
+wait for a lock while the collector makes or changes its tables, or tells
+TimescaleDB how long to keep rows, behind another collector doing the same or
+a query that holds one of the tables. A start that fails for it is tried again
+like any outage; TimescaleDB not told is logged, and told at the next start.
 
 The collector never waits on the database to do anything else. Rows are written
 one batch at a time on a thread of their own, so collection, token refresh,

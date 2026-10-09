@@ -26,9 +26,9 @@ from .base import RejectedError, SchemaError, StorageError
 # held up by a lock and a server that vanished from the network each fail within seconds,
 # which the live buffer treats as an outage. These are defaults: whatever the operator set
 # for the same thing is left alone, but for the wait for a lock while the schema is made
-# or TimescaleDB told its rule, which is this long whatever is set. A server that stays
-# connected and says nothing is beyond them all; live collection keeps its own deadline
-# for that.
+# or TimescaleDB told its rule, which is this long at most whatever longer is set. A
+# server that stays connected and says nothing is beyond them all; live collection keeps
+# its own deadline for that.
 _LOGGER = logging.getLogger(__name__)
 CONNECT_TIMEOUT_SECONDS = 5
 STATEMENT_TIMEOUT_MS = 5000
