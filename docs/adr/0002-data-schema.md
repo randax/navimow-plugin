@@ -16,8 +16,8 @@ kept for good. This resolves
 
 PostgreSQL is the reference. TimescaleDB is the same adapter and holds the same tables and
 columns, the three of readings (`trail_point`, `job_progress`, `mower_state`) as
-hypertables where its extension is installed. ClickHouse is to hold them too
-([#31](https://github.com/randax/navimow-plugin/issues/31)).
+hypertables where its extension is installed when the collector makes them. ClickHouse is
+to hold them too ([#31](https://github.com/randax/navimow-plugin/issues/31)).
 
 | Table | Key | Columns |
 |---|---|---|

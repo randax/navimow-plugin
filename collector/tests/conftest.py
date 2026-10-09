@@ -156,6 +156,25 @@ def config_file(tmp_path: Path, database: str) -> Path:
     return path
 
 
+BACKENDS = ("postgres", "timescaledb")
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    for backend in BACKENDS:
+        config.addinivalue_line("markers", f"{backend}: a conformance test that needs {backend}")
+
+
+def pytest_collection_modifyitems(items: list[pytest.Function]) -> None:
+    """Mark each conformance test with the backend it needs, by the fixtures it asks for.
+    CI gives each backend a job of its own, which picks its tests by this and not by what
+    they happen to be called."""
+    for item in items:
+        asked = getattr(getattr(item, "callspec", None), "params", {}).get("backend")
+        needed = "timescaledb" if "timescale" in item.fixturenames else asked
+        if needed in BACKENDS:
+            item.add_marker(needed)
+
+
 @pytest.fixture(autouse=True)
 def _isolated_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """No test may pick up the developer's own NAVIMOW_* settings."""

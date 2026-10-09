@@ -304,13 +304,16 @@ extension is installed in the database, the collector does two things more:
 
 - As it creates its tables, it makes hypertables of the readings:
   `trail_point`, `job_progress` and `mower_state`, by their `device_time`.
-  `collector_gap`, `job` and `mower` stay ordinary tables.
+  `collector_gap`, `job` and `mower` stay ordinary tables. Only a table it is
+  just creating is made one: see below for a database it made its tables in
+  before.
 - When `collect` starts, it gives TimescaleDB a retention policy for each
   hypertable if `storage.retention_days` is set, replaces it if the number has
   changed or the policy was set aside, and removes it if the setting is gone:
   a policy you made by hand on one of these tables is replaced or removed like
-  its own. Whatever else TimescaleDB does with them, compression for one, is
-  left alone. TimescaleDB then
+  its own. Only its age and whether it is set aside (`scheduled`) are looked
+  at: one whose schedule you changed some other way is left as it is. Whatever
+  else TimescaleDB does with these tables, compression for one, is left alone. TimescaleDB then
   removes old readings itself, a whole chunk at a time, so a reading can
   outlive the setting by a week or so. Old gaps are removed by the collector,
   as on PostgreSQL.
@@ -319,16 +322,17 @@ extension is installed in the database, the collector does two things more:
 older than a policy already there, TimescaleDB removes when it next applies it.
 
 Should TimescaleDB refuse either (it makes no policies under its Apache
-licence, and no hypertable of a table the collector's user does not own), the
-collector logs a warning and starts all the same: whatever table has no
+licence), the collector logs a warning and starts all the same: whatever table has no
 retention policy, it removes old rows from itself. So it does where it is not
 let read TimescaleDB's policies at all.
 
-Only a table with no rows is made a hypertable. A database that already holds
-Trails keeps its ordinary tables when the extension is installed later, for as
-long as they hold rows, and the collector goes on removing old rows from them
-itself. Making hypertables of them rewrites each under a lock, for as long as
-that takes, so it is yours to choose a moment for. With the collector stopped:
+A database the collector made its tables in before the extension was
+installed keeps them as ordinary tables, whether they hold rows yet or not,
+and the collector goes on removing old rows from them itself. It does not make
+hypertables of tables that are there: TimescaleDB rewrites a table that holds
+a Trail under a lock, for as long as that takes, and a reading written at that
+moment by a collector at work could be lost. So it is yours to do, with the
+collector stopped:
 
 ```sql
 SELECT create_hypertable('trail_point', 'device_time', migrate_data => true, create_default_indexes => false);

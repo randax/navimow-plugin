@@ -178,12 +178,12 @@ _POLICIES = f"""
     JOIN mine ON relname = hypertable_name AND nspname = hypertable_schema
     WHERE proc_name = 'policy_retention'
 """
-# One collector at a time tells TimescaleDB anything: two starting together would each make
-# a policy for the same table, and each wait for the other to let go of a table both are
-# making a hypertable of. Giving it its rule, each must also see what the one before it
-# did, which a transaction that reads as of its start would not.
-_ONE_AT_A_TIME = "SELECT pg_advisory_xact_lock(hashtext('navimow_collector.timescaledb'))"
+# One collector at a time makes the schema, and gives TimescaleDB its rule: two starting
+# together would each make the tables, and one be refused them, or each make a policy for
+# the same table. And each must see what the one before it did, which a transaction that
+# reads as of its start would not.
 _AS_COMMITTED = "SET TRANSACTION ISOLATION LEVEL READ COMMITTED"
+_ONE_AT_A_TIME = "SELECT pg_advisory_xact_lock(hashtext('navimow_collector.schema'))"
 # Every statement of a removal can go by the key, which begins with the mower: reading
 # millions of positions through to find what is old, on the small machine this shares with
 # its database, would take longer than a statement is given. What earlier removals took is
@@ -291,6 +291,12 @@ class PostgresStorage:
 
     def migrate(self) -> None:
         with _translated(), self._connection.transaction():
+            self._connection.execute(_AS_COMMITTED)
+            self._connection.execute(_ONE_AT_A_TIME)
+            there = (
+                "SELECT name FROM unnest(%s::text[]) AS name WHERE to_regclass(name) IS NOT NULL"
+            )
+            before = {row[0] for row in self._connection.execute(there, (list(READINGS),))}
             self._connection.execute(
                 "CREATE TABLE IF NOT EXISTS schema_version ("
                 "version integer PRIMARY KEY, applied_at timestamptz DEFAULT now())"
@@ -304,49 +310,37 @@ class PostgresStorage:
                     self._connection.execute(
                         "INSERT INTO schema_version (version) VALUES (%s)", (version,)
                     )
-            self._hold_in_hypertables()
+            self._hold_in_hypertables(set(READINGS) - before)
 
     def _timescaledb(self) -> sql.Identifier | None:
         """The schema TimescaleDB's functions are in; None where it is not installed."""
         found = self._connection.execute(_TIMESCALEDB).fetchone()
         return None if found is None else sql.Identifier(found[0])
 
-    def _hold_in_hypertables(self) -> None:
-        """Where TimescaleDB is installed, make hypertables of the readings.
+    def _hold_in_hypertables(self, made: set[str]) -> None:
+        """Where TimescaleDB is installed, make hypertables of the readings' tables this
+        migration has just made.
 
-        Only of a table with no rows. Making one of a table that holds a Trail rewrites it
-        under a lock for as long as that takes, which is the owner's to choose a moment for;
-        left as it is, its old rows are removed as PostgreSQL's are. And only if TimescaleDB
-        will: a table it refuses, as to a user who does not own it, stays as it is, and
-        costs the others nothing.
+        Of those alone. A table that was there may be written to by a collector at work,
+        and a row arriving as TimescaleDB took the table over would be lost to every
+        reader; one that holds a Trail would be rewritten under a lock besides. Either is
+        the owner's to choose a moment for, and left as it is, its old rows are removed as
+        PostgreSQL's are. And only if TimescaleDB will: refused, the tables stay as made.
         """
         timescaledb = self._timescaledb()
-        if timescaledb is None:
+        if timescaledb is None or not made:
             return
-        # The key already serves every question asked by time: no index besides. Another
-        # collector starting may have made the hypertable meanwhile.
-        hold = sql.SQL(
-            "SELECT {}.create_hypertable(%s, %s, create_default_indexes => false,"
-            " if_not_exists => true)"
-        ).format(timescaledb)
+        # The key already serves every question asked by time: no index besides.
+        hold = sql.SQL("SELECT {}.create_hypertable(%s, %s, create_default_indexes => false)")
         try:
             with self._connection.transaction():
-                self._connection.execute(_ONE_AT_A_TIME)
-                plain = set(READINGS) - self._hypertables()
+                for table in sorted(made):
+                    self._connection.execute(hold.format(timescaledb), (table, EXPIRING[table][0]))
         except psycopg.Error as error:
-            self._carry_on_without("TimescaleDB could not be asked for hypertables", error)
-            return
-        for table in sorted(plain):
-            try:
-                with self._connection.transaction():
-                    rows = self._connection.execute(f"SELECT FROM {table} LIMIT 1").fetchone()
-                    if rows is None:
-                        self._connection.execute(hold, (table, EXPIRING[table][0]))
-            except psycopg.Error as error:
-                self._carry_on_without(
-                    f"TimescaleDB made no hypertable of {table}, which stays the table it is",
-                    error,
-                )
+            self._carry_on_without(
+                "TimescaleDB made no hypertables of the readings, which stay the tables they are",
+                error,
+            )
 
     def keep_for(self, days: int | None) -> None:
         """Where TimescaleDB holds readings in hypertables, have it keep them for as long as

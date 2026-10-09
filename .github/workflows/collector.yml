@@ -93,7 +93,9 @@ jobs:
       - run: echo "$DSN_VARIABLE=postgresql://postgres@localhost:5432/postgres" >> "$GITHUB_ENV"
         env:
           DSN_VARIABLE: ${{ matrix.dsn_variable }}
-      - run: pytest collector/tests/test_conformance.py -k "$BACKEND" -rs
+      # By what each test needs, not by its name: one named without its backend would be
+      # run by no job at all.
+      - run: pytest collector/tests/test_conformance.py -m "$BACKEND" -rs
         env:
           BACKEND: ${{ matrix.backend }}
 
