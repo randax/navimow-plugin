@@ -422,7 +422,7 @@ def test_where_timescaledb_makes_no_hypertable_the_collector_starts_all_the_same
             limited.a_day_passes(storage, keep_days=30)
         hypertables, stored = timescale.hypertables(), timescale.expiring()
 
-    assert "TimescaleDB made no hypertables of the readings" in caplog.text
+    assert "TimescaleDB made no hypertable of trail_point" in caplog.text
     assert hypertables == set()
     assert stored == dict.fromkeys(EXPIRING_TABLES, [kept])
 
@@ -503,6 +503,124 @@ def test_a_rule_of_timescaledbs_that_is_not_the_owners_number_of_days_is_replace
         )
     with timescale.open():
         assert timescale.rules() == {}  # everything is kept, by whatever rule it was not
+
+
+def test_a_rule_of_timescaledbs_that_was_set_aside_is_put_back_to_work(
+    timescale: Postgres,
+) -> None:
+    # A policy that is there and does nothing: the collector leaves the table to it, so
+    # nobody would remove old rows.
+    def at_work() -> list[bool]:
+        with psycopg.connect(timescale.dsn) as conn:
+            asked = conn.execute(
+                "SELECT scheduled FROM timescaledb_information.jobs"
+                " WHERE proc_name = 'policy_retention'"
+            )
+            return [row[0] for row in asked]
+
+    with timescale.open(retention_days=30), psycopg.connect(timescale.dsn) as conn:
+        for policy in timescale.policies():
+            conn.execute("SELECT alter_job(%s, scheduled => false)", (policy,))
+    assert at_work() == [False, False, False]
+
+    with timescale.open(retention_days=30):
+        assert at_work() == [True, True, True]
+        assert timescale.rules() == dict.fromkeys(READINGS, ["30 days"])
+
+
+def test_what_else_timescaledb_does_with_the_collectors_tables_is_left_to_it(
+    timescale: Postgres,
+) -> None:
+    # A policy of the owner's that is not about keeping: the collector neither removes it
+    # with its own, nor takes it for one and leaves old rows to it.
+    def compressing() -> int:
+        with psycopg.connect(timescale.dsn) as conn:
+            jobs = "SELECT count(*) FROM timescaledb_information.jobs WHERE proc_name = %s"
+            found = conn.execute(jobs, ("policy_compression",)).fetchone()
+            return int(found[0]) if found else 0
+
+    old, kept = old_and_kept()
+    with timescale.open(), psycopg.connect(timescale.dsn, autocommit=True) as conn:
+        conn.execute("ALTER TABLE trail_point SET (timescaledb.compress)")
+        conn.execute("SELECT add_compression_policy('trail_point', INTERVAL '90 days')")
+
+    for days in (30, 60, None):
+        with timescale.open(retention_days=days):
+            assert compressing() == 1
+    with timescale.open() as storage:
+        write_rows(storage, [*rows_at(old), *rows_at(kept)])
+        storage.remove_older_than(datetime.now(UTC) - timedelta(days=30), BATCH_ROWS)
+
+    assert timescale.stored("trail_point") == [kept]
+
+
+def test_old_gaps_are_the_collectors_to_remove_whatever_timescaledb_holds_them_in(
+    timescale: Postgres,
+) -> None:
+    # Its rule is for the readings. A gap is as old as its end, which is no time TimescaleDB
+    # keeps a table by.
+    old, kept = old_and_kept()
+    with timescale.open(), psycopg.connect(timescale.dsn, autocommit=True) as conn:
+        conn.execute("SELECT create_hypertable('collector_gap', 'start_time')")
+        conn.execute("SELECT add_retention_policy('collector_gap', INTERVAL '400 days')")
+
+    with timescale.open(retention_days=30) as storage:
+        write_rows(storage, [*rows_at(old), *rows_at(kept)])
+        timescale.a_day_passes(storage, keep_days=30)
+
+    assert timescale.expiring() == dict.fromkeys(EXPIRING_TABLES, [kept])
+
+
+def test_a_table_timescaledb_makes_no_hypertable_of_does_not_cost_the_others(
+    timescale: Postgres, caplog: pytest.LogCaptureFixture
+) -> None:
+    with psycopg.connect(timescale.dsn, autocommit=True) as conn:
+        conn.execute("DROP EXTENSION timescaledb")
+    with timescale.open():
+        pass
+    with psycopg.connect(timescale.dsn, autocommit=True) as conn:
+        # The Trail's table as an owner might have made it: in parts of PostgreSQL's own.
+        conn.execute("DROP TABLE trail_point")
+        conn.execute(
+            "CREATE TABLE trail_point (mower_id text, device_time timestamptz,"
+            " received_time timestamptz, x float8, y float8, theta float8, vehicle_state integer,"
+            " job_id text, zone integer, PRIMARY KEY (mower_id, device_time))"
+            " PARTITION BY RANGE (device_time)"
+        )
+        conn.execute("CREATE EXTENSION timescaledb")
+
+    with timescale.open(retention_days=30):
+        pass
+
+    assert timescale.hypertables() == READINGS - {"trail_point"}
+    assert "TimescaleDB made no hypertable of trail_point" in caplog.text
+    assert sorted(table for table, _ in timescale.policies().values()) == [
+        "job_progress",
+        "mower_state",
+    ]
+
+
+def test_two_collectors_making_the_hypertables_at_once_do_not_trip_over_each_other(
+    timescale: Postgres, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Each looks whether a table is empty and then asks TimescaleDB for all of it: two
+    # doing so together would each wait for the other to look away.
+    with psycopg.connect(timescale.dsn, autocommit=True) as conn:
+        conn.execute("DROP EXTENSION timescaledb")
+    with timescale.open():
+        pass
+    with psycopg.connect(timescale.dsn, autocommit=True) as conn:
+        conn.execute("CREATE EXTENSION timescaledb")
+
+    with ThreadPoolExecutor(max_workers=8) as collectors:
+        opened = [
+            collectors.submit(lambda: timescale.open(retention_days=30).close()) for _ in range(8)
+        ]
+        for each in opened:
+            each.result()
+
+    assert timescale.hypertables() == READINGS
+    assert "TimescaleDB" not in caplog.text
 
 
 def test_timescaledb_set_to_write_intervals_another_way_is_opened_all_the_same(

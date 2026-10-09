@@ -306,9 +306,11 @@ extension is installed in the database, the collector does two things more:
   `trail_point`, `job_progress` and `mower_state`, by their `device_time`.
   `collector_gap`, `job` and `mower` stay ordinary tables.
 - When `collect` starts, it gives TimescaleDB a retention policy for each
-  hypertable if `storage.retention_days` is set, changes it if the number has
-  changed, and removes it if the setting is gone: a policy you made by hand on
-  one of these tables is replaced or removed like its own. TimescaleDB then
+  hypertable if `storage.retention_days` is set, replaces it if the number has
+  changed or the policy was set aside, and removes it if the setting is gone:
+  a policy you made by hand on one of these tables is replaced or removed like
+  its own. Whatever else TimescaleDB does with them, compression for one, is
+  left alone. TimescaleDB then
   removes old readings itself, a whole chunk at a time, so a reading can
   outlive the setting by a week or so. Old gaps are removed by the collector,
   as on PostgreSQL.

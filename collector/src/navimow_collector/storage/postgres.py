@@ -165,26 +165,25 @@ _HYPERTABLES = f"""
     SELECT hypertable_name::text FROM timescaledb_information.hypertables
     JOIN mine ON relname = hypertable_name AND nspname = hypertable_schema
 """
-# The retention policies on them, each with whether it keeps rows for just so many days.
-# TimescaleDB is asked, and the answer is not read here: a month is not 30 days to it, a
-# policy may go by when a chunk was made and not by age, and how an interval is written
-# out is the server's to set.
+# The retention policies on them, each with whether it is at work keeping rows for just so
+# many days. TimescaleDB is asked, and the answer is not read here: a month is not 30 days
+# to it, a policy may go by when a chunk was made and not by age, and how an interval is
+# written out is the server's to set. One set aside removes nothing, whatever it says.
 _POLICIES = f"""
     WITH mine AS ({_MINE})
     SELECT hypertable_name::text, job_id,
-        (config->>'drop_after')::interval::text
+        scheduled AND (config->>'drop_after')::interval::text
             IS NOT DISTINCT FROM make_interval(days => %(days)s)::text
     FROM timescaledb_information.jobs
     JOIN mine ON relname = hypertable_name AND nspname = hypertable_schema
     WHERE proc_name = 'policy_retention'
 """
-# One collector at a time gives TimescaleDB its rule: two starting together would each
-# make a policy for the same table. And each must see what the one before it did, which a
-# transaction that reads as of its start would not.
-_ONE_AT_A_TIME = (
-    "SET TRANSACTION ISOLATION LEVEL READ COMMITTED",
-    "SELECT pg_advisory_xact_lock(hashtext('navimow_collector.keep_for'))",
-)
+# One collector at a time tells TimescaleDB anything: two starting together would each make
+# a policy for the same table, and each wait for the other to let go of a table both are
+# making a hypertable of. Giving it its rule, each must also see what the one before it
+# did, which a transaction that reads as of its start would not.
+_ONE_AT_A_TIME = "SELECT pg_advisory_xact_lock(hashtext('navimow_collector.timescaledb'))"
+_AS_COMMITTED = "SET TRANSACTION ISOLATION LEVEL READ COMMITTED"
 # Every statement of a removal can go by the key, which begins with the mower: reading
 # millions of positions through to find what is old, on the small machine this shares with
 # its database, would take longer than a statement is given. What earlier removals took is
@@ -318,7 +317,8 @@ class PostgresStorage:
         Only of a table with no rows. Making one of a table that holds a Trail rewrites it
         under a lock for as long as that takes, which is the owner's to choose a moment for;
         left as it is, its old rows are removed as PostgreSQL's are. And only if TimescaleDB
-        will: a table it refuses, as to a user who does not own it, stays as it is.
+        will: a table it refuses, as to a user who does not own it, stays as it is, and
+        costs the others nothing.
         """
         timescaledb = self._timescaledb()
         if timescaledb is None:
@@ -331,15 +331,22 @@ class PostgresStorage:
         ).format(timescaledb)
         try:
             with self._connection.transaction():
-                for table in set(READINGS) - self._hypertables():
+                self._connection.execute(_ONE_AT_A_TIME)
+                plain = set(READINGS) - self._hypertables()
+        except psycopg.Error as error:
+            self._carry_on_without("TimescaleDB could not be asked for hypertables", error)
+            return
+        for table in sorted(plain):
+            try:
+                with self._connection.transaction():
                     rows = self._connection.execute(f"SELECT FROM {table} LIMIT 1").fetchone()
                     if rows is None:
                         self._connection.execute(hold, (table, EXPIRING[table][0]))
-        except psycopg.Error as error:
-            self._carry_on_without(
-                "TimescaleDB made no hypertables of the readings, which stay the tables they are",
-                error,
-            )
+            except psycopg.Error as error:
+                self._carry_on_without(
+                    f"TimescaleDB made no hypertable of {table}, which stays the table it is",
+                    error,
+                )
 
     def keep_for(self, days: int | None) -> None:
         """Where TimescaleDB holds readings in hypertables, have it keep them for as long as
@@ -360,8 +367,8 @@ class PostgresStorage:
             ).format(timescaledb)
             try:
                 with self._connection.transaction():
-                    for statement in _ONE_AT_A_TIME:
-                        self._connection.execute(statement)
+                    self._connection.execute(_AS_COMMITTED)
+                    self._connection.execute(_ONE_AT_A_TIME)
                     policies, held = self._policies(days), self._hypertables()
                     for table in held.intersection(READINGS):
                         made = policies.get(table, {})
@@ -393,12 +400,13 @@ class PostgresStorage:
         return {row[0] for row in asked}
 
     def _policies(self, days: int | None = None) -> dict[str, dict[int, bool]]:
-        """The collector's tables that TimescaleDB keeps to a retention policy: for each,
-        its policies by their job, and whether each keeps rows for just so many days.
-        No tables where TimescaleDB is not installed."""
+        """The readings' tables that TimescaleDB keeps to a retention policy: for each, its
+        policies by their job, and whether each is at work keeping rows for just so many
+        days. No tables where TimescaleDB is not installed. Of gaps it is not asked: they
+        are the collector's to remove, by their end."""
         policies: dict[str, dict[int, bool]] = {}
         if self._timescaledb() is not None:
-            asked = {"tables": list(EXPIRING), "days": days}
+            asked = {"tables": list(READINGS), "days": days}
             for table, job, as_wanted in self._connection.execute(_POLICIES, asked):
                 policies.setdefault(table, {})[job] = as_wanted
         return policies
