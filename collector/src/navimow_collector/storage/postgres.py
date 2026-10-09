@@ -25,8 +25,10 @@ from .base import RejectedError, SchemaError, StorageError
 # A database call should not wait for long: by default a connection attempt, a statement
 # held up by a lock and a server that vanished from the network each fail within seconds,
 # which the live buffer treats as an outage. These are defaults: whatever the operator set
-# for the same thing is left alone. A server that stays connected and says nothing is
-# beyond them all; live collection keeps its own deadline for that.
+# for the same thing is left alone, but for the wait for a lock while the schema is made
+# or TimescaleDB told its rule, which is this long whatever is set. A server that stays
+# connected and says nothing is beyond them all; live collection keeps its own deadline
+# for that.
 _LOGGER = logging.getLogger(__name__)
 CONNECT_TIMEOUT_SECONDS = 5
 STATEMENT_TIMEOUT_MS = 5000
@@ -199,7 +201,7 @@ _MADE = """
     SELECT name FROM unnest(%s::text[]) AS name
     JOIN pg_class ON pg_class.oid = to_regclass(name)
     WHERE pg_class.oid <> ALL (%s::oid[])
-        AND pg_class.xmin::text = (txid_current() %% 4294967296)::text
+        AND pg_class.xmin::text = (txid_current_if_assigned() %% 4294967296)::text
 """
 # Every statement of a removal can go by the key, which begins with the mower: reading
 # millions of positions through to find what is old, on the small machine this shares with

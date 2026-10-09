@@ -358,6 +358,47 @@ def test_a_table_that_was_there_and_is_migrated_further_stays_as_it_is(
     assert "TimescaleDB" not in caplog.text
 
 
+def test_of_a_database_made_in_part_only_the_tables_now_made_are_hypertables(
+    timescale: Postgres, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The Trail's table from before TimescaleDB, and two tables the collector has yet to make.
+    with psycopg.connect(timescale.dsn, autocommit=True) as conn:
+        conn.execute("DROP EXTENSION timescaledb")
+    with timescale.open():
+        pass
+    with psycopg.connect(timescale.dsn, autocommit=True) as conn:
+        conn.execute("DROP TABLE job_progress, mower_state")
+        conn.execute("DELETE FROM schema_version WHERE version IN (5, 6)")
+        conn.execute("CREATE EXTENSION timescaledb")
+
+    with timescale.open(retention_days=30):
+        pass
+
+    assert timescale.hypertables() == READINGS - {"trail_point"}
+    assert "TimescaleDB" not in caplog.text
+
+
+def test_ordinary_tables_are_not_taken_for_hypertables_of_their_names_elsewhere(
+    timescale: Postgres, caplog: pytest.LogCaptureFixture
+) -> None:
+    with psycopg.connect(timescale.dsn, autocommit=True) as conn:
+        conn.execute("DROP EXTENSION timescaledb")
+    with timescale.open():  # ordinary tables, from before TimescaleDB
+        pass
+    with psycopg.connect(timescale.dsn, autocommit=True) as conn:
+        conn.execute("CREATE EXTENSION timescaledb")
+        conn.execute("CREATE SCHEMA other")
+    with timescale.looking_in("other").open(retention_days=7):  # another's, as hypertables
+        pass
+
+    with timescale.open(retention_days=30):
+        pass
+
+    assert timescale.policies() == {}
+    assert dict(timescale.policies("other").values()) == dict.fromkeys(READINGS, timedelta(days=7))
+    assert "TimescaleDB" not in caplog.text
+
+
 def test_a_table_its_owner_makes_a_hypertable_of_is_given_the_rule_like_any(
     timescale: Postgres,
 ) -> None:
