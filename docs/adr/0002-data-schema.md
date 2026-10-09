@@ -16,8 +16,10 @@ kept for good. This resolves
 
 PostgreSQL is the reference. TimescaleDB is the same adapter and holds the same tables and
 columns, the three of readings (`trail_point`, `job_progress`, `mower_state`) as
-hypertables where its extension is installed when the collector makes them. ClickHouse is
-to hold them too ([#31](https://github.com/randax/navimow-plugin/issues/31)).
+hypertables where its extension is installed when the collector makes them. ClickHouse
+holds them too, each a `ReplacingMergeTree` by the key in the table below: it holds no row
+to a key itself, so the collector writes only what is not stored yet, and a consumer reads
+with `FINAL`.
 
 | Table | Key | Columns |
 |---|---|---|
@@ -73,9 +75,9 @@ PostgreSQL the collector removes the rows itself, once a day, taking a reading t
 old as its `device_time` and a gap as old as its `end_time`. TimescaleDB is given the rule
 to apply to its hypertables, as a retention policy that live collection keeps to the
 setting, and removes old readings a chunk at a time; gaps, which are no hypertable, the
-collector still removes.
-ClickHouse is to be given the rule as well. InfluxDB keeps retention on the bucket, which
-the owner creates, so there the setting is to be refused. Those two are not built yet
+collector still removes. ClickHouse is given the rule as a TTL on all four tables, and
+removes old rows as it merges. InfluxDB keeps retention on the bucket, which the owner
+creates, so there the setting is to be refused; it is not built yet
 ([#31](https://github.com/randax/navimow-plugin/issues/31)).
 
 ## The InfluxDB shape
@@ -119,7 +121,8 @@ named as the tables and fields as the columns.
 - From here a change to the layout only adds tables and columns. A consumer reading an
   older database finds fewer of them.
 - `job.zones` is an array, which PostgreSQL and ClickHouse have and InfluxDB does not:
-  there it is text, and a query that wants one Zone of the list has to parse it.
+  there it is text, and a query that wants one Zone of the list has to parse it. In
+  ClickHouse, where no array can be unset, it is empty until the Zones are known.
 - A Job has no `zones` for its first minutes, and one given up within them never has. The
   mower lists its Zones as it leaves the dock, but a third of a second before the state
   channel says it has left, so that list falls outside the Job; the next came 225 seconds

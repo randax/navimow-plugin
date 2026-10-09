@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Protocol, Self
 
 from ..records import Gap, Job, Mower, MowerState, Progress, Row, TrailPoint
@@ -50,6 +50,19 @@ class Writer(Protocol):
         """Store mowers; one already stored is replaced by a later description that differs.
         Return how many were new or replaced."""
         ...
+
+
+def lifetime(days: int | None) -> timedelta | None:
+    """How long rows are kept, of a number of days; None if for ever, which is also to keep
+    them for longer than dates go back."""
+    if days is None:
+        return None
+    try:
+        keep = timedelta(days=days)
+        _ = datetime.now(UTC) - keep  # fails where that is before dates begin
+    except OverflowError:
+        return None
+    return keep
 
 
 def write_rows(writer: Writer, rows: Sequence[Row]) -> dict[type[Row], int]:

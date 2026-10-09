@@ -8,21 +8,24 @@ dashboard would, in the backend's own query language.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any, Protocol
 
+import clickhouse_connect
 import psycopg
 import pytest
 from psycopg.conninfo import make_conninfo
 
 from navimow_collector.cli import main
 from navimow_collector.config import Secret, StorageConfig
-from navimow_collector.records import Job, Mower, TrailPoint
+from navimow_collector.records import Gap, GapReason, Job, Mower, TrailPoint
 from navimow_collector.storage import (
+    RejectedError,
     SchemaError,
     Storage,
     StorageError,
@@ -31,9 +34,24 @@ from navimow_collector.storage import (
 )
 from navimow_collector.storage.retention import BATCH_ROWS
 
-from .conftest import FIXTURE, fresh_database
+from .conftest import FIXTURE, fresh_clickhouse, fresh_database
 from .test_live import Live, stopped_at_its_first_request
 from .test_retention import EXPIRING_TABLES, removal_ended, rows_at
+
+
+class Database(Protocol):
+    """A backend as the suite needs it: opened as `collect` opens it, and read as its
+    dashboards read it."""
+
+    def open(self, **settings: object) -> Storage: ...
+
+    def a_day_passes(self, storage: Storage, keep_days: int) -> None: ...
+
+    def stored(self, table: str, time: str = "device_time") -> list[datetime]: ...
+
+    def expiring(self) -> dict[str, list[datetime]]: ...
+
+    def trail(self, mower_id: str, job_id: str) -> list[tuple[datetime, float]]: ...
 
 
 @dataclass(frozen=True)
@@ -135,15 +153,95 @@ class Postgres:
             ).fetchall()
 
 
-@pytest.fixture(params=["postgres", "timescaledb"])
-def backend(request: pytest.FixtureRequest) -> Iterator[Postgres]:
+@dataclass(frozen=True)
+class ClickHouse:
+    """A ClickHouse database. A row told of again is another row until ClickHouse merges
+    the two, so it is read as its dashboards must read it: `FINAL`."""
+
+    url: str
+
+    @property
+    def config(self) -> StorageConfig:
+        return StorageConfig(backend="clickhouse", dsn=Secret(self.url))
+
+    def open(self, **settings: object) -> Storage:
+        """The storage as `collect` opens it, with these settings of the owner's."""
+        return open_for_collection(replace(self.config, **settings))  # type: ignore[arg-type]
+
+    def ask(self, question: str, **values: object) -> list[Sequence[Any]]:
+        client = clickhouse_connect.get_client(dsn=self.url)
+        try:
+            return list(client.query(question, parameters=values).result_rows)
+        finally:
+            client.close()
+
+    def a_day_passes(self, storage: Storage, keep_days: int) -> None:
+        """Have what is older than the owner keeps removed now: by the collector, of which
+        ClickHouse asks nothing, and by ClickHouse as it next merges each table."""
+        storage.remove_older_than(datetime.now(UTC) - timedelta(days=keep_days), BATCH_ROWS)
+        for table in EXPIRING_TABLES:
+            self.ask(f"OPTIMIZE TABLE {table} FINAL")
+
+    def rules(self) -> dict[str, str]:
+        """The tables ClickHouse removes old rows of itself, and each one's rule."""
+        made = self.ask("SELECT name, create_table_query FROM system.tables" + HERE)
+        return {
+            table: query.split(" TTL ")[1].split(" SETTINGS ")[0]
+            for table, query in made
+            if " TTL " in query
+        }
+
+    def stored(self, table: str, time: str = "device_time") -> list[datetime]:
+        """When each row of a table is from, oldest first."""
+        found = self.ask(f"SELECT {time} FROM {table} FINAL ORDER BY {time}")
+        return [row[0].replace(tzinfo=UTC) for row in found]
+
+    def expiring(self) -> dict[str, list[datetime]]:
+        """When the rows of each table that expires are from."""
+        return {table: self.stored(table, time) for table, time in EXPIRING_TABLES.items()}
+
+    def trail(self, mower_id: str, job_id: str) -> list[tuple[datetime, float]]:
+        """One Job's Trail as a dashboard asks for it: when, and how far along x."""
+        found = self.ask(
+            "SELECT device_time, x FROM trail_point FINAL"
+            " WHERE mower_id = {mower:String} AND job_id = {job:String} ORDER BY device_time",
+            mower=mower_id,
+            job=job_id,
+        )
+        return [(when.replace(tzinfo=UTC), x) for when, x in found]
+
+
+@pytest.fixture(params=["postgres", "timescaledb", "clickhouse"])
+def backend(request: pytest.FixtureRequest) -> Iterator[Database]:
     """Each backend in turn, empty."""
+    if request.param == "clickhouse":
+        with fresh_clickhouse(request.getfixturevalue("clickhouse_server")) as url:
+            yield ClickHouse(url)
+    else:
+        yield from _postgresql(request)
+
+
+@pytest.fixture(params=["postgres", "timescaledb"])
+def postgresql(request: pytest.FixtureRequest) -> Iterator[Postgres]:
+    """PostgreSQL without TimescaleDB and with it, each in turn, empty: for what is asked
+    of the one adapter that serves both."""
+    yield from _postgresql(request)
+
+
+def _postgresql(request: pytest.FixtureRequest) -> Iterator[Postgres]:
     servers = {"postgres": "postgres_server", "timescaledb": "timescale_server"}
     server: str = request.getfixturevalue(servers[request.param])
     with fresh_database(server) as dsn:
         if request.param == "timescaledb":
             with_timescaledb(dsn)
         yield Postgres(dsn)
+
+
+@pytest.fixture
+def clickhouse(clickhouse_server: str) -> Iterator[ClickHouse]:
+    """An empty ClickHouse database, for what only ClickHouse does."""
+    with fresh_clickhouse(clickhouse_server) as url:
+        yield ClickHouse(url)
 
 
 @pytest.fixture
@@ -161,6 +259,7 @@ def with_timescaledb(dsn: str) -> None:
 
 
 READINGS = {"trail_point", "job_progress", "mower_state"}
+HERE = " WHERE database = currentDatabase()"
 
 
 def old_and_kept() -> tuple[datetime, datetime]:
@@ -169,7 +268,7 @@ def old_and_kept() -> tuple[datetime, datetime]:
     return now - timedelta(days=40), now - timedelta(days=1)
 
 
-def test_an_empty_database_is_given_its_schema(backend: Postgres) -> None:
+def test_an_empty_database_is_given_its_schema(backend: Database) -> None:
     with pytest.raises(SchemaError):
         backend.open(migrate=False)  # nothing is there, and nothing was put there
 
@@ -188,7 +287,7 @@ def point(
 
 
 def test_a_jobs_trail_reads_back_in_order_however_and_whenever_it_was_written(
-    backend: Postgres,
+    backend: Database,
 ) -> None:
     # A Job of years ago, as a capture replayed brings it, and one of today; each written
     # latest point first, the two mixed, and a late point of the old Job on its own.
@@ -211,7 +310,7 @@ def test_a_jobs_trail_reads_back_in_order_however_and_whenever_it_was_written(
     ]
 
 
-def test_a_batch_of_rows_is_stored_whole_and_once(backend: Postgres) -> None:
+def test_a_batch_of_rows_is_stored_whole_and_once(backend: Database) -> None:
     start = datetime(2026, 9, 30, 12, tzinfo=UTC)
     batch = [point(start + timedelta(seconds=2 * i), float(i), "job") for i in range(1200)]
 
@@ -222,7 +321,7 @@ def test_a_batch_of_rows_is_stored_whole_and_once(backend: Postgres) -> None:
     assert len(backend.trail("DEVICE_1", "job")) == 1200
 
 
-def test_a_job_reads_back_as_it_was_written(backend: Postgres) -> None:
+def test_a_job_reads_back_as_it_was_written(backend: Database) -> None:
     # A collector starting up carries on from each mower's latest Job as the database has it.
     start = datetime(2026, 9, 30, 12, 0, 0, 250000, tzinfo=UTC)
     under_way = Job("DEVICE_1", "1790769600", start, start + timedelta(minutes=5))
@@ -253,7 +352,46 @@ def test_a_job_reads_back_as_it_was_written(backend: Postgres) -> None:
         assert sorted(storage.latest_jobs(), key=lambda job: job.mower_id) == [further, finished]
 
 
-def test_rows_older_than_the_owner_keeps_are_removed_and_jobs_are_not(backend: Postgres) -> None:
+def test_an_older_telling_of_a_job_does_not_replace_a_later_one(backend: Database) -> None:
+    start = datetime(2026, 9, 30, 12, tzinfo=UTC)
+    earlier = Job("DEVICE_1", "1790769600", start, start + timedelta(minutes=5))
+    later = replace(earlier, updated_time=start + timedelta(minutes=10), mowing_percentage=3)
+
+    with backend.open() as storage:
+        assert storage.write_jobs([later]) == 1
+        assert storage.write_jobs([earlier]) == 0  # as a buffer written out of order brings it
+
+    with backend.open() as storage:
+        assert list(storage.latest_jobs()) == [later]
+
+
+def test_a_gap_recorded_again_is_made_longer_and_never_shorter(backend: Database) -> None:
+    began = datetime(2026, 9, 30, 12, tzinfo=UTC)
+    short = Gap("DEVICE_1", began, began + timedelta(minutes=4), GapReason.RECONNECT)
+    long = Gap("DEVICE_1", began, began + timedelta(minutes=12), GapReason.RESTART)
+
+    with backend.open() as storage:
+        assert [storage.write_gaps([gap]) for gap in (short, long, short)] == [1, 1, 0]
+
+    assert backend.stored("collector_gap", "end_time") == [began + timedelta(minutes=12)]
+
+
+def test_a_mower_is_described_anew_only_when_it_is_described_differently(
+    backend: Database,
+) -> None:
+    first = datetime(2026, 9, 30, 12, tzinfo=UTC)
+    mower = Mower("DEVICE_1", "Mower", "X420", "005D", first)
+    same_later = replace(mower, updated_time=first + timedelta(hours=1))
+    updated = replace(mower, firmware="005E", updated_time=first + timedelta(hours=2))
+
+    with backend.open() as storage:
+        told = [storage.write_mowers([each]) for each in (mower, same_later, updated, mower)]
+
+    assert told == [1, 0, 1, 0]
+    assert backend.stored("mower", "updated_time") == [first + timedelta(hours=2)]
+
+
+def test_rows_older_than_the_owner_keeps_are_removed_and_jobs_are_not(backend: Database) -> None:
     old, kept = old_and_kept()
 
     with backend.open(retention_days=30) as storage:
@@ -443,21 +581,21 @@ def test_timescaledb_installed_out_of_the_way_is_used_all_the_same(timescale: Po
 
 
 def test_collectors_starting_at_once_on_an_empty_database_all_start(
-    backend: Postgres, caplog: pytest.LogCaptureFixture
+    postgresql: Postgres, caplog: pytest.LogCaptureFixture
 ) -> None:
     # Each would make the tables, and one be told they are there: they take their turn,
     # and see what the one before did, even where a transaction reads as of its start.
-    with psycopg.connect(backend.dsn, autocommit=True) as conn:
+    with psycopg.connect(postgresql.dsn, autocommit=True) as conn:
         conn.execute(
             f'ALTER DATABASE "{conn.info.dbname}"'
             " SET default_transaction_isolation = 'repeatable read'"
         )
     with ThreadPoolExecutor(max_workers=8) as collectors:
-        opened = [collectors.submit(lambda: backend.open().close()) for _ in range(8)]
+        opened = [collectors.submit(lambda: postgresql.open().close()) for _ in range(8)]
         for each in opened:
             each.result()
 
-    assert backend.stored("trail_point") == []
+    assert postgresql.stored("trail_point") == []
     assert "TimescaleDB" not in caplog.text
 
 
@@ -737,16 +875,16 @@ def test_a_table_that_went_missing_is_no_table_to_make_a_hypertable_of(
 
 
 def test_a_collector_kept_waiting_for_its_turn_gives_up_whatever_the_owner_set(
-    backend: Postgres,
+    postgresql: Postgres,
 ) -> None:
     # A statement may take as long as the owner says. Waiting for another collector may
     # not: a start that hangs says nothing of why.
-    with backend.open():
+    with postgresql.open():
         pass
-    patient = Postgres(make_conninfo(backend.dsn, options="-cstatement_timeout=0"))
+    patient = Postgres(make_conninfo(postgresql.dsn, options="-cstatement_timeout=0"))
     # The one holding its turn lets go before the wait for the other is given up on here,
     # so that a collector which would wait for ever fails this test and does not hang it.
-    with ThreadPoolExecutor() as waiting, psycopg.connect(backend.dsn) as holding:
+    with ThreadPoolExecutor() as waiting, psycopg.connect(postgresql.dsn) as holding:
         holding.execute("SELECT pg_advisory_xact_lock(hashtext('navimow_collector.schema'))")
         opening = waiting.submit(lambda: patient.open().close())
         with pytest.raises(StorageError):
@@ -843,3 +981,117 @@ def test_replay_changes_no_rule_of_timescaledbs(timescale: Postgres, tmp_path: P
         rule = timescale.policies()
     assert main(["--config", str(config), "replay", str(FIXTURE)]) == 0
     assert timescale.policies() == rule
+
+
+def test_clickhouse_is_given_the_rule_of_what_to_keep(clickhouse: ClickHouse) -> None:
+    def rule(days: int) -> dict[str, str]:
+        return {
+            table: f"{'end_time' if table == 'collector_gap' else 'device_time'}"
+            f" + toIntervalDay({days})"
+            for table in EXPIRING_TABLES
+        }
+
+    def rewritten() -> int:
+        """How many times ClickHouse has been set to rewriting a table to a new rule."""
+        return int(clickhouse.ask("SELECT count() FROM system.mutations" + HERE)[0][0])
+
+    with clickhouse.open():
+        assert clickhouse.rules() == {}  # everything, unless the owner says otherwise
+    with clickhouse.open(retention_days=30):
+        assert clickhouse.rules() == rule(30)
+        times = rewritten()
+    with clickhouse.open(retention_days=30):
+        assert rewritten() == times  # the same rule is not given anew
+    with clickhouse.open(retention_days=365):
+        assert clickhouse.rules() == rule(365)
+    with clickhouse.open(migrate=False):
+        assert clickhouse.rules() == rule(365)  # not this one's to change
+    with clickhouse.open(retention_days=10**9):
+        assert clickhouse.rules() == {}  # for longer than dates go back: everything
+    with clickhouse.open(retention_days=7), clickhouse.open():
+        assert clickhouse.rules() == {}  # the owner keeps everything again
+
+
+def test_clickhouse_given_no_rule_says_that_nothing_removes_old_rows(
+    clickhouse: ClickHouse, caplog: pytest.LogCaptureFixture
+) -> None:
+    # With migration off the tables are not the collector's to change, and it removes no
+    # rows from ClickHouse itself: an owner who set a number of days is told as much.
+    old, kept = old_and_kept()
+    with clickhouse.open():
+        pass
+
+    with clickhouse.open(retention_days=30, migrate=False) as storage:
+        write_rows(storage, [*rows_at(old), *rows_at(kept)])
+        clickhouse.a_day_passes(storage, keep_days=30)
+
+    assert "Nothing removes old rows from ClickHouse" in caplog.text
+    assert clickhouse.expiring() == dict.fromkeys(EXPIRING_TABLES, [old, kept])
+
+
+def test_in_clickhouse_a_row_told_of_again_leaves_no_second_row(clickhouse: ClickHouse) -> None:
+    # ClickHouse would store it twice, and merge the two when it came to: a dashboard that
+    # forgot `FINAL` would meanwhile count the Trail double.
+    start = datetime(2026, 9, 30, 12, tzinfo=UTC)
+    points = [point(start + timedelta(microseconds=7 * i), float(i), "job") for i in range(50)]
+
+    with clickhouse.open() as storage:
+        assert storage.write_trail(points) == 50
+        assert storage.write_trail([*points, *points]) == 0
+
+    assert clickhouse.ask("SELECT count() FROM trail_point") == [(50,)]
+
+
+def test_clickhouse_takes_a_batch_of_any_size(clickhouse: ClickHouse) -> None:
+    # Longer than ClickHouse lets one question be: what is stored already is asked in parts.
+    start = datetime(2026, 9, 30, 12, tzinfo=UTC)
+    batch = [point(start + timedelta(seconds=2 * i), float(i), "job") for i in range(6000)]
+
+    with clickhouse.open() as storage:
+        assert storage.write_trail(batch) == 6000
+        assert storage.write_trail(batch) == 0
+
+
+def test_whatever_goes_wrong_in_clickhouse_stays_behind_the_storage_boundary(
+    clickhouse: ClickHouse,
+) -> None:
+    # Live collection waits out a StorageError, and drops the row of a RejectedError: any
+    # other error of the client's would stop it.
+    when = datetime(2026, 9, 30, 12, tzinfo=UTC)
+    with clickhouse.open() as storage:
+        with pytest.raises(RejectedError):
+            storage.write_trail([replace(point(when, 1.0), x="far")])  # type: ignore[arg-type]
+        clickhouse.ask("DROP TABLE job")
+        with pytest.raises(StorageError):
+            storage.latest_jobs()
+        with pytest.raises(SchemaError):
+            storage.check_schema()
+
+
+def test_replay_changes_no_rule_of_clickhouses(clickhouse: ClickHouse, tmp_path: Path) -> None:
+    config = tmp_path / "collector.toml"
+    config.write_text(
+        f'[storage]\nbackend = "clickhouse"\ndsn = "{clickhouse.url}"\nretention_days = 7\n'
+    )
+
+    assert main(["--config", str(config), "replay", str(FIXTURE)]) == 0
+    assert clickhouse.rules() == {}
+    assert len(clickhouse.stored("trail_point")) > 1000
+
+    with clickhouse.open(retention_days=30):
+        rules = clickhouse.rules()
+    assert main(["--config", str(config), "replay", str(FIXTURE)]) == 0
+    assert clickhouse.rules() == rules
+
+
+def test_a_clickhouse_that_is_not_there_is_an_outage_like_any_other() -> None:
+    # What the live buffer waits out, and what `collect` refuses to start without.
+    nowhere = StorageConfig(backend="clickhouse", dsn=Secret("http://127.0.0.1:1/navimow"))
+
+    with pytest.raises(StorageError, match="clickhouse"):
+        open_for_collection(nowhere)
+
+
+def test_clickhouse_must_be_told_where_it_is() -> None:
+    with pytest.raises(StorageError, match="storage.dsn is required"):
+        open_for_collection(StorageConfig(backend="clickhouse"))

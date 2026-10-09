@@ -21,6 +21,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import NoReturn
 
+import clickhouse_connect
 import psycopg
 import pytest
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
@@ -149,6 +150,29 @@ def timescale_server() -> str:
     return dsn
 
 
+@pytest.fixture(scope="session")
+def clickhouse_server() -> str:
+    """URL of a ClickHouse server the tests may create databases on, with no database in it:
+    `http://user:password@host:8123`."""
+    url = os.environ.get("NAVIMOW_TEST_CLICKHOUSE_URL")
+    if not url:
+        unavailable("clickhouse", "set NAVIMOW_TEST_CLICKHOUSE_URL")
+    return url.rstrip("/")
+
+
+@contextmanager
+def fresh_clickhouse(server: str) -> Iterator[str]:
+    """URL of a new, empty database on a ClickHouse server, dropped afterwards."""
+    name = f"t_{uuid.uuid4().hex[:12]}"
+    client = clickhouse_connect.get_client(dsn=server)
+    client.command(f"CREATE DATABASE {name}")
+    try:
+        yield f"{server}/{name}"
+    finally:
+        client.command(f"DROP DATABASE {name}")
+        client.close()
+
+
 @pytest.fixture
 def config_file(tmp_path: Path, database: str) -> Path:
     path = tmp_path / "collector.toml"
@@ -156,7 +180,10 @@ def config_file(tmp_path: Path, database: str) -> Path:
     return path
 
 
-BACKENDS = ("postgres", "timescaledb")
+BACKENDS = ("postgres", "timescaledb", "clickhouse")
+# The fixtures that are one backend each, and those that are each of several in turn.
+ONE_BACKEND = {"timescale": "timescaledb", "clickhouse": "clickhouse"}
+SEVERAL_BACKENDS = ("backend", "postgresql")
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -169,10 +196,13 @@ def pytest_collection_modifyitems(items: list[pytest.Function]) -> None:
     CI gives each backend a job of its own, which picks its tests by this and not by what
     they happen to be called."""
     for item in items:
-        asked = getattr(getattr(item, "callspec", None), "params", {}).get("backend")
-        needed = "timescaledb" if "timescale" in item.fixturenames else asked
-        if needed in BACKENDS:
-            item.add_marker(needed)
+        given = getattr(getattr(item, "callspec", None), "params", {})
+        needed = [given[fixture] for fixture in SEVERAL_BACKENDS if fixture in given]
+        needed += [
+            backend for fixture, backend in ONE_BACKEND.items() if fixture in item.fixturenames
+        ]
+        for backend in needed:
+            item.add_marker(backend)
 
 
 @pytest.fixture(autouse=True)
