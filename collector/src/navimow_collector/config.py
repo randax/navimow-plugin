@@ -136,7 +136,7 @@ def _load_toml(path: Path) -> dict[str, object]:
         raise ConfigError(f"configuration file not found: {path}") from error
     except OSError as error:
         raise ConfigError(f"could not read configuration file {path}: {error}") from error
-    except tomllib.TOMLDecodeError as error:
+    except ValueError as error:  # not TOML, or a number in it too long for Python to read
         raise ConfigError(f"invalid TOML in {path}: {error}") from error
     return {str(key): value for key, value in parsed.items()}
 

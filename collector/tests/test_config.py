@@ -203,3 +203,11 @@ def test_a_retention_from_the_environment_is_held_to_the_same(
     monkeypatch.setenv("NAVIMOW_STORAGE_RETENTION_DAYS", days)
     assert main(["--config", str(write(tmp_path, "")), "config"]) == 2
     assert "storage.retention_days must be a positive whole number" in capsys.readouterr().err
+
+
+def test_a_number_too_long_to_read_is_refused_as_the_file_it_is_in(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = write(tmp_path, f"[storage]\nretention_days = {'9' * 5000}\n")
+    assert main(["--config", str(config), "config"]) == 2
+    assert f"invalid TOML in {config}" in capsys.readouterr().err
