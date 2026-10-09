@@ -37,13 +37,14 @@ def live(database: str, tmp_path: Path) -> Live:
 
 
 def rows_at(when: datetime) -> list[TrailPoint | Progress | MowerState | Gap]:
-    """One row of every kind that expires, as of then."""
-    received = when + timedelta(seconds=1)
+    """One row of every kind that expires, as of then. The readings were received long
+    after: they are as old as the mower says, not as when they arrived."""
+    received = when + timedelta(days=60)
     return [
         TrailPoint("DEVICE_1", when, received, 1.0, 2.0, 0.5, 4),
         Progress("DEVICE_1", when, received, 1, 50.0, 25, 12.0, 40.0),
         MowerState("DEVICE_1", when, received, "isRunning", 80),
-        Gap("DEVICE_1", when, received, GapReason.RECONNECT),
+        Gap("DEVICE_1", when, when + timedelta(seconds=1), GapReason.RECONNECT),
     ]
 
 

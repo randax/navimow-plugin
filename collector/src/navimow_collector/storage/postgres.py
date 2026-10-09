@@ -170,9 +170,9 @@ _REMOVE = """
         AND {age} < %(before)s
 """
 _EARLIEST = datetime.min.replace(tzinfo=UTC)
-# For the transaction it is run in, rows are found by an index or not at all. What the
-# database believes it holds can be far from it, just after a capture of last year is
-# replayed or on a table it has not yet looked at, and it would then read every old row
+# For the transaction it is run in, PostgreSQL finds rows by an index wherever one will
+# do. What it believes a table holds can be far from it, just after a capture of last year
+# is replayed or on a table it has not yet looked at, and it would then read every old row
 # through for each batch, or sort them.
 _BY_THE_KEY = (
     "SELECT set_config('enable_seqscan', 'off', true),"
