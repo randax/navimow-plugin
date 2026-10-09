@@ -6,6 +6,7 @@ in hypertables and what the owner keeps is a retention policy of the engine's.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import astuple, fields, replace
@@ -13,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import psycopg
+from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from ..config import StorageConfig
@@ -24,6 +26,7 @@ from .base import RejectedError, SchemaError, StorageError
 # which the live buffer treats as an outage. These are defaults: whatever the operator set
 # for the same thing is left alone. A server that stays connected and says nothing is
 # beyond them all; live collection keeps its own deadline for that.
+_LOGGER = logging.getLogger(__name__)
 CONNECT_TIMEOUT_SECONDS = 5
 STATEMENT_TIMEOUT_MS = 5000
 _DEAD_PEER = {
@@ -142,6 +145,16 @@ EXPIRING = {
 # The readings, each keyed by the mower and the time it is of: what TimescaleDB holds in
 # hypertables. A gap is not one of them: it is as old as its end, which is not its key.
 READINGS = tuple(table for table, (key, age) in EXPIRING.items() if key == age)
+# The schema TimescaleDB's functions are in, where it is installed: not always one the
+# connection looks in, so they are called by it.
+_TIMESCALEDB = """
+    SELECT nspname FROM pg_extension JOIN pg_namespace ON pg_namespace.oid = extnamespace
+    WHERE extname = 'timescaledb'
+"""
+_HYPERTABLES = """
+    SELECT hypertable_name::text FROM timescaledb_information.hypertables
+    WHERE hypertable_schema = current_schema()
+"""
 # The tables of this schema that TimescaleDB keeps to a retention policy, and for how long.
 _POLICIES = """
     SELECT hypertable_name::text, (config->>'drop_after')::interval
@@ -233,7 +246,6 @@ class PostgresStorage:
     def __init__(self, config: StorageConfig) -> None:
         if config.dsn is None:
             raise StorageError("storage.dsn is required for the postgres backend")
-        self._retention_days = config.retention_days
         with _translated():
             deadlines = {"connect_timeout": CONNECT_TIMEOUT_SECONDS, **_DEAD_PEER}
             # The operator's DSN wins wherever it sets one of these itself.
@@ -269,49 +281,79 @@ class PostgresStorage:
                     self._connection.execute(
                         "INSERT INTO schema_version (version) VALUES (%s)", (version,)
                     )
-            if self._timescaledb():
-                self._hold_in_hypertables()
+            self._hold_in_hypertables()
 
-    def _timescaledb(self) -> bool:
-        installed = "SELECT FROM pg_extension WHERE extname = 'timescaledb'"
-        return self._connection.execute(installed).fetchone() is not None
+    def _timescaledb(self) -> sql.Identifier | None:
+        """The schema TimescaleDB's functions are in; None where it is not installed."""
+        found = self._connection.execute(_TIMESCALEDB).fetchone()
+        return None if found is None else sql.Identifier(found[0])
 
     def _hold_in_hypertables(self) -> None:
-        """Make hypertables of the readings, and have TimescaleDB keep them for as long as
-        the owner does: for ever, unless a number of days is set.
+        """Where TimescaleDB is installed, make hypertables of the readings.
 
-        Only a table with no rows is made one. Making one of a table that holds a Trail
-        rewrites it under a lock for as long as that takes, which is the owner's to choose
-        a moment for; left as it is, its old rows are removed as PostgreSQL's are.
+        Only of a table with no rows. Making one of a table that holds a Trail rewrites it
+        under a lock for as long as that takes, which is the owner's to choose a moment for;
+        left as it is, its old rows are removed as PostgreSQL's are. And only if TimescaleDB
+        will: a table it refuses, as to a user who does not own it, stays as it is.
         """
-        hypertables = "SELECT hypertable_name::text FROM timescaledb_information.hypertables"
-        held = {
-            row[0]
-            for row in self._connection.execute(
-                f"{hypertables} WHERE hypertable_schema = current_schema()"
-            )
-        }
-        kept, wanted = self._policies(), _kept_for(self._retention_days)
-        for table in READINGS:
-            empty = self._connection.execute(f"SELECT NOT EXISTS (SELECT FROM {table})").fetchone()
-            if table not in held and empty == (True,):
-                # The key already serves every question asked by time: no index besides.
-                self._connection.execute(
-                    "SELECT create_hypertable(%s, 'device_time', create_default_indexes => false)",
-                    (table,),
-                )
-                held.add(table)
-            if table in held and kept.get(table) != wanted:
-                self._connection.execute(
-                    "SELECT remove_retention_policy(%s, if_exists => true)", (table,)
-                )
-                if wanted is not None:
-                    self._connection.execute(
-                        "SELECT add_retention_policy(%s, drop_after => %s)", (table, wanted)
-                    )
+        timescaledb = self._timescaledb()
+        if timescaledb is None:
+            return
+        # The key already serves every question asked by time: no index besides. Another
+        # collector starting may have made the hypertable meanwhile.
+        hold = sql.SQL(
+            "SELECT {}.create_hypertable(%s, %s, create_default_indexes => false,"
+            " if_not_exists => true)"
+        ).format(timescaledb)
+        try:
+            with self._connection.transaction():
+                held = {row[0] for row in self._connection.execute(_HYPERTABLES)}
+                for table in READINGS:
+                    rows = self._connection.execute(f"SELECT FROM {table} LIMIT 1").fetchone()
+                    if table not in held and rows is None:
+                        self._connection.execute(hold, (table, EXPIRING[table][0]))
+        except psycopg.Error as error:
+            self._carry_on_without("TimescaleDB made no hypertables of the readings", error)
+
+    def keep_for(self, days: int | None) -> None:
+        """Where TimescaleDB holds readings in hypertables, have it keep them for as long as
+        the owner does: a retention policy of so many days, or none.
+
+        Whatever it is given no policy for, because it will not take one (under its Apache
+        licence it takes none) or because the table is no hypertable, the collector goes on
+        removing old rows from itself.
+        """
+        with _translated():
+            timescaledb = self._timescaledb()
+            if timescaledb is None:
+                return
+            wanted = _kept_for(days)
+            forget = sql.SQL("SELECT {}.remove_retention_policy(%s, if_exists => true)")
+            keep = sql.SQL("SELECT {}.add_retention_policy(%s, drop_after => %s)")
+            try:
+                with self._connection.transaction():
+                    kept = self._policies()
+                    held = {row[0] for row in self._connection.execute(_HYPERTABLES)}
+                    for table in held.intersection(READINGS):
+                        if kept.get(table) != wanted:
+                            self._connection.execute(forget.format(timescaledb), (table,))
+                            if wanted is not None:
+                                self._connection.execute(keep.format(timescaledb), (table, wanted))
+            except psycopg.Error as error:
+                self._carry_on_without("TimescaleDB was not told how long to keep readings", error)
+
+    def _carry_on_without(self, what: str, error: psycopg.Error) -> None:
+        """TimescaleDB refused something the collector does as well without: say so and go
+        on, unless it is the connection that failed, which is an outage like any other."""
+        if self._connection.broken:
+            raise error
+        _LOGGER.warning("%s, and the collector removes old rows itself: %s", what, error)
 
     def _policies(self) -> dict[str, timedelta]:
-        """The tables TimescaleDB keeps to a retention policy, and for how long each."""
+        """The tables TimescaleDB keeps to a retention policy, and for how long each; none
+        where it is not installed."""
+        if self._timescaledb() is None:
+            return {}
         return dict(self._connection.execute(_POLICIES).fetchall())
 
     def check_schema(self) -> None:
@@ -384,7 +426,7 @@ class PostgresStorage:
         removed = 0
         with _translated():
             # What TimescaleDB was given the rule for is its own to remove.
-            left_to_the_engine = self._policies() if self._timescaledb() else {}
+            left_to_the_engine = self._policies()
             for table, (key, age) in EXPIRING.items():
                 if table in left_to_the_engine:
                     continue

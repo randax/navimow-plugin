@@ -298,25 +298,34 @@ than the setting is removed by `collect`, the next time it removes old rows.
 
 ## TimescaleDB
 
-TimescaleDB needs no setting of its own: to the collector it is PostgreSQL, with
-`backend = "postgres"` and a DSN. Where the `timescaledb` extension is
-installed in the database, the collector does two things more as it creates
-its tables:
+TimescaleDB (2.x) needs no setting of its own: to the collector it is
+PostgreSQL, with `backend = "postgres"` and a DSN. Where the `timescaledb`
+extension is installed in the database, the collector does two things more:
 
-- It makes hypertables of the readings: `trail_point`, `job_progress` and
-  `mower_state`, by their `device_time`. `collector_gap`, `job` and `mower` stay
-  ordinary tables.
-- It gives TimescaleDB a retention policy for each of them when
-  `storage.retention_days` is set, changes it when the number changes, and
-  removes it when the setting is gone. TimescaleDB then removes old readings
-  itself, a whole chunk at a time, so a reading can outlive the setting by a
-  week or so. Old gaps are removed by the collector, as on PostgreSQL.
+- As it creates its tables, it makes hypertables of the readings:
+  `trail_point`, `job_progress` and `mower_state`, by their `device_time`.
+  `collector_gap`, `job` and `mower` stay ordinary tables.
+- When `collect` starts, it gives TimescaleDB a retention policy for each
+  hypertable if `storage.retention_days` is set, changes it if the number has
+  changed, and removes it if the setting is gone: a policy you made by hand on
+  one of these tables is replaced or removed like its own. TimescaleDB then
+  removes old readings itself, a whole chunk at a time, so a reading can
+  outlive the setting by a week or so. Old gaps are removed by the collector,
+  as on PostgreSQL.
+
+`replay` gives TimescaleDB no policy and changes none. What it stores that is
+older than a policy already there, TimescaleDB removes when it next applies it.
+
+Should TimescaleDB refuse either (it makes no policies under its Apache
+licence, and no hypertable of a table the collector's user does not own), the
+collector logs a warning and starts all the same: whatever table has no
+retention policy, it removes old rows from itself.
 
 Only a table with no rows is made a hypertable. A database that already holds
-Trails keeps its ordinary tables when the extension is installed later, and
-the collector goes on removing old rows from them itself. Making hypertables of
-them rewrites each under a lock, for as long as that takes, so it is yours to
-choose a moment for. With the collector stopped:
+Trails keeps its ordinary tables when the extension is installed later, for as
+long as they hold rows, and the collector goes on removing old rows from them
+itself. Making hypertables of them rewrites each under a lock, for as long as
+that takes, so it is yours to choose a moment for. With the collector stopped:
 
 ```sql
 SELECT create_hypertable('trail_point', 'device_time', migrate_data => true, create_default_indexes => false);
@@ -324,11 +333,11 @@ SELECT create_hypertable('job_progress', 'device_time', migrate_data => true, cr
 SELECT create_hypertable('mower_state', 'device_time', migrate_data => true, create_default_indexes => false);
 ```
 
-The next start gives each its retention policy.
+The next start of `collect` gives each its retention policy.
 
 With `storage.migrate = false` the collector makes neither hypertables nor
-policies, and leaves any policy as it finds it. Whatever table has no retention
-policy, it removes old rows from itself.
+policies, and leaves any policy as it finds it: a table with a policy is left
+to TimescaleDB, however long that policy keeps rows.
 
 ## Jobs and Zones
 

@@ -1,9 +1,10 @@
-"""A real PostgreSQL for the replay suite.
+"""Real databases for the suites.
 
-CI provides one through NAVIMOW_TEST_POSTGRES_DSN (a DSN to a server whose user
-may create databases). Locally, when that is unset, a throwaway cluster is
+CI provides a PostgreSQL through NAVIMOW_TEST_POSTGRES_DSN (a DSN to a server whose
+user may create databases). Locally, when that is unset, a throwaway cluster is
 started from whatever `initdb`/`pg_ctl` can be found, and the suite is skipped
-only if none can.
+only if none can. The other backends of the conformance suite are each named by
+a variable of their own, and skipped where it is unset.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
+from typing import NoReturn
 
 import psycopg
 import pytest
@@ -62,6 +64,15 @@ def free_port() -> int:
         return int(s.getsockname()[1])
 
 
+def unavailable(backend: str, how: str) -> NoReturn:
+    """A backend the conformance suite cannot reach is skipped, unless this run is the one
+    which is there to test it: CI names that backend in NAVIMOW_TEST_REQUIRE, so that a
+    service which did not come up fails the run rather than passing it by."""
+    if backend in os.environ.get("NAVIMOW_TEST_REQUIRE", "").split(","):
+        pytest.fail(f"no {backend} to test against: {how}")
+    pytest.skip(f"no {backend}: {how}")
+
+
 @pytest.fixture(scope="session")
 def postgres_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
     """DSN of a server the tests may create databases on."""
@@ -73,7 +84,6 @@ def postgres_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
     bindir = _pg_bindir()
     if bindir is None:
         unavailable("postgres", "set NAVIMOW_TEST_POSTGRES_DSN or install initdb/pg_ctl")
-    assert bindir
     data = tmp_path_factory.mktemp("pgdata")
     port = free_port()
     subprocess.run(
@@ -130,22 +140,12 @@ def database(postgres_server: str) -> Iterator[str]:
         yield dsn
 
 
-def unavailable(backend: str, how: str) -> None:
-    """A backend the conformance suite cannot reach is skipped, unless this run is the one
-    which is there to test it: CI names that backend in NAVIMOW_TEST_REQUIRE, so that a
-    service which did not come up fails the run rather than passing it by."""
-    if backend in os.environ.get("NAVIMOW_TEST_REQUIRE", "").split(","):
-        pytest.fail(f"no {backend} to test against: {how}")
-    pytest.skip(f"no {backend}: {how}")
-
-
 @pytest.fixture(scope="session")
 def timescale_server() -> str:
     """DSN of a TimescaleDB server the tests may create databases on."""
     dsn = os.environ.get("NAVIMOW_TEST_TIMESCALE_DSN")
     if not dsn:
         unavailable("timescaledb", "set NAVIMOW_TEST_TIMESCALE_DSN")
-    assert dsn
     return dsn
 
 

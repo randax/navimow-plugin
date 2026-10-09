@@ -84,9 +84,15 @@ class Storage(Writer, Protocol):
         """Each mower's most recent Job, for a collector starting up to carry on from."""
         ...
 
+    def keep_for(self, days: int | None) -> None:
+        """Have the database itself remove the positions, progress reports and states older
+        than so many days, where it is one that can and may; None has it keep them all."""
+        ...
+
     def remove_older_than(self, before: datetime, batch: int) -> int:
         """Remove the positions, progress reports, states and gaps from before then, never
-        a Job or a mower, at most `batch` of them a statement; return how many were removed."""
+        a Job or a mower, at most `batch` of them a statement; return how many were removed.
+        What the database was given the rule to remove itself is left to it."""
         ...
 
     def check_schema(self) -> None: ...

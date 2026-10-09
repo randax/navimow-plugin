@@ -62,10 +62,10 @@ jobs:
         include:
           - backend: postgres
             image: postgres:16
-            dsn: NAVIMOW_TEST_POSTGRES_DSN
+            dsn_variable: NAVIMOW_TEST_POSTGRES_DSN
           - backend: timescaledb
             image: timescale/timescaledb:latest-pg16
-            dsn: NAVIMOW_TEST_TIMESCALE_DSN
+            dsn_variable: NAVIMOW_TEST_TIMESCALE_DSN
     services:
       database:
         image: ${{ matrix.image }}
@@ -90,9 +90,9 @@ jobs:
           python-version: "3.13"
           cache: pip
       - run: pip install -e 'collector[dev]'
-      - run: echo "$DSN=postgresql://postgres@localhost:5432/postgres" >> "$GITHUB_ENV"
+      - run: echo "$DSN_VARIABLE=postgresql://postgres@localhost:5432/postgres" >> "$GITHUB_ENV"
         env:
-          DSN: ${{ matrix.dsn }}
+          DSN_VARIABLE: ${{ matrix.dsn_variable }}
       - run: pytest collector/tests/test_conformance.py -k "$BACKEND" -rs
         env:
           BACKEND: ${{ matrix.backend }}
