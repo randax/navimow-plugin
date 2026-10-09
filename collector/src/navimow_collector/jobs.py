@@ -51,9 +51,7 @@ class JobTracker:
         self._spans = [Span(job.start_time, job.job_id)] if job is not None and away else []
         # When the newest state, progress report and Zone list heard were sent. Whatever
         # was sent before a stored Job last changed was heard by the collector that stored it.
-        self._stated_at = self._reported = self._listed = (
-            job.updated_time if job is not None else None
-        )
+        self._stated_at = self._reported = self._listed = _sent(job) if job is not None else None
         self._pose: TrailPoint | None = None  # the newest position
         self._heard = False  # whether the state channel has spoken since the last gap
         # When the Job was left off, while it is only taken to be resumed: the mower left
@@ -131,8 +129,9 @@ class JobTracker:
             if job is not None and job.end_time is None:
                 # Away on a Job, and the mower has started another: it gave the first up
                 # at the dock if it never took it up again, and else where last heard.
-                last_heard = max(job.updated_time, heard or job.updated_time)
-                given_up = [_told(replace(job, end_time=left_off or last_heard), job)]
+                last_heard = max(_sent(job), heard or _sent(job))
+                self._job = _told(replace(job, end_time=left_off or last_heard), job)
+                given_up = [self._job]
             job, zone = self._begin(time), None
         elif left_unseen:
             job = replace(job, end_time=None)
@@ -196,6 +195,12 @@ def _told(job: Job, before: Job | None) -> Job:
     if before is None or before.job_id != job.job_id:
         return job
     return replace(job, updated_time=max(job.updated_time, before.updated_time + TOLD_AFTER))
+
+
+def _sent(job: Job) -> datetime:
+    """When the message that last changed the Job was sent. The mower's times are whole
+    milliseconds, and a telling moved on stays in the millisecond of the one before."""
+    return job.updated_time - timedelta(microseconds=job.updated_time.microsecond % 1000)
 
 
 def _unfinished(job: Job) -> bool:

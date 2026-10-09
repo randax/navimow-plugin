@@ -52,8 +52,9 @@ with `FINAL`.
   message sent no later than the last can still change a Job, and of two tellings as of one
   moment only the order of writing would say which stands. Rows are written out of order by
   a write that live collection gave up on and the database took late, and by a buffer file
-  read after the rows held in memory. The mower's times are whole milliseconds, so a
-  telling moved on stays within the millisecond it was sent in.
+  read after the rows held in memory. The mower's times are whole milliseconds, and a
+  telling moved on stays in the millisecond of the one before, so when the message was
+  sent is still read from it.
 - **`mower`** is one row per mower as the account's device list describes it, rewritten
   when the list describes it differently; `updated_time` says since when. The firmware
   matters because ADR 0001's rules were checked on one.

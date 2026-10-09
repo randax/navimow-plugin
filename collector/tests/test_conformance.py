@@ -497,21 +497,30 @@ def test_an_older_telling_of_a_job_does_not_replace_a_later_one(relational: Rela
         assert list(storage.latest_jobs()) == [later]
 
 
-@pytest.mark.parametrize("newer_first", [False, True])
-def test_of_two_tellings_of_a_job_as_of_one_moment_the_later_stands_in_either_order(
-    relational: Relational, newer_first: bool
+@pytest.mark.parametrize("newest_first", [False, True])
+@pytest.mark.parametrize(
+    "areas",
+    [
+        pytest.param((9,), id="progress"),
+        # A Job begun in the second the one before began in is the same row.
+        pytest.param((9, 0), id="progress-then-another-job"),
+    ],
+)
+def test_of_tellings_of_a_job_as_of_one_moment_the_last_stands_in_either_order(
+    relational: Relational, areas: tuple[float, ...], newest_first: bool
 ) -> None:
     # A message sent no later than the one before can still change a Job. Written out of
-    # order, as a write given up on and answered late writes it, the telling before must
-    # not replace it.
-    earlier, later = told_at_once()
+    # order, as a write given up on and answered late writes it, a telling before must not
+    # replace it.
+    tellings = told_at_once(*areas)
+    assert len(tellings) > len(areas)  # each report told of the Job anew
 
     with relational.open() as storage:
-        for job in [later, earlier] if newer_first else [earlier, later]:
+        for job in reversed(tellings) if newest_first else tellings:
             storage.write_jobs([job])
 
     with relational.open() as storage:
-        assert list(storage.latest_jobs()) == [later]
+        assert list(storage.latest_jobs()) == [tellings[-1]]
 
 
 def test_in_influxdb_an_older_telling_of_a_job_is_written_over_a_later_one(influx: Influx) -> None:

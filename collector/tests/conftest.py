@@ -73,28 +73,21 @@ class Told:
         return len(mowers)
 
 
-def told_at_once() -> tuple[Job, Job]:
-    """Two tellings of one Job, oldest first, as the ingestion core tells them of a mower
-    that leaves the dock and reports progress in the same millisecond."""
+def told_at_once(*areas: float) -> list[Job]:
+    """Every telling of a Job, oldest first, as the ingestion core tells them of a mower
+    that leaves the dock and then reports so many square metres mowed, all in the same
+    millisecond."""
     sent, topic = 1_790_769_600_000, "/downlink/vehicle/DEVICE_1/realtimeDate/"
-    report = {"type": 2, "time": sent, "mowStartType": 1, "mowingPercentage": 5, "subtotalArea": 9}
     told = Told()
     ingestor = Ingestor(told)
-    ingestor.feed(
-        {
-            "recv_ms": sent,
-            "kind": "mqtt",
-            "topic": f"{topic}state",
-            "payload": {"state": "isRunning"},
-        }
-    )
-    ingestor.feed(
-        {"recv_ms": sent, "kind": "mqtt", "topic": f"{topic}location", "payload": [report]}
-    )
+    state = {"state": "isRunning"}
+    ingestor.feed({"recv_ms": sent, "kind": "mqtt", "topic": f"{topic}state", "payload": state})
+    for area in areas:
+        report = {"type": 2, "time": sent, "mowStartType": 1, "subtotalArea": area}
+        location = {"recv_ms": sent, "kind": "mqtt", "topic": f"{topic}location"}
+        ingestor.feed({**location, "payload": [report]})
     ingestor.flush()
-    earlier, later = told.jobs
-    assert (earlier.mowing_percentage, later.mowing_percentage) == (None, 5)
-    return earlier, later
+    return told.jobs
 
 
 def gaps(dsn: str) -> list[tuple[str, datetime, datetime, str]]:

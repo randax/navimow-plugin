@@ -467,7 +467,8 @@ class BackgroundStorage(BufferedStorage):
     neither a statement timeout nor TCP.
 
     An attempt given up on may still land, after rows admitted since. Rows carry their own
-    time, and each telling of a Job is later than the one before, so that is harmless.
+    time, and each telling of a Job is later than the one before, which a relational
+    backend keeps over an older one: there that is harmless.
     """
 
     def __init__(

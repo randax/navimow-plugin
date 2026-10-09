@@ -442,7 +442,7 @@ def test_a_write_given_up_on_that_lands_late_leaves_the_later_telling_of_a_job(
     db, clock = Database(database), Clock()
     storage = BackgroundStorage(db.open, tmp_path / "buffer.jsonl", clock=clock, deadline=0.1)
     storage.connect()
-    earlier, later = told_at_once()
+    earlier, later = told_at_once(9)
     db.held_jobs = released = threading.Event()
 
     async def scenario() -> None:
