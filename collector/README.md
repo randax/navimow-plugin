@@ -296,6 +296,40 @@ collector's clock: one set far ahead removes rows early.
 `replay` removes nothing, whatever the setting. What it stores that is older
 than the setting is removed by `collect`, the next time it removes old rows.
 
+## TimescaleDB
+
+TimescaleDB needs no setting of its own: to the collector it is PostgreSQL, with
+`backend = "postgres"` and a DSN. Where the `timescaledb` extension is
+installed in the database, the collector does two things more as it creates
+its tables:
+
+- It makes hypertables of the readings: `trail_point`, `job_progress` and
+  `mower_state`, by their `device_time`. `collector_gap`, `job` and `mower` stay
+  ordinary tables.
+- It gives TimescaleDB a retention policy for each of them when
+  `storage.retention_days` is set, changes it when the number changes, and
+  removes it when the setting is gone. TimescaleDB then removes old readings
+  itself, a whole chunk at a time, so a reading can outlive the setting by a
+  week or so. Old gaps are removed by the collector, as on PostgreSQL.
+
+Only a table with no rows is made a hypertable. A database that already holds
+Trails keeps its ordinary tables when the extension is installed later, and
+the collector goes on removing old rows from them itself. Making hypertables of
+them rewrites each under a lock, for as long as that takes, so it is yours to
+choose a moment for. With the collector stopped:
+
+```sql
+SELECT create_hypertable('trail_point', 'device_time', migrate_data => true, create_default_indexes => false);
+SELECT create_hypertable('job_progress', 'device_time', migrate_data => true, create_default_indexes => false);
+SELECT create_hypertable('mower_state', 'device_time', migrate_data => true, create_default_indexes => false);
+```
+
+The next start gives each its retention policy.
+
+With `storage.migrate = false` the collector makes neither hypertables nor
+policies, and leaves any policy as it finds it. Whatever table has no retention
+policy, it removes old rows from itself.
+
 ## Jobs and Zones
 
 Nothing the mower sends names a Job, so the collector decides where each one
@@ -448,6 +482,24 @@ automatically) or point it at an existing server:
 ```bash
 NAVIMOW_TEST_POSTGRES_DSN=postgresql://postgres@localhost:5432/postgres pytest collector
 ```
+
+`tests/test_conformance.py` asks the same of every database the collector
+writes to, where they differ: a schema made from nothing, rows written out of
+order and from years ago, a batch, one Job's Trail read back in order,
+retention, and a Job read back as it was written. PostgreSQL is the one above.
+For TimescaleDB, start one that keeps nothing once stopped, and name it:
+
+```bash
+docker run --rm -d --name navimow-timescale -e POSTGRES_HOST_AUTH_METHOD=trust \
+  -p 127.0.0.1:55433:5432 --tmpfs /var/lib/postgresql/data timescale/timescaledb:latest-pg16
+NAVIMOW_TEST_TIMESCALE_DSN=postgresql://postgres@127.0.0.1:55433/postgres pytest collector/tests/test_conformance.py
+docker stop navimow-timescale
+```
+
+A backend the suite cannot reach is skipped, unless `NAVIMOW_TEST_REQUIRE`
+names it: then its absence fails the run. That is how each backend has a job of
+its own on every pull request and each night, the night being for what changes
+outside the repository, such as a database image.
 
 Two more checks run on every pull request. `scripts/package.sh` builds the wheel
 and the source distribution and installs the wheel into an environment of its

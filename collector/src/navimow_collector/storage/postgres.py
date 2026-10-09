@@ -1,11 +1,15 @@
-"""PostgreSQL storage: the reference backend for the schema in docs/adr/0002-data-schema.md."""
+"""PostgreSQL storage: the reference backend for the schema in docs/adr/0002-data-schema.md.
+
+TimescaleDB is this same adapter: where its extension is installed, the readings are held
+in hypertables and what the owner keeps is a retention policy of the engine's.
+"""
 
 from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import astuple, fields, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import psycopg
@@ -135,6 +139,15 @@ EXPIRING = {
     "mower_state": ("device_time", "device_time"),
     "collector_gap": ("start_time", "end_time"),
 }
+# The readings, each keyed by the mower and the time it is of: what TimescaleDB holds in
+# hypertables. A gap is not one of them: it is as old as its end, which is not its key.
+READINGS = tuple(table for table, (key, age) in EXPIRING.items() if key == age)
+# The tables of this schema that TimescaleDB keeps to a retention policy, and for how long.
+_POLICIES = """
+    SELECT hypertable_name::text, (config->>'drop_after')::interval
+    FROM timescaledb_information.jobs
+    WHERE proc_name = 'policy_retention' AND hypertable_schema = current_schema()
+"""
 # Every statement of a removal can go by the key, which begins with the mower: reading
 # millions of positions through to find what is old, on the small machine this shares with
 # its database, would take longer than a statement is given. What earlier removals took is
@@ -180,6 +193,19 @@ _BY_THE_KEY = (
 )
 
 
+def _kept_for(days: int | None) -> timedelta | None:
+    """How long rows are kept, of a number of days; None if for ever, which is also to keep
+    them for longer than dates go back."""
+    if days is None:
+        return None
+    try:
+        keep = timedelta(days=days)
+        _ = datetime.now(UTC) - keep  # fails where that is before dates begin
+    except OverflowError:
+        return None
+    return keep
+
+
 def _insert(row: type[Row], table: str) -> str:
     """Insert every field of the row into the column of the same name."""
     columns = [field.name for field in fields(row)]
@@ -207,6 +233,7 @@ class PostgresStorage:
     def __init__(self, config: StorageConfig) -> None:
         if config.dsn is None:
             raise StorageError("storage.dsn is required for the postgres backend")
+        self._retention_days = config.retention_days
         with _translated():
             deadlines = {"connect_timeout": CONNECT_TIMEOUT_SECONDS, **_DEAD_PEER}
             # The operator's DSN wins wherever it sets one of these itself.
@@ -242,6 +269,50 @@ class PostgresStorage:
                     self._connection.execute(
                         "INSERT INTO schema_version (version) VALUES (%s)", (version,)
                     )
+            if self._timescaledb():
+                self._hold_in_hypertables()
+
+    def _timescaledb(self) -> bool:
+        installed = "SELECT FROM pg_extension WHERE extname = 'timescaledb'"
+        return self._connection.execute(installed).fetchone() is not None
+
+    def _hold_in_hypertables(self) -> None:
+        """Make hypertables of the readings, and have TimescaleDB keep them for as long as
+        the owner does: for ever, unless a number of days is set.
+
+        Only a table with no rows is made one. Making one of a table that holds a Trail
+        rewrites it under a lock for as long as that takes, which is the owner's to choose
+        a moment for; left as it is, its old rows are removed as PostgreSQL's are.
+        """
+        hypertables = "SELECT hypertable_name::text FROM timescaledb_information.hypertables"
+        held = {
+            row[0]
+            for row in self._connection.execute(
+                f"{hypertables} WHERE hypertable_schema = current_schema()"
+            )
+        }
+        kept, wanted = self._policies(), _kept_for(self._retention_days)
+        for table in READINGS:
+            empty = self._connection.execute(f"SELECT NOT EXISTS (SELECT FROM {table})").fetchone()
+            if table not in held and empty == (True,):
+                # The key already serves every question asked by time: no index besides.
+                self._connection.execute(
+                    "SELECT create_hypertable(%s, 'device_time', create_default_indexes => false)",
+                    (table,),
+                )
+                held.add(table)
+            if table in held and kept.get(table) != wanted:
+                self._connection.execute(
+                    "SELECT remove_retention_policy(%s, if_exists => true)", (table,)
+                )
+                if wanted is not None:
+                    self._connection.execute(
+                        "SELECT add_retention_policy(%s, drop_after => %s)", (table, wanted)
+                    )
+
+    def _policies(self) -> dict[str, timedelta]:
+        """The tables TimescaleDB keeps to a retention policy, and for how long each."""
+        return dict(self._connection.execute(_POLICIES).fetchall())
 
     def check_schema(self) -> None:
         for table in TABLES:
@@ -312,7 +383,11 @@ class PostgresStorage:
     def remove_older_than(self, before: datetime, batch: int) -> int:
         removed = 0
         with _translated():
+            # What TimescaleDB was given the rule for is its own to remove.
+            left_to_the_engine = self._policies() if self._timescaledb() else {}
             for table, (key, age) in EXPIRING.items():
+                if table in left_to_the_engine:
+                    continue
                 names = {"table": table, "key": key, "age": age}
                 mowers = self._connection.execute(_MOWERS.format(**names)).fetchall()
                 for (mower,) in mowers:

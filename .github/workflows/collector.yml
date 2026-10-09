@@ -5,6 +5,10 @@ on:
   push:
     branches: ["**"]
   pull_request:
+  schedule:
+    # Each night: a database image that changed under the matrix is found here, and not by
+    # whoever opens the next pull request.
+    - cron: "17 3 * * *"
   workflow_call:
     inputs:
       version:
@@ -45,6 +49,53 @@ jobs:
       - run: mypy
         working-directory: collector
       - run: pytest collector
+
+  # Every backend the collector writes to, asked the same where they differ. Not on every
+  # push, which runs the replay suite against PostgreSQL: before a merge, each night, and
+  # for a release.
+  conformance:
+    if: github.event_name != 'push' || inputs.version != ''
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - backend: postgres
+            image: postgres:16
+            dsn: NAVIMOW_TEST_POSTGRES_DSN
+          - backend: timescaledb
+            image: timescale/timescaledb:latest-pg16
+            dsn: NAVIMOW_TEST_TIMESCALE_DSN
+    services:
+      database:
+        image: ${{ matrix.image }}
+        env:
+          # No password: a throwaway service reachable only from this job.
+          POSTGRES_HOST_AUTH_METHOD: trust
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    env:
+      # The backend this job is for must be there: without it the job fails, where any other
+      # run of the suite skips a backend it cannot reach.
+      NAVIMOW_TEST_REQUIRE: ${{ matrix.backend }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: pip install -e 'collector[dev]'
+      - run: echo "$DSN=postgresql://postgres@localhost:5432/postgres" >> "$GITHUB_ENV"
+        env:
+          DSN: ${{ matrix.dsn }}
+      - run: pytest collector/tests/test_conformance.py -k "$BACKEND" -rs
+        env:
+          BACKEND: ${{ matrix.backend }}
 
   # What a release publishes, short of publishing it, so that a tag is never the first time
   # either is built.

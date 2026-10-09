@@ -15,6 +15,7 @@ import socket
 import subprocess
 import uuid
 from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -71,7 +72,8 @@ def postgres_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
 
     bindir = _pg_bindir()
     if bindir is None:
-        pytest.skip("no PostgreSQL: set NAVIMOW_TEST_POSTGRES_DSN or install initdb/pg_ctl")
+        unavailable("postgres", "set NAVIMOW_TEST_POSTGRES_DSN or install initdb/pg_ctl")
+    assert bindir
     data = tmp_path_factory.mktemp("pgdata")
     port = free_port()
     subprocess.run(
@@ -104,21 +106,47 @@ def postgres_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
         )
 
 
+@contextmanager
+def fresh_database(server: str) -> Iterator[str]:
+    """DSN of a new, empty database on a server, dropped afterwards."""
+    name = f"t_{uuid.uuid4().hex[:12]}"
+    with psycopg.connect(server, autocommit=True) as conn:
+        conn.execute(f'CREATE DATABASE "{name}"')
+    params = {
+        key: str(value) for key, value in conninfo_to_dict(server).items() if value is not None
+    }
+    params["dbname"] = name
+    try:
+        yield make_conninfo(**params)
+    finally:
+        with psycopg.connect(server, autocommit=True) as conn:
+            conn.execute(f'DROP DATABASE "{name}" WITH (FORCE)')
+
+
 @pytest.fixture
 def database(postgres_server: str) -> Iterator[str]:
     """DSN of a fresh, empty database, dropped after the test."""
-    name = f"t_{uuid.uuid4().hex[:12]}"
-    with psycopg.connect(postgres_server, autocommit=True) as conn:
-        conn.execute(f'CREATE DATABASE "{name}"')
-    params = {
-        key: str(value)
-        for key, value in conninfo_to_dict(postgres_server).items()
-        if value is not None
-    }
-    params["dbname"] = name
-    yield make_conninfo(**params)
-    with psycopg.connect(postgres_server, autocommit=True) as conn:
-        conn.execute(f'DROP DATABASE "{name}" WITH (FORCE)')
+    with fresh_database(postgres_server) as dsn:
+        yield dsn
+
+
+def unavailable(backend: str, how: str) -> None:
+    """A backend the conformance suite cannot reach is skipped, unless this run is the one
+    which is there to test it: CI names that backend in NAVIMOW_TEST_REQUIRE, so that a
+    service which did not come up fails the run rather than passing it by."""
+    if backend in os.environ.get("NAVIMOW_TEST_REQUIRE", "").split(","):
+        pytest.fail(f"no {backend} to test against: {how}")
+    pytest.skip(f"no {backend}: {how}")
+
+
+@pytest.fixture(scope="session")
+def timescale_server() -> str:
+    """DSN of a TimescaleDB server the tests may create databases on."""
+    dsn = os.environ.get("NAVIMOW_TEST_TIMESCALE_DSN")
+    if not dsn:
+        unavailable("timescaledb", "set NAVIMOW_TEST_TIMESCALE_DSN")
+    assert dsn
+    return dsn
 
 
 @pytest.fixture
@@ -132,5 +160,5 @@ def config_file(tmp_path: Path, database: str) -> Path:
 def _isolated_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """No test may pick up the developer's own NAVIMOW_* settings."""
     for key in list(os.environ):
-        if key.startswith("NAVIMOW_") and key != "NAVIMOW_TEST_POSTGRES_DSN":
+        if key.startswith("NAVIMOW_") and not key.startswith("NAVIMOW_TEST_"):
             monkeypatch.delenv(key)

@@ -14,8 +14,9 @@ kept for good. This resolves
 
 ## The relational shape
 
-PostgreSQL is the reference, and the one backend built so far. TimescaleDB and ClickHouse
-are to hold the same tables and columns
+PostgreSQL is the reference. TimescaleDB is the same adapter and holds the same tables and
+columns, the three of readings (`trail_point`, `job_progress`, `mower_state`) as
+hypertables where its extension is installed. ClickHouse is to hold them too
 ([#31](https://github.com/randax/navimow-plugin/issues/31)).
 
 | Table | Key | Columns |
@@ -69,9 +70,11 @@ Everything is kept unless the owner sets `storage.retention_days`. Rows older th
 then removed from `trail_point`, `job_progress`, `mower_state` and `collector_gap`. `job`
 and `mower` rows are never removed, so the history of Jobs outlives their Trails. On
 PostgreSQL the collector removes the rows itself, once a day, taking a reading to be as
-old as its `device_time` and a gap as old as its `end_time`. TimescaleDB and ClickHouse are
-to be given the rule to apply. InfluxDB keeps retention on the bucket, which the owner
-creates, so there the setting is to be refused. The other backends are not built yet
+old as its `device_time` and a gap as old as its `end_time`. TimescaleDB is given the rule
+to apply to its hypertables, as a retention policy that follows the setting, and removes
+old readings a chunk at a time; gaps, which are no hypertable, the collector still removes.
+ClickHouse is to be given the rule as well. InfluxDB keeps retention on the bucket, which
+the owner creates, so there the setting is to be refused. Those two are not built yet
 ([#31](https://github.com/randax/navimow-plugin/issues/31)).
 
 ## The InfluxDB shape
