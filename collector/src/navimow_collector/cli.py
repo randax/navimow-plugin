@@ -216,16 +216,21 @@ def _login(
 def _browser_code(client_id: str, timeout: float) -> tuple[str, str]:
     """Capture the redirect on a temporary loopback listener; the code is bound to its URI."""
     state = secrets.token_urlsafe(32)
-    with LoopbackListener(state) as listener:
+    headless = "use `navimow-collector login --no-browser`"
+    try:
+        listener = LoopbackListener(state)
+    except OSError as error:
+        raise OSError(
+            f"no listener for the login redirect ({error}); run the login again, or {headless}"
+        ) from error
+    with listener:
         url = authorization_url(client_id, listener.redirect_uri, state)
         print(url)
         webbrowser.open(url)
         try:
             return listener.wait(timeout), listener.redirect_uri
         except TimeoutError as error:
-            raise TimeoutError(
-                f"{error}; without a local browser, use `navimow-collector login --no-browser`"
-            ) from error
+            raise TimeoutError(f"{error}; without a local browser, {headless}") from error
 
 
 def _pasted_login(value: str) -> tuple[str, str]:

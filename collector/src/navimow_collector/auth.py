@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import fcntl
 import json
 import logging
 import os
 import re
+import socket
 import tempfile
 import threading
 from collections.abc import Awaitable, Callable, Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from enum import StrEnum
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -32,6 +34,9 @@ MQTT_OAUTH_ERROR = "CODE_OAUTH_INFO_ILLEGAL"
 # written beside the service is acted on within a minute.
 POLL_SECONDS = 60
 DEFAULT_LIFETIME_SECONDS = 3600
+# What listening on ::1 fails with on a host without IPv6: no such socket to be had, or no
+# such address to bind it to.
+_NO_IPV6 = (errno.EAFNOSUPPORT, errno.EADDRNOTAVAIL)
 
 _LOGGER = logging.getLogger(__name__)
 # Vendor prose meaning the grant itself is dead, so only a new login helps...
@@ -476,6 +481,29 @@ def authorization_url(client_id: str, redirect_uri: str, state: str) -> str:
     return f"{AUTHORIZE_URL}&{urlencode(parameters)}"
 
 
+class _IPv6Server(ThreadingHTTPServer):
+    address_family = socket.AF_INET6
+
+
+def _loopback_servers(
+    port: int, handler: type[BaseHTTPRequestHandler]
+) -> list[ThreadingHTTPServer]:
+    """One port on both loopback addresses: `localhost` may resolve to ::1 first, and not
+    every browser then tries 127.0.0.1. A host without IPv6 is served on 127.0.0.1 alone."""
+    ipv4 = ThreadingHTTPServer(("127.0.0.1", port), handler)
+    try:
+        return [ipv4, _IPv6Server(("::1", ipv4.server_port), handler)]
+    except OSError as error:
+        if error.errno in _NO_IPV6:
+            return [ipv4]
+        # Listening on 127.0.0.1 alone would leave a browser that takes `localhost` to be
+        # ::1 with no one to answer it, or with whoever else holds the port there.
+        ipv4.server_close()
+        raise OSError(
+            error.errno, f"cannot listen on [::1]:{ipv4.server_port}: {error.strerror}"
+        ) from error
+
+
 class LoopbackListener:
     """A short-lived local callback server which rejects a redirect with the wrong state."""
 
@@ -501,14 +529,15 @@ class LoopbackListener:
             def log_message(self, format: str, *args: object) -> None:
                 return None
 
-        self._server = ThreadingHTTPServer(("127.0.0.1", port), CallbackHandler)
-        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._servers = _loopback_servers(port, CallbackHandler)
+        self._serving: ExitStack | None = None
 
     @property
     def redirect_uri(self) -> str:
         # `localhost`, not 127.0.0.1: the vendor's redirect validation is undocumented, and
         # the only loopback form known to be accepted is http://localhost:1/callback.
-        return f"http://localhost:{self._server.server_port}/callback"
+        # Any of the servers gives the port: they hold the one.
+        return f"http://localhost:{self._servers[0].server_port}/callback"
 
     def _accept(self, path: str) -> bool:
         parsed = urlparse(path)
@@ -524,13 +553,24 @@ class LoopbackListener:
             return True
 
     def __enter__(self) -> LoopbackListener:
-        self._thread.start()
+        if self._serving is not None:
+            raise RuntimeError("a login listener is entered once")
+        self._serving = ExitStack()
+        with ExitStack() as started:  # undone here, should a thread not start
+            for server in self._servers:
+                started.callback(server.server_close)
+            for server in self._servers:
+                # Polled often: leaving the listener waits out one poll for each address.
+                thread = threading.Thread(target=server.serve_forever, args=(0.1,), daemon=True)
+                thread.start()
+                started.callback(thread.join)
+                started.callback(server.shutdown)
+            self._serving = started.pop_all()
         return self
 
     def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
-        self._server.shutdown()
-        self._server.server_close()
-        self._thread.join()
+        if self._serving is not None:
+            self._serving.close()
 
     def wait(self, timeout: float) -> str:
         """Wait for exactly one valid redirect instead of trusting arbitrary local traffic."""

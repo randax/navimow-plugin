@@ -37,6 +37,9 @@ jobs:
           - 5432:5432
     env:
       NAVIMOW_TEST_POSTGRES_DSN: postgresql://postgres@localhost:5432/postgres
+      # The runner has a ::1: a test of the login over it that could not run fails, where
+      # elsewhere it is skipped.
+      NAVIMOW_TEST_REQUIRE: ipv6
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
