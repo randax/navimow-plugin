@@ -995,8 +995,17 @@ def test_a_hung_token_request_is_bounded_by_the_session_timeout(
             clock=lambda: 3300,
         )
 
+        mid_request: list[AuthState] = []
+
+        async def onlooker() -> None:
+            await asyncio.sleep(0)  # by now the first caller has sent its request
+            mid_request.append(tokens.state)
+
         async def concurrent_callers() -> list[str | None]:
-            return list(await asyncio.gather(tokens.access_token(), tokens.access_token()))
+            first, second, _ = await asyncio.gather(
+                tokens.access_token(), tokens.access_token(), onlooker()
+            )
+            return [first, second]
 
         started = time.monotonic()
         assert run(concurrent_callers()) == ["access", "access"]
@@ -1004,6 +1013,8 @@ def test_a_hung_token_request_is_bounded_by_the_session_timeout(
 
     assert len(received) == 1  # the request reached the endpoint, and was not repeated
     assert 0.5 <= elapsed < 5  # it hung until the session's timeout, and no longer
+    # The hang was the request's alone: the event loop went on running everything else.
+    assert mid_request == [AuthState.REFRESHING]
     assert tokens.state is AuthState.RETRY_PENDING
 
 
@@ -1085,6 +1096,9 @@ def test_a_login_in_a_second_process_waits_for_the_refresh_lock_and_wins(
     script.write_text(LOGIN_IN_A_SECOND_PROCESS)
     marker = tmp_path / "login-started"
     logins: list[subprocess.Popen[bytes]] = []
+    # What the refresh found just before it wrote: whether the login had started, its exit
+    # code a second on (none while it still waits), and what the state file held.
+    found_under_the_lock: list[tuple[bool, int | None, Credential | None]] = []
 
     def write_while_a_login_runs(path: Path, contents: str) -> None:
         """The refresh's write of the state file, made under its lock, with `login` run
@@ -1092,9 +1106,7 @@ def test_a_login_in_a_second_process_waits_for_the_refresh_lock_and_wins(
         login = subprocess.Popen([sys.executable, str(script), str(config), str(marker)])
         logins.append(login)
         deadline = time.monotonic() + 30
-        while not marker.exists():
-            assert login.poll() is None, "the login process failed before it started"
-            assert time.monotonic() < deadline, "the login process never got started"
+        while not marker.exists() and login.poll() is None and time.monotonic() < deadline:
             time.sleep(0.01)
         # Waiting can only be shown by its lasting: the login needs milliseconds to reach
         # the lock, and is given a full second in which to finish were nothing holding it.
@@ -1102,11 +1114,7 @@ def test_a_login_in_a_second_process_waits_for_the_refresh_lock_and_wins(
             login.wait(timeout=1)
         except subprocess.TimeoutExpired:
             pass
-        else:
-            raise AssertionError(
-                f"the login finished (exit {login.returncode}) while the refresh held the lock"
-            )
-        assert stored(store).access_token == "access"  # and it wrote nothing meanwhile
+        found_under_the_lock.append((marker.exists(), login.returncode, store.load()))
         replace_file(path, contents)
 
     monkeypatch.setattr("navimow_collector.auth.replace_file", write_while_a_login_runs)
@@ -1118,7 +1126,8 @@ def test_a_login_in_a_second_process_waits_for_the_refresh_lock_and_wins(
 
     try:
         assert run(tokens.access_token()) == "refreshed-old-grant"
-        assert len(logins) == 1, "the refresh never wrote the state file"
+        # The login had started, was still waiting a second later, and had written nothing.
+        assert found_under_the_lock == [(True, None, Credential("access", "refresh", 3600, 0))]
         assert logins[0].wait(timeout=30) == 0
     finally:
         for login in logins:  # never left running, whatever failed above
