@@ -11,6 +11,7 @@ import threading
 import time
 import urllib.request
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -29,7 +30,6 @@ from navimow_collector.auth import (
     TokenRequestError,
     TokenStore,
     maintain,
-    replace_file,
 )
 from navimow_collector.cli import main
 
@@ -913,7 +913,10 @@ def vendor_endpoint(
             return None
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    # Polling often for shutdown: the default half second would be spent at every teardown.
+    thread = threading.Thread(
+        target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
+    )
     thread.start()
     monkeypatch.setattr(
         "navimow_collector.auth.TOKEN_URL",
@@ -998,8 +1001,10 @@ def test_a_hung_token_request_is_bounded_by_the_session_timeout(
         mid_request: list[AuthState] = []
 
         async def onlooker() -> None:
-            await asyncio.sleep(0)  # by now the first caller has sent its request
-            mid_request.append(tokens.state)
+            deadline = time.monotonic() + 5
+            while not received and time.monotonic() < deadline:
+                await asyncio.sleep(0.005)
+            mid_request.append(tokens.state)  # the request is with the endpoint, hanging
 
         async def concurrent_callers() -> list[str | None]:
             first, second, _ = await asyncio.gather(
@@ -1031,12 +1036,12 @@ def test_login_left_to_build_its_session_gives_a_token_request_thirty_seconds(
 
     def recording_open(
         opener: urllib.request.OpenerDirector,
-        url: Any,
+        fullurl: Any,
         data: Any = None,
         timeout: float | None = None,
     ) -> Any:
         timeouts.append(timeout)
-        return open_url(opener, url, data, timeout)
+        return open_url(opener, fullurl, data, timeout)
 
     monkeypatch.setattr(urllib.request.OpenerDirector, "open", recording_open)
     with vendor_endpoint(monkeypatch, (200, token())) as received:
@@ -1046,11 +1051,15 @@ def test_login_left_to_build_its_session_gives_a_token_request_thirty_seconds(
     assert timeouts == [30.0]
 
 
-# The real `login` command, run as a second process with the network stubbed out. It marks
-# the moment it starts: from there to wanting the state-file lock is one canned exchange.
+# The real `login` command, run as a second process with the network stubbed out. It
+# touches its marker as it starts, from where one canned exchange separates it from the
+# state-file lock. Given a third path, it touches the marker only once it holds that lock
+# and is about to replace the state file, and goes no further until the third path exists.
 LOGIN_IN_A_SECOND_PROCESS = """\
 import json
+import os
 import sys
+import time
 from pathlib import Path
 
 from navimow_collector.cli import main
@@ -1080,30 +1089,49 @@ class Session:
         return Request()
 
 
-config, marker = sys.argv[1], sys.argv[2]
-Path(marker).touch()
+config, marker = sys.argv[1], Path(sys.argv[2])
+if len(sys.argv) > 3:
+    release, replacing = Path(sys.argv[3]), os.replace
+
+    def replace_once_released(source, destination):
+        marker.touch()
+        deadline = time.monotonic() + 30
+        while not release.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        replacing(source, destination)
+
+    os.replace = replace_once_released
+else:
+    marker.touch()
 sys.exit(main(["--config", config, "login", "--code", "relogin-code"], session_factory=Session))
 """
+
+
+def login_in_a_second_process(tmp_path: Path, store: TokenStore, *markers: Path) -> list[str]:
+    """The command line running `login` against `store` in another process."""
+    config = tmp_path / "collector.toml"
+    config.write_text(f'[auth]\nstate_file = "{store.path}"\n')
+    script = tmp_path / "login_in_a_second_process.py"
+    script.write_text(LOGIN_IN_A_SECOND_PROCESS)
+    return [sys.executable, str(script), str(config), *map(str, markers)]
 
 
 def test_a_login_in_a_second_process_waits_for_the_refresh_lock_and_wins(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store = logged_in(tmp_path)
-    config = tmp_path / "collector.toml"
-    config.write_text(f'[auth]\nstate_file = "{store.path}"\n')
-    script = tmp_path / "login_in_a_second_process.py"
-    script.write_text(LOGIN_IN_A_SECOND_PROCESS)
     marker = tmp_path / "login-started"
+    command = login_in_a_second_process(tmp_path, store, marker)
     logins: list[subprocess.Popen[bytes]] = []
     # What the refresh found just before it wrote: whether the login had started, its exit
     # code a second on (none while it still waits), and what the state file held.
     found_under_the_lock: list[tuple[bool, int | None, Credential | None]] = []
+    replacing = os.replace
 
-    def write_while_a_login_runs(path: Path, contents: str) -> None:
-        """The refresh's write of the state file, made under its lock, with `login` run
-        in a second process before the write goes ahead."""
-        login = subprocess.Popen([sys.executable, str(script), str(config), str(marker)])
+    def replace_while_a_login_runs(source: str, destination: Path) -> None:
+        """The refresh putting its state file in place, which it does under the lock, with
+        `login` run in a second process before that goes ahead."""
+        login = subprocess.Popen(command)
         logins.append(login)
         deadline = time.monotonic() + 30
         while not marker.exists() and login.poll() is None and time.monotonic() < deadline:
@@ -1115,9 +1143,9 @@ def test_a_login_in_a_second_process_waits_for_the_refresh_lock_and_wins(
         except subprocess.TimeoutExpired:
             pass
         found_under_the_lock.append((marker.exists(), login.returncode, store.load()))
-        replace_file(path, contents)
+        replacing(source, destination)
 
-    monkeypatch.setattr("navimow_collector.auth.replace_file", write_while_a_login_runs)
+    monkeypatch.setattr(os, "replace", replace_while_a_login_runs)
     tokens = TokenManager(
         TokenClient(FakeSession([Response(200, token("refreshed-old-grant"))]), "id", "secret"),
         store,
@@ -1136,3 +1164,49 @@ def test_a_login_in_a_second_process_waits_for_the_refresh_lock_and_wins(
 
     assert stored(store).access_token == "relogged"  # the blocked login wrote last and wins
     assert run(tokens.access_token()) == "relogged"  # and the manager adopts it
+
+
+def test_a_refresh_waits_for_a_login_saving_in_a_second_process_and_yields_to_it(
+    tmp_path: Path,
+) -> None:
+    # The refresh must read the state file under the lock it writes under: reading any
+    # sooner, it would overwrite a login saved in between with the grant that login replaced.
+    store = logged_in(tmp_path)
+    saving, release = tmp_path / "login-is-saving", tmp_path / "let-the-login-save"
+    requested = threading.Event()
+
+    class Signalling(FakeSession):
+        def request(self, method: str, url: str, **kwargs: Any) -> Request:
+            requested.set()
+            return super().request(method, url, **kwargs)
+
+    tokens = TokenManager(
+        TokenClient(Signalling([Response(200, token("refreshed-old-grant"))]), "id", "secret"),
+        store,
+        clock=lambda: 3300,
+    )
+    login = subprocess.Popen(login_in_a_second_process(tmp_path, store, saving, release))
+    refreshing = ThreadPoolExecutor(max_workers=1)
+    try:
+        deadline = time.monotonic() + 30
+        while not saving.exists() and login.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert saving.exists(), "the login never came to save its credential"
+
+        refresh = refreshing.submit(run, tokens.access_token())
+        assert requested.wait(30), "the refresh never asked for a token"
+        # Waiting can only be shown by its lasting: from its token request the refresh needs
+        # microseconds to reach the state file, and is given half a second.
+        time.sleep(0.5)
+        assert not refresh.done(), "the refresh did not wait for the login to finish saving"
+
+        release.touch()
+        assert login.wait(timeout=30) == 0
+        assert refresh.result(timeout=30) == "relogged"  # found under the lock, and adopted
+    finally:
+        release.touch()  # nothing is left waiting, whatever failed above
+        login.kill()
+        login.wait()
+        refreshing.shutdown()
+
+    assert stored(store).access_token == "relogged"  # the refresh did not write over it
