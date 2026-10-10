@@ -855,6 +855,26 @@ def test_the_login_command_is_the_plain_one_by_default(tmp_path: Path) -> None:
     assert manager(logged_in(tmp_path)).login_command == "navimow-collector login"
 
 
+def test_an_mqtt_error_that_is_not_oauth_does_not_blame_the_token(tmp_path: Path) -> None:
+    session = FakeSession([])
+    tokens = TokenManager(
+        TokenClient(session, "id", "secret"), logged_in(tmp_path), clock=lambda: 1
+    )
+
+    assert run(tokens.on_mqtt_error("connection reset by peer", "access")) == "access"
+
+    assert session.forms == []  # no rejection was reported, so nothing to refresh yet
+    assert tokens.state is AuthState.FRESH
+
+
+def test_an_mqtt_error_that_is_not_oauth_still_refreshes_a_token_that_is_due(
+    tmp_path: Path,
+) -> None:
+    tokens = manager(logged_in(tmp_path), Response(200, token("new")))  # past the margin
+
+    assert run(tokens.on_mqtt_error("connection reset by peer", "access")) == "new"
+
+
 # The tests above drive fakes; the ones below pin the contracts those fakes assume onto the
 # SDK's real UrllibSession, exercised against a local stand-in for the token endpoint.
 
@@ -862,15 +882,15 @@ def test_the_login_command_is_the_plain_one_by_default(tmp_path: Path) -> None:
 @contextmanager
 def vendor_endpoint(
     monkeypatch: pytest.MonkeyPatch,
-    *responses: tuple[int, str],
+    response: tuple[int, str] = (200, ""),
+    *,
     stall: threading.Event | None = None,
 ) -> Iterator[list[tuple[str | None, str]]]:
-    """A local token endpoint answering the scripted responses, yielding what it received.
+    """A local token endpoint answering `response`, yielding what it received.
 
     With `stall`, the endpoint holds every request until the event is set at teardown, so
     only the client's own timeout can end the request.
     """
-    scripted = list(responses)
     received: list[tuple[str | None, str]] = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -878,9 +898,9 @@ def vendor_endpoint(
             length = int(self.headers.get("Content-Length") or 0)
             received.append((self.headers.get("Content-Type"), self.rfile.read(length).decode()))
             if stall is not None:
-                stall.wait(10)  # far beyond any session timeout under test
+                stall.wait(30)  # far beyond any session timeout under test
                 return  # the client gave up long ago; there is nobody to answer
-            status, body = scripted.pop(0)
+            status, body = response
             payload = body.encode()
             self.send_response(status)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
@@ -932,7 +952,13 @@ def test_the_real_session_posts_the_token_request_as_a_form(
 
 @pytest.mark.parametrize(
     ("status", "body", "relogin"),
-    [(401, "Authentication required", True), (503, TOO_FREQUENT, False)],
+    [
+        # No re-login word in the body: only the status digits can classify it as dead.
+        (401, "Authentication required", True),
+        # "invalid" in a gateway's page would mean re-login as prose: only the 5xx status
+        # rule keeps it transient, so this pins that rule through the real session too.
+        (503, "The proxy server received an invalid response from an upstream server.", False),
+    ],
 )
 def test_the_real_session_returns_vendor_errors_as_responses_for_classification(
     monkeypatch: pytest.MonkeyPatch, status: int, body: str, relogin: bool
@@ -951,8 +977,7 @@ def test_a_hung_token_request_is_bounded_by_the_session_timeout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # The refresh runs under the manager's lock, so a hang without a bound would block every
-    # caller for good. Production relies on the session's default timeout for that bound.
-    assert UrllibSession().timeout == 30.0
+    # caller for good.
     stall = threading.Event()
     with vendor_endpoint(monkeypatch, stall=stall):
         tokens = TokenManager(
@@ -971,13 +996,33 @@ def test_a_hung_token_request_is_bounded_by_the_session_timeout(
     assert tokens.state is AuthState.RETRY_PENDING
 
 
-# The real `login` command, run as a second process with the network stubbed out.
+def test_the_real_session_defaults_to_a_thirty_second_timeout() -> None:
+    # The hang test proves the session timeout bounds a hung request; this pins the default
+    # that gives production, which constructs the session with no arguments, the same bound.
+    assert UrllibSession().timeout == 30.0
+
+
+# The real `login` command, run as a second process with the network stubbed out. Touching
+# the marker from inside the state-file flock call itself tells the parent the login is at
+# most one syscall away from the lock, not merely somewhere in CLI startup.
 LOGIN_IN_A_SECOND_PROCESS = """\
+import fcntl
 import json
 import sys
 from pathlib import Path
 
 from navimow_collector.cli import main
+
+config, marker = sys.argv[1], Path(sys.argv[2])
+locking = fcntl.flock
+
+
+def flock_touching_the_marker(descriptor, operation):
+    marker.touch()
+    return locking(descriptor, operation)
+
+
+fcntl.flock = flock_touching_the_marker
 
 
 class Response:
@@ -1004,8 +1049,6 @@ class Session:
         return Request()
 
 
-config, marker = sys.argv[1], sys.argv[2]
-Path(marker).touch()  # from here to the state-file lock is only the exchange of a canned code
 sys.exit(main(["--config", config, "login", "--code", "relogin-code"], session_factory=Session))
 """
 
@@ -1030,7 +1073,7 @@ def test_a_login_in_a_second_process_waits_for_the_refresh_lock_and_wins(tmp_pat
             while not marker.exists():
                 assert time.monotonic() < deadline, "the login process never got started"
                 time.sleep(0.01)
-            time.sleep(0.5)  # ample time for the login to reach the state-file lock
+            time.sleep(0.3)  # the marker is touched from inside the login's flock call
             # The login blocks on the lock this refresh holds instead of writing mid-save.
             assert stored(self).access_token == "access"
             super()._write(credential)
@@ -1046,23 +1089,3 @@ def test_a_login_in_a_second_process_waits_for_the_refresh_lock_and_wins(tmp_pat
 
     assert stored(store).access_token == "relogged"  # the blocked login wrote last and wins
     assert run(tokens.access_token()) == "relogged"  # and the manager adopts it
-
-
-def test_an_mqtt_error_that_is_not_oauth_does_not_blame_the_token(tmp_path: Path) -> None:
-    session = FakeSession([])
-    tokens = TokenManager(
-        TokenClient(session, "id", "secret"), logged_in(tmp_path), clock=lambda: 1
-    )
-
-    assert run(tokens.on_mqtt_error("connection reset by peer", "access")) == "access"
-
-    assert session.forms == []  # no rejection was reported, so nothing to refresh yet
-    assert tokens.state is AuthState.FRESH
-
-
-def test_an_mqtt_error_that_is_not_oauth_still_refreshes_a_token_that_is_due(
-    tmp_path: Path,
-) -> None:
-    tokens = manager(logged_in(tmp_path), Response(200, token("new")))  # past the margin
-
-    assert run(tokens.on_mqtt_error("connection reset by peer", "access")) == "new"
