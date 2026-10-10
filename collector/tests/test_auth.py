@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 import os
 import subprocess
@@ -932,21 +931,22 @@ def vendor_endpoint(
 def test_the_real_session_posts_the_token_request_as_a_form(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # A code and a secret with characters a form must escape, or they arrive as other fields.
     with vendor_endpoint(monkeypatch, (200, token())) as received:
         credential = run(
-            TokenClient(UrllibSession(), "client", "secret").exchange(
-                "one-time-code", "http://localhost:1/callback", now=10
+            TokenClient(UrllibSession(), "client", "s3cr&t+%2F").exchange(
+                "one+time&code==", "http://localhost:1/callback", now=10
             )
         )
 
     assert credential == Credential("access", "refresh", 3600, 10)
     [(content_type, body)] = received
     assert content_type == "application/x-www-form-urlencoded"
-    assert parse_qs(body) == {
+    assert parse_qs(body, strict_parsing=True) == {
         "grant_type": ["authorization_code"],
-        "code": ["one-time-code"],
+        "code": ["one+time&code=="],
         "client_id": ["client"],
-        "client_secret": ["secret"],
+        "client_secret": ["s3cr&t+%2F"],
         "redirect_uri": ["http://localhost:1/callback"],
     }
 
@@ -1004,36 +1004,54 @@ def test_a_hung_token_request_is_bounded_by_the_session_timeout(
     assert tokens.state is AuthState.RETRY_PENDING
 
 
-def test_the_session_the_cli_builds_times_out_after_thirty_seconds() -> None:
-    # The hang test proves the session timeout bounds a hung request; this pins the bound
-    # production gets from the session `navimow-collector` builds when given none.
-    session = inspect.signature(main).parameters["session_factory"].default()
+def test_the_cli_gives_a_token_request_thirty_seconds_to_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The hang test proves a session's timeout bounds a hung request; this pins the bound a
+    # request really gets when `navimow-collector` is left to build the session itself.
+    config = tmp_path / "collector.toml"
+    config.write_text(f'[auth]\nstate_file = "{tmp_path / "tokens.json"}"\n')
+    timeouts: list[float | None] = []
+    open_url = urllib.request.OpenerDirector.open
 
-    assert isinstance(session, UrllibSession)
-    assert session.timeout == 30.0
+    def recording_open(
+        opener: urllib.request.OpenerDirector,
+        url: Any,
+        data: Any = None,
+        timeout: float | None = None,
+    ) -> Any:
+        timeouts.append(timeout)
+        return open_url(opener, url, data, timeout)
+
+    monkeypatch.setattr(urllib.request.OpenerDirector, "open", recording_open)
+    with vendor_endpoint(monkeypatch, (200, token())) as received:
+        assert main(["--config", str(config), "login", "--code", "pasted"]) == 0
+
+    assert len(received) == 1
+    assert timeouts == [30.0]
 
 
 # The real `login` command, run as a second process with the network stubbed out. Touching
-# the marker from inside the state-file flock call itself tells the parent the login is at
-# most one syscall away from the lock, not merely somewhere in CLI startup.
+# the marker as the login comes to save tells the parent it is a few syscalls from the
+# state-file lock, not merely somewhere in CLI startup, however that lock is taken.
 LOGIN_IN_A_SECOND_PROCESS = """\
-import fcntl
 import json
 import sys
 from pathlib import Path
 
+from navimow_collector.auth import TokenStore
 from navimow_collector.cli import main
 
 config, marker = sys.argv[1], Path(sys.argv[2])
-locking = fcntl.flock
+saving = TokenStore.save
 
 
-def flock_touching_the_marker(descriptor, operation):
+def save_touching_the_marker(store, credential):
     marker.touch()
-    return locking(descriptor, operation)
+    saving(store, credential)
 
 
-fcntl.flock = flock_touching_the_marker
+TokenStore.save = save_touching_the_marker
 
 
 class Response:
@@ -1081,10 +1099,10 @@ def test_a_login_in_a_second_process_waits_for_the_refresh_lock_and_wins(tmp_pat
             logins.append(login)
             deadline = time.monotonic() + 30
             while not marker.exists():
-                assert login.poll() is None, "the login finished without waiting for the lock"
-                assert time.monotonic() < deadline, "the login process never got started"
+                assert login.poll() is None, "the login finished without saving a credential"
+                assert time.monotonic() < deadline, "the login never came to save a credential"
                 time.sleep(0.01)
-            time.sleep(0.3)  # the marker is touched from inside the login's flock call
+            time.sleep(0.3)  # the marker is touched as the login's save begins
             # The login blocks on the lock this refresh holds instead of writing mid-save.
             assert stored(self).access_token == "access"
             super()._write(credential)
