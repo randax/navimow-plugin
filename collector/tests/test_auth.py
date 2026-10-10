@@ -14,7 +14,7 @@ import time
 import urllib.request
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from ipaddress import ip_address
 from pathlib import Path
@@ -75,9 +75,11 @@ def need_ipv6() -> None:
 
 
 def held(host: str, port: int) -> bool:
-    """Whether anyone still holds a port on one address of this machine."""
+    """Whether anyone still listens on a port at one address of this machine."""
     try:
         with socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET) as taker:
+            # As the listener binds: past a connection lately closed, not past a listener.
+            taker.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             taker.bind((host, port))
     except OSError:
         return True
@@ -458,14 +460,23 @@ def test_loopback_listener_takes_the_redirect_on_either_address_of_localhost(hos
 
 def test_loopback_listener_once_left_holds_no_address_and_no_thread() -> None:
     need_ipv6()
-    threads = threading.active_count()
+    threads = set(threading.enumerate())
 
     with LoopbackListener("expected") as listener:
         port = port_of(listener)
 
     assert not held("127.0.0.1", port)
     assert not held("::1", port)
-    assert threading.active_count() <= threads
+    assert set(threading.enumerate()) <= threads
+
+
+def test_loopback_listener_entered_a_second_time_refuses_and_serves_on() -> None:
+    with LoopbackListener("expected") as listener:
+        with pytest.raises(RuntimeError, match="entered once"):
+            listener.__enter__()
+        redirect_to(f"127.0.0.1:{port_of(listener)}")
+
+        assert listener.wait(timeout=1) == "from-browser"
 
 
 def test_loopback_listener_that_cannot_start_leaves_nothing_behind(
@@ -473,7 +484,7 @@ def test_loopback_listener_that_cannot_start_leaves_nothing_behind(
 ) -> None:
     need_ipv6()
     listener = LoopbackListener("expected")
-    threads = threading.active_count()
+    threads = set(threading.enumerate())
     start = threading.Thread.start
     started: list[threading.Thread] = []
 
@@ -490,7 +501,7 @@ def test_loopback_listener_that_cannot_start_leaves_nothing_behind(
 
     assert not held("127.0.0.1", port_of(listener))
     assert not held("::1", port_of(listener))
-    assert threading.active_count() <= threads
+    assert set(threading.enumerate()) <= threads
 
 
 @pytest.mark.parametrize(
@@ -501,10 +512,16 @@ def test_loopback_listener_is_out_of_reach_from_the_network(family: socket.Addre
     if address is None:
         pytest.skip(f"this host has no {family.name} address on a network")
 
-    with LoopbackListener("expected") as listener, socket.socket(family) as caller:
-        caller.settimeout(2)
-        with pytest.raises(OSError):
-            caller.connect((address, port_of(listener)))
+    host = f"[{address}]" if family is socket.AF_INET6 else address
+
+    with LoopbackListener("expected") as listener:
+        # Refused, or answered by whoever else holds the port at that address: either way
+        # the redirect is not the listener's.
+        with suppress(Exception):
+            redirect_to(f"{host}:{port_of(listener)}")
+
+        with pytest.raises(TimeoutError):
+            listener.wait(timeout=0)
 
 
 @pytest.mark.parametrize("missing", [errno.EAFNOSUPPORT, errno.EADDRNOTAVAIL])
@@ -540,7 +557,7 @@ def test_loopback_listener_never_shares_its_port_with_a_stranger_on_ipv6() -> No
     with stranger_on_ipv6() as port:
         with pytest.raises(
             OSError,
-            match=r"cannot listen for the login redirect on \[::1\]:\d+: Address already in use",
+            match=r"cannot listen on \[::1\]:\d+: Address already in use",
         ) as refused:  # kept, and with it whatever the listener still holds
             LoopbackListener("expected", port=port)
 
@@ -571,7 +588,8 @@ def test_a_login_that_cannot_listen_points_to_the_headless_way_in(
     assert main(["--config", str(config), "login", "--timeout", "0.05"]) == 2
 
     err = capsys.readouterr().err
-    assert "cannot listen for the login redirect on [::1]" in err
+    assert "no listener for the login redirect" in err
+    assert "cannot listen on [::1]" in err
     assert "navimow-collector login --no-browser" in err
 
 

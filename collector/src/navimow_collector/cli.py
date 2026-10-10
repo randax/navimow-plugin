@@ -220,7 +220,9 @@ def _browser_code(client_id: str, timeout: float) -> tuple[str, str]:
     try:
         listener = LoopbackListener(state)
     except OSError as error:
-        raise OSError(f"{error}; run the login again, or {headless}") from error
+        raise OSError(
+            f"no listener for the login redirect ({error}); run the login again, or {headless}"
+        ) from error
     with listener:
         url = authorization_url(client_id, listener.redirect_uri, state)
         print(url)

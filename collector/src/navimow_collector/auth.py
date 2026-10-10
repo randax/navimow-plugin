@@ -34,7 +34,8 @@ MQTT_OAUTH_ERROR = "CODE_OAUTH_INFO_ILLEGAL"
 # written beside the service is acted on within a minute.
 POLL_SECONDS = 60
 DEFAULT_LIFETIME_SECONDS = 3600
-# What binding ::1 fails with on a host without IPv6: none at all, or none on loopback.
+# What listening on ::1 fails with on a host without IPv6: no such socket to be had, or no
+# such address to bind it to.
 _NO_IPV6 = (errno.EAFNOSUPPORT, errno.EADDRNOTAVAIL)
 
 _LOGGER = logging.getLogger(__name__)
@@ -499,8 +500,7 @@ def _loopback_servers(
         # ::1 with no one to answer it, or with whoever else holds the port there.
         ipv4.server_close()
         raise OSError(
-            error.errno,
-            f"cannot listen for the login redirect on [::1]:{ipv4.server_port}: {error.strerror}",
+            error.errno, f"cannot listen on [::1]:{ipv4.server_port}: {error.strerror}"
         ) from error
 
 
@@ -530,7 +530,7 @@ class LoopbackListener:
                 return None
 
         self._servers = _loopback_servers(port, CallbackHandler)
-        self._serving = ExitStack()
+        self._serving: ExitStack | None = None
 
     @property
     def redirect_uri(self) -> str:
@@ -553,6 +553,8 @@ class LoopbackListener:
             return True
 
     def __enter__(self) -> LoopbackListener:
+        if self._serving is not None:
+            raise RuntimeError("a login listener is entered once")
         with ExitStack() as started:  # undone here, should a thread not start
             for server in self._servers:
                 started.callback(server.server_close)
@@ -566,7 +568,8 @@ class LoopbackListener:
         return self
 
     def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
-        self._serving.close()
+        if self._serving is not None:
+            self._serving.close()
 
     def wait(self, timeout: float) -> str:
         """Wait for exactly one valid redirect instead of trusting arbitrary local traffic."""
