@@ -498,6 +498,8 @@ def test_loopback_listener_that_cannot_start_leaves_nothing_behind(
 
     with pytest.raises(RuntimeError, match="can't start new thread"), listener:
         pass
+    with pytest.raises(RuntimeError, match="entered once"):
+        listener.__enter__()
 
     assert not held("127.0.0.1", port_of(listener))
     assert not held("::1", port_of(listener))
@@ -512,13 +514,15 @@ def test_loopback_listener_is_out_of_reach_from_the_network(family: socket.Addre
     if address is None:
         pytest.skip(f"this host has no {family.name} address on a network")
 
-    host = f"[{address}]" if family is socket.AF_INET6 else address
-
     with LoopbackListener("expected") as listener:
         # Refused, or answered by whoever else holds the port at that address: either way
-        # the redirect is not the listener's.
-        with suppress(Exception):
-            redirect_to(f"{host}:{port_of(listener)}")
+        # the redirect is not the listener's, which would have taken it before answering.
+        with (
+            suppress(OSError),
+            socket.create_connection((address, port_of(listener)), timeout=2) as caller,
+        ):
+            caller.sendall(b"GET /callback?code=from-browser&state=expected HTTP/1.0\r\n\r\n")
+            caller.recv(1)
 
         with pytest.raises(TimeoutError):
             listener.wait(timeout=0)

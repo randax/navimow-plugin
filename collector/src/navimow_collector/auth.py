@@ -555,6 +555,7 @@ class LoopbackListener:
     def __enter__(self) -> LoopbackListener:
         if self._serving is not None:
             raise RuntimeError("a login listener is entered once")
+        self._serving = ExitStack()
         with ExitStack() as started:  # undone here, should a thread not start
             for server in self._servers:
                 started.callback(server.server_close)
