@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import os
 import socket
@@ -53,6 +54,26 @@ def has_ipv6_loopback() -> bool:
 
 
 needs_ipv6 = pytest.mark.skipif(not has_ipv6_loopback(), reason="this host has no IPv6 loopback")
+
+
+def fail_ipv6(monkeypatch: pytest.MonkeyPatch, number: int) -> None:
+    """Have the system refuse every IPv6 socket, as on a host this one is not."""
+
+    class Socket(socket.socket):
+        def __init__(self, family: int = -1, *args: Any, **kwargs: Any) -> None:
+            if family == socket.AF_INET6:
+                raise OSError(number, os.strerror(number))
+            super().__init__(family, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "socket", Socket)
+
+
+def redirect_to(address: str) -> None:
+    """Follow the login redirect to one address of this machine, past any proxy the
+    environment names: `no_proxy` seldom lists ::1."""
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(f"http://{address}/callback?code=from-browser&state=expected", timeout=5):
+        pass
 
 
 class Response:
@@ -379,13 +400,34 @@ def test_loopback_listener_captures_and_validates_the_redirect() -> None:
 def test_loopback_listener_takes_the_redirect_on_either_address_of_localhost(host: str) -> None:
     # The redirect names `localhost`, which a browser may resolve to ::1 and never retry.
     with LoopbackListener("expected") as listener:
-        port = urlsplit(listener.redirect_uri).port
-        with urllib.request.urlopen(
-            f"http://{host}:{port}/callback?code=from-browser&state=expected"
-        ):
-            pass
+        redirect_to(f"{host}:{urlsplit(listener.redirect_uri).port}")
 
         assert listener.wait(timeout=1) == "from-browser"
+
+
+@pytest.mark.parametrize("missing", [errno.EAFNOSUPPORT, errno.EADDRNOTAVAIL])
+def test_loopback_listener_serves_ipv4_alone_on_a_host_without_ipv6(
+    missing: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fail_ipv6(monkeypatch, missing)
+
+    with LoopbackListener("expected") as listener:
+        redirect_to(f"127.0.0.1:{urlsplit(listener.redirect_uri).port}")
+
+        assert listener.wait(timeout=1) == "from-browser"
+
+
+def test_loopback_listener_does_not_take_a_failing_ipv6_for_a_missing_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Out of file descriptors is not a host without IPv6: on 127.0.0.1 alone, a browser
+    # that takes `localhost` to be ::1 would wait out the timeout with nothing to say why.
+    fail_ipv6(monkeypatch, errno.EMFILE)
+
+    with pytest.raises(OSError) as refused:
+        LoopbackListener("expected")
+
+    assert refused.value.errno == errno.EMFILE
 
 
 @needs_ipv6
@@ -396,7 +438,7 @@ def test_loopback_listener_never_shares_its_port_with_a_stranger_on_ipv6() -> No
         stranger.bind(("::1", 0))
         stranger.listen()
 
-        with pytest.raises(OSError, match="no port is free on both"):
+        with pytest.raises(OSError, match="held on ::1 by another process"):
             LoopbackListener("expected", port=stranger.getsockname()[1])
 
 

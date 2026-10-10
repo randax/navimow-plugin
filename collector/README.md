@@ -140,9 +140,9 @@ navimow-collector login
 
 The command opens (and prints) a Navimow sign-in URL, listens briefly on a
 temporary localhost callback, then writes the credential state with owner-only
-permissions. The callback is answered on both 127.0.0.1 and ::1, whichever of
-them the browser takes `localhost` to be. Use `--timeout` to change the
-five-minute callback wait.
+permissions. On a machine with IPv6 the callback is answered on ::1 as well as
+127.0.0.1, whichever of them the browser takes `localhost` to be. Use
+`--timeout` to change the five-minute callback wait.
 
 For a headless machine, print a URL and open it on any browser. After the
 browser redirects to the deliberately unavailable `localhost:1` address, copy
