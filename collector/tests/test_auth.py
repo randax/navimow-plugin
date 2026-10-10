@@ -16,6 +16,7 @@ from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from ipaddress import ip_address
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
@@ -48,9 +49,23 @@ def has_ipv6_loopback() -> bool:
     try:
         with socket.socket(socket.AF_INET6) as probe:
             probe.bind(("::1", 0))
-    except OSError:
+    except OSError as error:
+        if error.errno not in (errno.EAFNOSUPPORT, errno.EADDRNOTAVAIL):
+            raise  # a fault of some other kind, which a skip would hide
         return False
     return True
+
+
+def address_on_the_network(family: socket.AddressFamily) -> str | None:
+    """An address others on its network reach this machine by, where it has one."""
+    elsewhere = {socket.AF_INET: "192.0.2.1", socket.AF_INET6: "2001:db8::1"}[family]
+    try:
+        with socket.socket(family, socket.SOCK_DGRAM) as probe:
+            probe.connect((elsewhere, 9))  # routed, never sent: a datagram socket only aims
+            address: str = probe.getsockname()[0]
+    except OSError:
+        return None
+    return None if ip_address(address).is_loopback else address
 
 
 needs_ipv6 = pytest.mark.skipif(not has_ipv6_loopback(), reason="this host has no IPv6 loopback")
@@ -405,6 +420,18 @@ def test_loopback_listener_takes_the_redirect_on_either_address_of_localhost(hos
         assert listener.wait(timeout=1) == "from-browser"
 
 
+@pytest.mark.parametrize("family", [socket.AF_INET, socket.AF_INET6])
+def test_loopback_listener_is_out_of_reach_from_the_network(family: socket.AddressFamily) -> None:
+    address = address_on_the_network(family)
+    if address is None:
+        pytest.skip(f"this host has no {family.name} address on a network")
+
+    with LoopbackListener("expected") as listener, socket.socket(family) as caller:
+        caller.settimeout(2)
+        with pytest.raises(OSError):
+            caller.connect((address, urlsplit(listener.redirect_uri).port))
+
+
 @pytest.mark.parametrize("missing", [errno.EAFNOSUPPORT, errno.EADDRNOTAVAIL])
 def test_loopback_listener_serves_ipv4_alone_on_a_host_without_ipv6(
     missing: int, monkeypatch: pytest.MonkeyPatch
@@ -438,7 +465,10 @@ def test_loopback_listener_never_shares_its_port_with_a_stranger_on_ipv6() -> No
         stranger.bind(("::1", 0))
         stranger.listen()
 
-        with pytest.raises(OSError, match="held on ::1 by another process"):
+        with pytest.raises(
+            OSError,
+            match=r"cannot listen for the login redirect on \[::1\]:\d+: Address already in use",
+        ):
             LoopbackListener("expected", port=stranger.getsockname()[1])
 
 

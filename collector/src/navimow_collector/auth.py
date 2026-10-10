@@ -495,14 +495,12 @@ def _loopback_servers(
     except OSError as error:
         if error.errno in _NO_IPV6:
             return [ipv4]
-        ipv4.server_close()
-        if error.errno != errno.EADDRINUSE:
-            raise
         # Listening on 127.0.0.1 alone would leave a browser that takes `localhost` to be
-        # ::1 handing the redirect to whoever holds the port there.
+        # ::1 with no one to answer it, or with whoever else holds the port there.
+        ipv4.server_close()
         raise OSError(
-            errno.EADDRINUSE,
-            f"port {ipv4.server_port} is held on ::1 by another process; run the login again",
+            error.errno,
+            f"cannot listen for the login redirect on [::1]:{ipv4.server_port}: {error.strerror}",
         ) from error
 
 
