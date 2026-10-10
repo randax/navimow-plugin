@@ -5,12 +5,20 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import subprocess
+import sys
+import threading
+import time
 import urllib.request
+from collections.abc import Iterator
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs
 
 import pytest
-from mower_sdk.http import HTTPClientError
+from mower_sdk.http import HTTPClientError, UrllibSession
 
 from navimow_collector.auth import (
     AuthState,
@@ -845,3 +853,216 @@ def test_starting_without_a_login_names_the_exact_command(
 
 def test_the_login_command_is_the_plain_one_by_default(tmp_path: Path) -> None:
     assert manager(logged_in(tmp_path)).login_command == "navimow-collector login"
+
+
+# The tests above drive fakes; the ones below pin the contracts those fakes assume onto the
+# SDK's real UrllibSession, exercised against a local stand-in for the token endpoint.
+
+
+@contextmanager
+def vendor_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+    *responses: tuple[int, str],
+    stall: threading.Event | None = None,
+) -> Iterator[list[tuple[str | None, str]]]:
+    """A local token endpoint answering the scripted responses, yielding what it received.
+
+    With `stall`, the endpoint holds every request until the event is set at teardown, so
+    only the client's own timeout can end the request.
+    """
+    scripted = list(responses)
+    received: list[tuple[str | None, str]] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802 - required by BaseHTTPRequestHandler
+            length = int(self.headers.get("Content-Length") or 0)
+            received.append((self.headers.get("Content-Type"), self.rfile.read(length).decode()))
+            if stall is not None:
+                stall.wait(10)  # far beyond any session timeout under test
+                return  # the client gave up long ago; there is nobody to answer
+            status, body = scripted.pop(0)
+            payload = body.encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, format: str, *args: object) -> None:
+            return None
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setattr(
+        "navimow_collector.auth.TOKEN_URL",
+        f"http://127.0.0.1:{server.server_port}/openapi/oauth/getAccessToken",
+    )
+    try:
+        yield received
+    finally:
+        if stall is not None:
+            stall.set()
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_the_real_session_posts_the_token_request_as_a_form(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with vendor_endpoint(monkeypatch, (200, token())) as received:
+        credential = run(
+            TokenClient(UrllibSession(), "client", "secret").exchange(
+                "one-time-code", "http://localhost:1/callback", now=10
+            )
+        )
+
+    assert credential == Credential("access", "refresh", 3600, 10)
+    [(content_type, body)] = received
+    assert content_type == "application/x-www-form-urlencoded"
+    assert parse_qs(body) == {
+        "grant_type": ["authorization_code"],
+        "code": ["one-time-code"],
+        "client_id": ["client"],
+        "client_secret": ["secret"],
+        "redirect_uri": ["http://localhost:1/callback"],
+    }
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "relogin"),
+    [(401, "Authentication required", True), (503, TOO_FREQUENT, False)],
+)
+def test_the_real_session_returns_vendor_errors_as_responses_for_classification(
+    monkeypatch: pytest.MonkeyPatch, status: int, body: str, relogin: bool
+) -> None:
+    # urllib raises on 4xx/5xx; the session must hand them back as responses with a status,
+    # or every rejection would look like a transport error and re-login would never be seen.
+    with vendor_endpoint(monkeypatch, (status, body)):
+        client = TokenClient(UrllibSession(), "id", "secret")
+        with pytest.raises(TokenRequestError) as raised:
+            run(client.refresh(Credential("access", "refresh", 3600, 0), now=1))
+
+    assert raised.value.relogin is relogin
+
+
+def test_a_hung_token_request_is_bounded_by_the_session_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The refresh runs under the manager's lock, so a hang without a bound would block every
+    # caller for good. Production relies on the session's default timeout for that bound.
+    assert UrllibSession().timeout == 30.0
+    stall = threading.Event()
+    with vendor_endpoint(monkeypatch, stall=stall):
+        tokens = TokenManager(
+            TokenClient(UrllibSession(timeout=0.3), "id", "secret"),
+            logged_in(tmp_path),
+            clock=lambda: 3300,
+        )
+
+        async def concurrent_callers() -> list[str | None]:
+            return list(await asyncio.gather(tokens.access_token(), tokens.access_token()))
+
+        started = time.monotonic()
+        assert run(concurrent_callers()) == ["access", "access"]
+        assert time.monotonic() - started < 10  # the timeout set the pace, not the hang
+
+    assert tokens.state is AuthState.RETRY_PENDING
+
+
+# The real `login` command, run as a second process with the network stubbed out.
+LOGIN_IN_A_SECOND_PROCESS = """\
+import json
+import sys
+from pathlib import Path
+
+from navimow_collector.cli import main
+
+
+class Response:
+    status = 200
+
+    async def text(self):
+        return json.dumps(
+            {"access_token": "relogged", "refresh_token": "refresh", "expires_in": 3600}
+        )
+
+
+class Request:
+    async def __aenter__(self):
+        return Response()
+
+    async def __aexit__(self, *exceptions):
+        return None
+
+
+class Session:
+    closed = False
+
+    def request(self, method, url, **kwargs):
+        return Request()
+
+
+config, marker = sys.argv[1], sys.argv[2]
+Path(marker).touch()  # from here to the state-file lock is only the exchange of a canned code
+sys.exit(main(["--config", config, "login", "--code", "relogin-code"], session_factory=Session))
+"""
+
+
+def test_a_login_in_a_second_process_waits_for_the_refresh_lock_and_wins(tmp_path: Path) -> None:
+    store = logged_in(tmp_path)
+    config = tmp_path / "collector.toml"
+    config.write_text(f'[auth]\nstate_file = "{store.path}"\n')
+    script = tmp_path / "login_in_a_second_process.py"
+    script.write_text(LOGIN_IN_A_SECOND_PROCESS)
+    marker = tmp_path / "about-to-save"
+    login: dict[str, subprocess.Popen[bytes]] = {}
+
+    class HoldsTheLock(TokenStore):
+        """Run `login` in a second process while this refresh holds the state-file lock."""
+
+        def _write(self, credential: Credential) -> None:
+            login["process"] = subprocess.Popen(
+                [sys.executable, str(script), str(config), str(marker)]
+            )
+            deadline = time.monotonic() + 30
+            while not marker.exists():
+                assert time.monotonic() < deadline, "the login process never got started"
+                time.sleep(0.01)
+            time.sleep(0.5)  # ample time for the login to reach the state-file lock
+            # The login blocks on the lock this refresh holds instead of writing mid-save.
+            assert stored(self).access_token == "access"
+            super()._write(credential)
+
+    tokens = TokenManager(
+        TokenClient(FakeSession([Response(200, token("refreshed-old-grant"))]), "id", "secret"),
+        HoldsTheLock(store.path),
+        clock=lambda: 3300,
+    )
+
+    assert run(tokens.access_token()) == "refreshed-old-grant"
+    assert login["process"].wait(timeout=30) == 0
+
+    assert stored(store).access_token == "relogged"  # the blocked login wrote last and wins
+    assert run(tokens.access_token()) == "relogged"  # and the manager adopts it
+
+
+def test_an_mqtt_error_that_is_not_oauth_does_not_blame_the_token(tmp_path: Path) -> None:
+    session = FakeSession([])
+    tokens = TokenManager(
+        TokenClient(session, "id", "secret"), logged_in(tmp_path), clock=lambda: 1
+    )
+
+    assert run(tokens.on_mqtt_error("connection reset by peer", "access")) == "access"
+
+    assert session.forms == []  # no rejection was reported, so nothing to refresh yet
+    assert tokens.state is AuthState.FRESH
+
+
+def test_an_mqtt_error_that_is_not_oauth_still_refreshes_a_token_that_is_due(
+    tmp_path: Path,
+) -> None:
+    tokens = manager(logged_in(tmp_path), Response(200, token("new")))  # past the margin
+
+    assert run(tokens.on_mqtt_error("connection reset by peer", "access")) == "new"
