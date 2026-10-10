@@ -29,6 +29,7 @@ from navimow_collector.auth import (
     TokenRequestError,
     TokenStore,
     maintain,
+    replace_file,
 )
 from navimow_collector.cli import main
 
@@ -941,7 +942,9 @@ def test_the_real_session_posts_the_token_request_as_a_form(
 
     assert credential == Credential("access", "refresh", 3600, 10)
     [(content_type, body)] = received
-    assert content_type == "application/x-www-form-urlencoded"
+    # The media type, whatever parameters (a charset, say) a session adds to it.
+    assert content_type is not None
+    assert content_type.partition(";")[0].strip() == "application/x-www-form-urlencoded"
     assert parse_qs(body, strict_parsing=True) == {
         "grant_type": ["authorization_code"],
         "code": ["one+time&code=="],
@@ -1004,11 +1007,12 @@ def test_a_hung_token_request_is_bounded_by_the_session_timeout(
     assert tokens.state is AuthState.RETRY_PENDING
 
 
-def test_the_cli_gives_a_token_request_thirty_seconds_to_answer(
+def test_login_left_to_build_its_session_gives_a_token_request_thirty_seconds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # The hang test proves a session's timeout bounds a hung request; this pins the bound a
-    # request really gets when `navimow-collector` is left to build the session itself.
+    # request really gets from the session `navimow-collector` builds when handed none.
+    # Shown on `login`; `collect` is handed its session from that same default.
     config = tmp_path / "collector.toml"
     config.write_text(f'[auth]\nstate_file = "{tmp_path / "tokens.json"}"\n')
     timeouts: list[float | None] = []
@@ -1031,27 +1035,14 @@ def test_the_cli_gives_a_token_request_thirty_seconds_to_answer(
     assert timeouts == [30.0]
 
 
-# The real `login` command, run as a second process with the network stubbed out. Touching
-# the marker as the login comes to save tells the parent it is a few syscalls from the
-# state-file lock, not merely somewhere in CLI startup, however that lock is taken.
+# The real `login` command, run as a second process with the network stubbed out. It marks
+# the moment it starts: from there to wanting the state-file lock is one canned exchange.
 LOGIN_IN_A_SECOND_PROCESS = """\
 import json
 import sys
 from pathlib import Path
 
-from navimow_collector.auth import TokenStore
 from navimow_collector.cli import main
-
-config, marker = sys.argv[1], Path(sys.argv[2])
-saving = TokenStore.save
-
-
-def save_touching_the_marker(store, credential):
-    marker.touch()
-    saving(store, credential)
-
-
-TokenStore.save = save_touching_the_marker
 
 
 class Response:
@@ -1078,45 +1069,57 @@ class Session:
         return Request()
 
 
+config, marker = sys.argv[1], sys.argv[2]
+Path(marker).touch()
 sys.exit(main(["--config", config, "login", "--code", "relogin-code"], session_factory=Session))
 """
 
 
-def test_a_login_in_a_second_process_waits_for_the_refresh_lock_and_wins(tmp_path: Path) -> None:
+def test_a_login_in_a_second_process_waits_for_the_refresh_lock_and_wins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     store = logged_in(tmp_path)
     config = tmp_path / "collector.toml"
     config.write_text(f'[auth]\nstate_file = "{store.path}"\n')
     script = tmp_path / "login_in_a_second_process.py"
     script.write_text(LOGIN_IN_A_SECOND_PROCESS)
-    marker = tmp_path / "about-to-save"
+    marker = tmp_path / "login-started"
     logins: list[subprocess.Popen[bytes]] = []
 
-    class HoldsTheLock(TokenStore):
-        """Run `login` in a second process while this refresh holds the state-file lock."""
+    def write_while_a_login_runs(path: Path, contents: str) -> None:
+        """The refresh's write of the state file, made under its lock, with `login` run
+        in a second process before the write goes ahead."""
+        login = subprocess.Popen([sys.executable, str(script), str(config), str(marker)])
+        logins.append(login)
+        deadline = time.monotonic() + 30
+        while not marker.exists():
+            assert login.poll() is None, "the login process failed before it started"
+            assert time.monotonic() < deadline, "the login process never got started"
+            time.sleep(0.01)
+        # Waiting can only be shown by its lasting: the login needs milliseconds to reach
+        # the lock, and is given a full second in which to finish were nothing holding it.
+        try:
+            login.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            pass
+        else:
+            raise AssertionError(
+                f"the login finished (exit {login.returncode}) while the refresh held the lock"
+            )
+        assert stored(store).access_token == "access"  # and it wrote nothing meanwhile
+        replace_file(path, contents)
 
-        def _write(self, credential: Credential) -> None:
-            login = subprocess.Popen([sys.executable, str(script), str(config), str(marker)])
-            logins.append(login)
-            deadline = time.monotonic() + 30
-            while not marker.exists():
-                assert login.poll() is None, "the login finished without saving a credential"
-                assert time.monotonic() < deadline, "the login never came to save a credential"
-                time.sleep(0.01)
-            time.sleep(0.3)  # the marker is touched as the login's save begins
-            # The login blocks on the lock this refresh holds instead of writing mid-save.
-            assert stored(self).access_token == "access"
-            super()._write(credential)
-
+    monkeypatch.setattr("navimow_collector.auth.replace_file", write_while_a_login_runs)
     tokens = TokenManager(
         TokenClient(FakeSession([Response(200, token("refreshed-old-grant"))]), "id", "secret"),
-        HoldsTheLock(store.path),
+        store,
         clock=lambda: 3300,
     )
 
     try:
         assert run(tokens.access_token()) == "refreshed-old-grant"
-        [login] = logins
-        assert login.wait(timeout=30) == 0
+        assert len(logins) == 1, "the refresh never wrote the state file"
+        assert logins[0].wait(timeout=30) == 0
     finally:
         for login in logins:  # never left running, whatever failed above
             login.kill()
