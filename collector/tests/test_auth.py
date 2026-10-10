@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import os
 import subprocess
@@ -958,13 +959,18 @@ def test_the_real_session_posts_the_token_request_as_a_form(
         # "invalid" in a gateway's page would mean re-login as prose: only the 5xx status
         # rule keeps it transient, so this pins that rule through the real session too.
         (503, "The proxy server received an invalid response from an upstream server.", False),
+        # The error's body must arrive too: here only the vendor's prose says the grant is
+        # dead, and only its prose says a 403 is the gateway throttling.
+        (400, REJECTED_REFRESH, True),
+        (403, CIRCUIT_BREAKER, False),
     ],
 )
 def test_the_real_session_returns_vendor_errors_as_responses_for_classification(
     monkeypatch: pytest.MonkeyPatch, status: int, body: str, relogin: bool
 ) -> None:
-    # urllib raises on 4xx/5xx; the session must hand them back as responses with a status,
-    # or every rejection would look like a transport error and re-login would never be seen.
+    # urllib raises on 4xx/5xx; the session must hand them back as responses with a status
+    # and a body, or every rejection would look like a transport error and re-login would
+    # never be seen.
     with vendor_endpoint(monkeypatch, (status, body)):
         client = TokenClient(UrllibSession(), "id", "secret")
         with pytest.raises(TokenRequestError) as raised:
@@ -979,9 +985,9 @@ def test_a_hung_token_request_is_bounded_by_the_session_timeout(
     # The refresh runs under the manager's lock, so a hang without a bound would block every
     # caller for good.
     stall = threading.Event()
-    with vendor_endpoint(monkeypatch, stall=stall):
+    with vendor_endpoint(monkeypatch, stall=stall) as received:
         tokens = TokenManager(
-            TokenClient(UrllibSession(timeout=0.3), "id", "secret"),
+            TokenClient(UrllibSession(timeout=0.5), "id", "secret"),
             logged_in(tmp_path),
             clock=lambda: 3300,
         )
@@ -991,15 +997,20 @@ def test_a_hung_token_request_is_bounded_by_the_session_timeout(
 
         started = time.monotonic()
         assert run(concurrent_callers()) == ["access", "access"]
-        assert time.monotonic() - started < 10  # the timeout set the pace, not the hang
+        elapsed = time.monotonic() - started
 
+    assert len(received) == 1  # the request reached the endpoint, and was not repeated
+    assert 0.5 <= elapsed < 5  # it hung until the session's timeout, and no longer
     assert tokens.state is AuthState.RETRY_PENDING
 
 
-def test_the_real_session_defaults_to_a_thirty_second_timeout() -> None:
-    # The hang test proves the session timeout bounds a hung request; this pins the default
-    # that gives production, which constructs the session with no arguments, the same bound.
-    assert UrllibSession().timeout == 30.0
+def test_the_session_the_cli_builds_times_out_after_thirty_seconds() -> None:
+    # The hang test proves the session timeout bounds a hung request; this pins the bound
+    # production gets from the session `navimow-collector` builds when given none.
+    session = inspect.signature(main).parameters["session_factory"].default()
+
+    assert isinstance(session, UrllibSession)
+    assert session.timeout == 30.0
 
 
 # The real `login` command, run as a second process with the network stubbed out. Touching
@@ -1060,17 +1071,17 @@ def test_a_login_in_a_second_process_waits_for_the_refresh_lock_and_wins(tmp_pat
     script = tmp_path / "login_in_a_second_process.py"
     script.write_text(LOGIN_IN_A_SECOND_PROCESS)
     marker = tmp_path / "about-to-save"
-    login: dict[str, subprocess.Popen[bytes]] = {}
+    logins: list[subprocess.Popen[bytes]] = []
 
     class HoldsTheLock(TokenStore):
         """Run `login` in a second process while this refresh holds the state-file lock."""
 
         def _write(self, credential: Credential) -> None:
-            login["process"] = subprocess.Popen(
-                [sys.executable, str(script), str(config), str(marker)]
-            )
+            login = subprocess.Popen([sys.executable, str(script), str(config), str(marker)])
+            logins.append(login)
             deadline = time.monotonic() + 30
             while not marker.exists():
+                assert login.poll() is None, "the login finished without waiting for the lock"
                 assert time.monotonic() < deadline, "the login process never got started"
                 time.sleep(0.01)
             time.sleep(0.3)  # the marker is touched from inside the login's flock call
@@ -1084,8 +1095,14 @@ def test_a_login_in_a_second_process_waits_for_the_refresh_lock_and_wins(tmp_pat
         clock=lambda: 3300,
     )
 
-    assert run(tokens.access_token()) == "refreshed-old-grant"
-    assert login["process"].wait(timeout=30) == 0
+    try:
+        assert run(tokens.access_token()) == "refreshed-old-grant"
+        [login] = logins
+        assert login.wait(timeout=30) == 0
+    finally:
+        for login in logins:  # never left running, whatever failed above
+            login.kill()
+            login.wait()
 
     assert stored(store).access_token == "relogged"  # the blocked login wrote last and wins
     assert run(tokens.access_token()) == "relogged"  # and the manager adopts it
