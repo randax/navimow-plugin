@@ -396,7 +396,7 @@ def test_loopback_listener_never_shares_its_port_with_a_stranger_on_ipv6() -> No
         stranger.bind(("::1", 0))
         stranger.listen()
 
-        with pytest.raises(OSError):
+        with pytest.raises(OSError, match="no port is free on both"):
             LoopbackListener("expected", port=stranger.getsockname()[1])
 
 
