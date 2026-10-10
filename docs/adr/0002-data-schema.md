@@ -46,6 +46,16 @@ with `FINAL`.
   (`partitionIds`): the Zones the Job was set to mow. It is empty until the mower has
   listed them, which it does every five minutes or so. A message of that kind with no list
   in it, as the mower sends near the dock, changes nothing.
+- **A Job is told of again whenever it changes**, and a telling replaces the stored one
+  unless it is older by `updated_time`. That is when the mower sent the newest message
+  that changed the Job (a Job given up keeps the time of its telling before), moved on
+  where need be to a microsecond after the telling before: a message sent no later than
+  the last can still change a Job, and of two tellings as of one moment only the order of
+  writing would say which stands. Rows are written out of order by a write that live
+  collection gave up on and the database took late, and by a buffer file read after the
+  rows held in memory. The mower's times are whole milliseconds, and a telling is moved on
+  a microsecond at a time, so short of a thousand tellings as of one millisecond it stays
+  in that millisecond, and when the message was sent is still read from it.
 - **`mower`** is one row per mower as the account's device list describes it, rewritten
   when the list describes it differently; `updated_time` says since when. The firmware
   matters because ADR 0001's rules were checked on one.
@@ -113,6 +123,12 @@ columns.
 - **Retention by default**, of a year or two. Rejected: a season of positions is on the
   order of 100 to 150 MB in PostgreSQL, and a default that deletes mowing history costs the
   owner more than the disk it saves.
+- **A revision number for a Job**, a column beside `updated_time` raised with every
+  telling. Rejected: ClickHouse keeps the later of two rows by `updated_time` alone, which
+  no added column changes, and the buffer file and InfluxDB would each have carried it
+  too, for what a microsecond does.
+- **An attempt given up on rolled back** instead of committed. Rejected: it leaves a
+  commit already sent, and a buffer file read late.
 - **A Job on InfluxDB derived by aggregating its Trail**, as the collector's spec first
   had it. Rejected: a collector starting up reads each mower's latest Job to carry on from
   it, and whether a Job completed, the area it mowed and its dock arrival pose are not in
@@ -129,6 +145,10 @@ columns.
   mower lists its Zones as it leaves the dock, but a third of a second before the state
   channel says it has left, so that list falls outside the Job; the next came 225 seconds
   later in the capture.
+- A collector carries on from each mower's latest Job as storage and its buffer have it.
+  One that starts while its buffer file cannot be read does not see a telling waiting
+  there, and may tell the Job anew as of the same moment: whichever of the two is written
+  last stands, as before #80. A revision number would not have changed that.
 - The device list is read when the collector starts, so a firmware update is recorded at
   the next start, not when it happened.
 - The bundled dashboard has no signal-strength panel until a mower is seen to send one.

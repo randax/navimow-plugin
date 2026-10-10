@@ -23,6 +23,9 @@ AREA_FALL = 1.0
 ARRIVAL_POSE_AGE = timedelta(minutes=2)
 # How many changes of Job a tracker remembers, to place a reading that is delivered late.
 SPANS_KEPT = 64
+# How much later each telling of a Job is than the one before, at least: storage keeps the
+# later of two, and two as of one moment would leave it the order they were written in.
+TOLD_AFTER = timedelta(microseconds=1)
 
 
 class Span(NamedTuple):
@@ -48,9 +51,7 @@ class JobTracker:
         self._spans = [Span(job.start_time, job.job_id)] if job is not None and away else []
         # When the newest state, progress report and Zone list heard were sent. Whatever
         # was sent before a stored Job last changed was heard by the collector that stored it.
-        self._stated_at = self._reported = self._listed = (
-            job.updated_time if job is not None else None
-        )
+        self._stated_at = self._reported = self._listed = _sent(job) if job is not None else None
         self._pose: TrailPoint | None = None  # the newest position
         self._heard = False  # whether the state channel has spoken since the last gap
         # When the Job was left off, while it is only taken to be resumed: the mower left
@@ -128,8 +129,9 @@ class JobTracker:
             if job is not None and job.end_time is None:
                 # Away on a Job, and the mower has started another: it gave the first up
                 # at the dock if it never took it up again, and else where last heard.
-                last_heard = max(job.updated_time, heard or job.updated_time)
-                given_up = [replace(job, end_time=left_off or last_heard)]
+                last_heard = max(_sent(job), heard or _sent(job))
+                self._job = _told(replace(job, end_time=left_off or last_heard), job)
+                given_up = [self._job]
             job, zone = self._begin(time), None
         elif left_unseen:
             job = replace(job, end_time=None)
@@ -167,7 +169,7 @@ class JobTracker:
         if it changed."""
         changed: list[Row] = []
         if job is not None and job != self._job:
-            self._job = replace(job, updated_time=max(job.updated_time, time))
+            self._job = _told(replace(job, updated_time=max(job.updated_time, time)), self._job)
             changed.append(self._job)
         last = self._spans[-1] if self._spans else Span(time)
         span = Span(max(time, last.since))
@@ -185,6 +187,21 @@ class JobTracker:
     def _in_its_job(self, reading: Reading) -> Reading:
         """The reading, naming the Job the mower was on at the reading's own time."""
         return replace(reading, job_id=self._span(reading.device_time).job_id)
+
+
+def _told(job: Job, before: Job | None) -> Job:
+    """The Job, told after `before` where that is a telling of the same Job: a message sent
+    no later than the last can still change it, and is then told of a moment after."""
+    if before is None or before.job_id != job.job_id:
+        return job
+    return replace(job, updated_time=max(job.updated_time, before.updated_time + TOLD_AFTER))
+
+
+def _sent(job: Job) -> datetime:
+    """When the newest of the messages that changed the Job was sent; of a Job given up, when
+    the one before was. The mower's times are whole milliseconds, and a telling moved on stays
+    in the millisecond of the one before."""
+    return job.updated_time - timedelta(microseconds=job.updated_time.microsecond % 1000)
 
 
 def _unfinished(job: Job) -> bool:

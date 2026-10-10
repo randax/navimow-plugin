@@ -15,9 +15,9 @@ import pytest
 from psycopg.rows import dict_row
 
 from navimow_collector.cli import main
-from navimow_collector.ingest import read_capture
+from navimow_collector.ingest import Ingestor, read_capture
 
-from .conftest import FIXTURE
+from .conftest import FIXTURE, Told, told_of
 
 HOUR_MS = 3_600_000
 DAY_MS = 24 * HOUR_MS
@@ -620,3 +620,41 @@ def test_a_report_held_up_from_before_the_charging_break_does_not_confirm_a_resu
     first, second = jobs(replay([*charging, another[0], held_up, *another[1:]]))
     assert (first["end_time"], first["completed"]) == (ms(1788087728135), False)
     assert second["start_time"] == ms(1788085297268 + 90 * 60_000)
+
+
+CHANNEL = "/downlink/vehicle/DEVICE_1/realtimeDate/"
+
+
+@pytest.mark.parametrize(
+    ("channel", "payload", "heard"),
+    [
+        ("location", [{"type": 2, "mowStartType": 1, "subtotalArea": 20}], {"area": 20.0}),
+        ("location", [{"type": 3, "partitionIds": [1, 6]}], {"zones": (1, 6)}),
+        ("state", {"state": "isDocked"}, {"end_time": "sent"}),
+    ],
+    ids=["progress", "zone-list", "state"],
+)
+def test_a_collector_carrying_on_from_a_job_told_of_anew_still_hears_that_millisecond(
+    channel: str, payload: Any, heard: dict[str, Any]
+) -> None:
+    # A telling moved on to after the one before is still of the message it was sent in:
+    # what else the mower sent in that millisecond is no older than what was heard.
+    stored = told_of((0, 9))[-1]
+    told = Told()
+    ingestor = Ingestor(told, jobs=[stored])
+    sent = int(stored.start_time.timestamp() * 1000)
+    for item in payload if isinstance(payload, list) else [payload]:
+        item["time" if channel == "location" else "timestamp"] = sent
+    ingestor.feed({"recv_ms": sent, "kind": "mqtt", "topic": CHANNEL + channel, "payload": payload})
+    ingestor.flush()
+    [job] = told.jobs
+    expected = {key: ms(sent) if value == "sent" else value for key, value in heard.items()}
+    assert {key: getattr(job, key) for key in heard} == expected
+    assert job.updated_time > stored.updated_time
+
+
+def test_a_job_given_up_after_it_was_told_of_anew_ends_in_the_millisecond_last_heard() -> None:
+    # Told of again as the mower left, a microsecond on; given up for another a minute later.
+    first, *_, given_up, _ = told_of((0, 9), (60, 0))
+    assert given_up.job_id == first.job_id
+    assert given_up.end_time == first.start_time
