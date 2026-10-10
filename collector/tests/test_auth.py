@@ -36,7 +36,7 @@ from navimow_collector.auth import (
 )
 from navimow_collector.cli import main
 
-from .conftest import Clock
+from .conftest import Clock, unavailable
 
 # Vendor prose gathered by the token research (docs/research/token-flow.md, sections 1 and 5).
 REJECTED_REFRESH = "Refresh token is invalid or server rejected the request"
@@ -68,7 +68,40 @@ def address_on_the_network(family: socket.AddressFamily) -> str | None:
     return None if ip_address(address).is_loopback else address
 
 
-needs_ipv6 = pytest.mark.skipif(not has_ipv6_loopback(), reason="this host has no IPv6 loopback")
+def need_ipv6() -> None:
+    """Pass by a test of ::1 on a host without it, unless CI says this one has it."""
+    if not has_ipv6_loopback():
+        unavailable("ipv6", "this host has no ::1 to listen on")
+
+
+def held(host: str, port: int) -> bool:
+    """Whether anyone still holds a port on one address of this machine."""
+    try:
+        with socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET) as taker:
+            taker.bind((host, port))
+    except OSError:
+        return True
+    return False
+
+
+@contextmanager
+def stranger_on_ipv6() -> Iterator[int]:
+    """The port of another process listening on ::1, which no one holds on 127.0.0.1."""
+    while True:
+        with socket.socket(socket.AF_INET6) as stranger:
+            stranger.bind(("::1", 0))
+            stranger.listen()
+            port: int = stranger.getsockname()[1]
+            if held("127.0.0.1", port):
+                continue  # by someone else again, and the listener would stop at that
+            yield port
+            return
+
+
+def port_of(listener: LoopbackListener) -> int:
+    port = urlsplit(listener.redirect_uri).port
+    assert port is not None
+    return port
 
 
 def fail_ipv6(monkeypatch: pytest.MonkeyPatch, number: int) -> None:
@@ -411,16 +444,58 @@ def test_loopback_listener_captures_and_validates_the_redirect() -> None:
         assert listener.wait(timeout=1) == "from-browser"
 
 
-@pytest.mark.parametrize("host", ["127.0.0.1", pytest.param("[::1]", marks=needs_ipv6)])
+@pytest.mark.parametrize("host", ["127.0.0.1", "[::1]"])
 def test_loopback_listener_takes_the_redirect_on_either_address_of_localhost(host: str) -> None:
     # The redirect names `localhost`, which a browser may resolve to ::1 and never retry.
+    if host == "[::1]":
+        need_ipv6()
+
     with LoopbackListener("expected") as listener:
-        redirect_to(f"{host}:{urlsplit(listener.redirect_uri).port}")
+        redirect_to(f"{host}:{port_of(listener)}")
 
         assert listener.wait(timeout=1) == "from-browser"
 
 
-@pytest.mark.parametrize("family", [socket.AF_INET, socket.AF_INET6])
+def test_loopback_listener_once_left_holds_no_address_and_no_thread() -> None:
+    need_ipv6()
+    threads = threading.active_count()
+
+    with LoopbackListener("expected") as listener:
+        port = port_of(listener)
+
+    assert not held("127.0.0.1", port)
+    assert not held("::1", port)
+    assert threading.active_count() <= threads
+
+
+def test_loopback_listener_that_cannot_start_leaves_nothing_behind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    need_ipv6()
+    listener = LoopbackListener("expected")
+    threads = threading.active_count()
+    start = threading.Thread.start
+    started: list[threading.Thread] = []
+
+    def start_only_one(thread: threading.Thread) -> None:
+        if started:
+            raise RuntimeError("can't start new thread")  # what a process out of them is told
+        started.append(thread)
+        start(thread)
+
+    monkeypatch.setattr(threading.Thread, "start", start_only_one)
+
+    with pytest.raises(RuntimeError, match="can't start new thread"), listener:
+        pass
+
+    assert not held("127.0.0.1", port_of(listener))
+    assert not held("::1", port_of(listener))
+    assert threading.active_count() <= threads
+
+
+@pytest.mark.parametrize(
+    "family", [socket.AF_INET, socket.AF_INET6], ids=lambda family: family.name
+)
 def test_loopback_listener_is_out_of_reach_from_the_network(family: socket.AddressFamily) -> None:
     address = address_on_the_network(family)
     if address is None:
@@ -429,7 +504,7 @@ def test_loopback_listener_is_out_of_reach_from_the_network(family: socket.Addre
     with LoopbackListener("expected") as listener, socket.socket(family) as caller:
         caller.settimeout(2)
         with pytest.raises(OSError):
-            caller.connect((address, urlsplit(listener.redirect_uri).port))
+            caller.connect((address, port_of(listener)))
 
 
 @pytest.mark.parametrize("missing", [errno.EAFNOSUPPORT, errno.EADDRNOTAVAIL])
@@ -439,7 +514,7 @@ def test_loopback_listener_serves_ipv4_alone_on_a_host_without_ipv6(
     fail_ipv6(monkeypatch, missing)
 
     with LoopbackListener("expected") as listener:
-        redirect_to(f"127.0.0.1:{urlsplit(listener.redirect_uri).port}")
+        redirect_to(f"127.0.0.1:{port_of(listener)}")
 
         assert listener.wait(timeout=1) == "from-browser"
 
@@ -457,19 +532,20 @@ def test_loopback_listener_does_not_take_a_failing_ipv6_for_a_missing_one(
     assert refused.value.errno == errno.EMFILE
 
 
-@needs_ipv6
 def test_loopback_listener_never_shares_its_port_with_a_stranger_on_ipv6() -> None:
     # Listening on 127.0.0.1 alone would leave a browser that resolves `localhost` to ::1
     # handing the redirect, and the code in it, to whoever holds the port there.
-    with socket.socket(socket.AF_INET6) as stranger:
-        stranger.bind(("::1", 0))
-        stranger.listen()
+    need_ipv6()
 
+    with stranger_on_ipv6() as port:
         with pytest.raises(
             OSError,
             match=r"cannot listen for the login redirect on \[::1\]:\d+: Address already in use",
-        ):
-            LoopbackListener("expected", port=stranger.getsockname()[1])
+        ) as refused:  # kept, and with it whatever the listener still holds
+            LoopbackListener("expected", port=port)
+
+        assert not held("127.0.0.1", port)
+        assert refused.value.errno == errno.EADDRINUSE
 
 
 def test_a_login_no_browser_ever_finishes_points_to_the_headless_way_in(
@@ -482,6 +558,21 @@ def test_a_login_no_browser_ever_finishes_points_to_the_headless_way_in(
     assert main(["--config", str(config), "login", "--timeout", "0.05"]) == 2
 
     assert "navimow-collector login --no-browser" in capsys.readouterr().err
+
+
+def test_a_login_that_cannot_listen_points_to_the_headless_way_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = tmp_path / "collector.toml"
+    config.write_text(f'[auth]\nstate_file = "{tmp_path / "tokens.json"}"\n')
+    monkeypatch.setattr("webbrowser.open", lambda url: False)
+    fail_ipv6(monkeypatch, errno.EMFILE)
+
+    assert main(["--config", str(config), "login", "--timeout", "0.05"]) == 2
+
+    err = capsys.readouterr().err
+    assert "cannot listen for the login redirect on [::1]" in err
+    assert "navimow-collector login --no-browser" in err
 
 
 def test_login_command_exchanges_a_pasted_redirect_url_and_saves_it(

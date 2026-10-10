@@ -13,7 +13,7 @@ import socket
 import tempfile
 import threading
 from collections.abc import Awaitable, Callable, Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from enum import StrEnum
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -530,16 +530,13 @@ class LoopbackListener:
                 return None
 
         self._servers = _loopback_servers(port, CallbackHandler)
-        # Polled often: leaving the listener waits out one poll for each address.
-        self._threads = [
-            threading.Thread(target=server.serve_forever, args=(0.1,), daemon=True)
-            for server in self._servers
-        ]
+        self._serving = ExitStack()
 
     @property
     def redirect_uri(self) -> str:
         # `localhost`, not 127.0.0.1: the vendor's redirect validation is undocumented, and
         # the only loopback form known to be accepted is http://localhost:1/callback.
+        # Any of the servers gives the port: they hold the one.
         return f"http://localhost:{self._servers[0].server_port}/callback"
 
     def _accept(self, path: str) -> bool:
@@ -556,15 +553,20 @@ class LoopbackListener:
             return True
 
     def __enter__(self) -> LoopbackListener:
-        for thread in self._threads:
-            thread.start()
+        with ExitStack() as started:  # undone here, should a thread not start
+            for server in self._servers:
+                started.callback(server.server_close)
+            for server in self._servers:
+                # Polled often: leaving the listener waits out one poll for each address.
+                thread = threading.Thread(target=server.serve_forever, args=(0.1,), daemon=True)
+                thread.start()
+                started.callback(thread.join)
+                started.callback(server.shutdown)
+            self._serving = started.pop_all()
         return self
 
     def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
-        for server, thread in zip(self._servers, self._threads, strict=True):
-            server.shutdown()
-            server.server_close()
-            thread.join()
+        self._serving.close()
 
     def wait(self, timeout: float) -> str:
         """Wait for exactly one valid redirect instead of trusting arbitrary local traffic."""
