@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import fcntl
 import json
 import logging
 import os
 import re
+import socket
 import tempfile
 import threading
 from collections.abc import Awaitable, Callable, Iterator
@@ -32,6 +34,8 @@ MQTT_OAUTH_ERROR = "CODE_OAUTH_INFO_ILLEGAL"
 # written beside the service is acted on within a minute.
 POLL_SECONDS = 60
 DEFAULT_LIFETIME_SECONDS = 3600
+# How many ports the login listener asks for before giving up on one free on both loopbacks.
+_PORT_ATTEMPTS = 5
 
 _LOGGER = logging.getLogger(__name__)
 # Vendor prose meaning the grant itself is dead, so only a new login helps...
@@ -476,6 +480,27 @@ def authorization_url(client_id: str, redirect_uri: str, state: str) -> str:
     return f"{AUTHORIZE_URL}&{urlencode(parameters)}"
 
 
+class _IPv6Server(ThreadingHTTPServer):
+    address_family = socket.AF_INET6
+
+
+def _loopback_servers(
+    port: int, handler: type[BaseHTTPRequestHandler]
+) -> list[ThreadingHTTPServer]:
+    """One port on both loopback addresses: `localhost` may resolve to ::1 first, and not
+    every browser then tries 127.0.0.1. A host without IPv6 is served on 127.0.0.1 alone."""
+    for _ in range(_PORT_ATTEMPTS):
+        ipv4 = ThreadingHTTPServer(("127.0.0.1", port), handler)
+        try:
+            return [ipv4, _IPv6Server(("::1", ipv4.server_port), handler)]
+        except OSError as error:
+            if error.errno != errno.EADDRINUSE:
+                return [ipv4]
+            # Another process holds this port on ::1, and would be handed the redirect.
+            ipv4.server_close()
+    raise OSError(errno.EADDRINUSE, "no port is free on both 127.0.0.1 and ::1")
+
+
 class LoopbackListener:
     """A short-lived local callback server which rejects a redirect with the wrong state."""
 
@@ -501,14 +526,16 @@ class LoopbackListener:
             def log_message(self, format: str, *args: object) -> None:
                 return None
 
-        self._server = ThreadingHTTPServer(("127.0.0.1", port), CallbackHandler)
-        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._servers = _loopback_servers(port, CallbackHandler)
+        self._threads = [
+            threading.Thread(target=server.serve_forever, daemon=True) for server in self._servers
+        ]
 
     @property
     def redirect_uri(self) -> str:
         # `localhost`, not 127.0.0.1: the vendor's redirect validation is undocumented, and
         # the only loopback form known to be accepted is http://localhost:1/callback.
-        return f"http://localhost:{self._server.server_port}/callback"
+        return f"http://localhost:{self._servers[0].server_port}/callback"
 
     def _accept(self, path: str) -> bool:
         parsed = urlparse(path)
@@ -524,13 +551,15 @@ class LoopbackListener:
             return True
 
     def __enter__(self) -> LoopbackListener:
-        self._thread.start()
+        for thread in self._threads:
+            thread.start()
         return self
 
     def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
-        self._server.shutdown()
-        self._server.server_close()
-        self._thread.join()
+        for server, thread in zip(self._servers, self._threads, strict=True):
+            server.shutdown()
+            server.server_close()
+            thread.join()
 
     def wait(self, timeout: float) -> str:
         """Wait for exactly one valid redirect instead of trusting arbitrary local traffic."""

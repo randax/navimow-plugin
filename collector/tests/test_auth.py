@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import socket
 import subprocess
 import sys
 import threading
@@ -16,7 +17,7 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from mower_sdk.http import HTTPClientError, UrllibSession
@@ -39,6 +40,19 @@ from .conftest import Clock
 REJECTED_REFRESH = "Refresh token is invalid or server rejected the request"
 TOO_FREQUENT = "Request too frequent. Please retry after 1 minute."
 CIRCUIT_BREAKER = "url Circuit Breaker"
+
+
+def has_ipv6_loopback() -> bool:
+    """Whether this host has a ::1 to listen on, which a container often has not."""
+    try:
+        with socket.socket(socket.AF_INET6) as probe:
+            probe.bind(("::1", 0))
+    except OSError:
+        return False
+    return True
+
+
+needs_ipv6 = pytest.mark.skipif(not has_ipv6_loopback(), reason="this host has no IPv6 loopback")
 
 
 class Response:
@@ -359,6 +373,43 @@ def test_loopback_listener_captures_and_validates_the_redirect() -> None:
             pass
 
         assert listener.wait(timeout=1) == "from-browser"
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", pytest.param("[::1]", marks=needs_ipv6)])
+def test_loopback_listener_takes_the_redirect_on_either_address_of_localhost(host: str) -> None:
+    # The redirect names `localhost`, which a browser may resolve to ::1 and never retry.
+    with LoopbackListener("expected") as listener:
+        port = urlsplit(listener.redirect_uri).port
+        with urllib.request.urlopen(
+            f"http://{host}:{port}/callback?code=from-browser&state=expected"
+        ):
+            pass
+
+        assert listener.wait(timeout=1) == "from-browser"
+
+
+@needs_ipv6
+def test_loopback_listener_never_shares_its_port_with_a_stranger_on_ipv6() -> None:
+    # Listening on 127.0.0.1 alone would leave a browser that resolves `localhost` to ::1
+    # handing the redirect, and the code in it, to whoever holds the port there.
+    with socket.socket(socket.AF_INET6) as stranger:
+        stranger.bind(("::1", 0))
+        stranger.listen()
+
+        with pytest.raises(OSError):
+            LoopbackListener("expected", port=stranger.getsockname()[1])
+
+
+def test_a_login_no_browser_ever_finishes_points_to_the_headless_way_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = tmp_path / "collector.toml"
+    config.write_text(f'[auth]\nstate_file = "{tmp_path / "tokens.json"}"\n')
+    monkeypatch.setattr("webbrowser.open", lambda url: False)  # no browser on this machine
+
+    assert main(["--config", str(config), "login", "--timeout", "0.05"]) == 2
+
+    assert "navimow-collector login --no-browser" in capsys.readouterr().err
 
 
 def test_login_command_exchanges_a_pasted_redirect_url_and_saves_it(
